@@ -1,0 +1,7 @@
+temp.json
+out/*
+uml/*
+*/__pycache__/*
+*.pyc
+*.db
+.vscode/*
