@@ -23,3 +23,13 @@ platforms:
       name: "抖音"
     - id: "zhihu"
       name: "知乎"
+
+weight:
+  rank_threshold: 10
+  weight_config:
+    RANK_WEIGHT: 0.6
+    FREQUENCY_WEIGHT: 0.3
+    HOTNESS_WEIGHT: 0.1
+
+llm_executor:
+  max_workers: 20

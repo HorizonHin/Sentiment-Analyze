@@ -175,22 +175,3 @@ class LLMTitleAnalyzer:
         for title in titles:
             results.append(self.analyze_title(title))
         return results
-
-
-def analyze_title(title: str) -> dict[str, Any]:
-    analyzer = LLMTitleAnalyzer()
-    return analyzer.analyze_title(title)
-
-
-def analyze_titles(titles: list[str]) -> list[dict[str, Any]]:
-    analyzer = LLMTitleAnalyzer()
-    return analyzer.analyze_titles(titles)
-
-
-if __name__ == "__main__":
-    sample = "华为2026春季新品发布会，网友对其自研芯片能力保有高度期待"
-    try:
-        result = analyze_title(sample)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-    except Exception as exc:
-        print(f"分析失败，原因：{exc}")

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from flask import Flask, jsonify
+import yaml
 
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 if str(_WORKSPACE_ROOT) not in sys.path:
@@ -32,12 +33,21 @@ def create_app() -> Flask:
 
     root_dir = Path(__file__).resolve().parent.parent
     config_path = root_dir / "config.yaml"
+    with config_path.open("r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+
+    llm_executor_config = config.get("llm_executor") or {}
+    try:
+        llm_max_workers = max(1, int(llm_executor_config.get("max_workers", 32)))
+    except (TypeError, ValueError):
+        llm_max_workers = 32
     db_path = os.getenv("NEWS_DB_PATH")
     storage = SQLiteStorageBackend(db_path=db_path) if db_path else SQLiteStorageBackend()
     crawler = ScheduledCrawler(
         config_path=config_path,
         storage=storage,
         interval_seconds=get_interval_seconds_from_env(),
+        llm_max_workers=llm_max_workers,
     )
 
     app.config["crawler"] = crawler
