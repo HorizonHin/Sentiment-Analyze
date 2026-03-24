@@ -18,7 +18,7 @@ from SentimentAnalyzeServer.application.sentimentAnalyzeAppsService import Senti
 _DEFAULT_INTERVAL_SECONDS = 30 * 60
 
 
-class ScheduledCrawler:
+class Scheduled:
     def __init__(
         self,
         config_path: str | Path,

@@ -15,11 +15,11 @@ _WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 if str(_WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(_WORKSPACE_ROOT))
 
-from SentimentAnalyzeServer.application.scheduled_crawler import (
-    ScheduledCrawler,
+from SentimentAnalyzeServer.application.scheduled import (
+    Scheduled,
     get_interval_seconds_from_env,
 )
-from SentimentAnalyzeServer.domain.news.sqlite_backend import SQLiteStorageBackend
+from SentimentAnalyzeServer.domain.news.mssql_backend import MSSQLStorageBackend
 
 
 def _should_start_scheduler(app: Flask) -> bool:
@@ -41,16 +41,36 @@ def create_app() -> Flask:
         llm_max_workers = max(1, int(llm_executor_config.get("max_workers", 32)))
     except (TypeError, ValueError):
         llm_max_workers = 32
-    db_path = os.getenv("NEWS_DB_PATH")
-    storage = SQLiteStorageBackend(db_path=db_path) if db_path else SQLiteStorageBackend()
-    crawler = ScheduledCrawler(
+    
+    # MSSQL 配置优先级: 配置文件 > 环境变量 > 默认值
+    mssql_config = config.get("mssql") or {}
+    mssql_server = mssql_config.get("server") or os.getenv("MSSQL_SERVER") or "localhost"
+    mssql_database = mssql_config.get("database") or os.getenv("MSSQL_DATABASE") or "sentiment_analyze"
+    mssql_username = mssql_config.get("username") or os.getenv("MSSQL_USERNAME") or "18020"
+    mssql_password = mssql_config.get("password") or os.getenv("MSSQL_PASSWORD") or ""
+    mssql_driver = mssql_config.get("driver") or "ODBC Driver 17 for SQL Server"
+    
+    # 初始化数据库存储后端，失败则停止应用
+    try:
+        storage = MSSQLStorageBackend(
+            server=mssql_server,
+            database=mssql_database,
+            username=mssql_username,
+            password=mssql_password,
+            driver=mssql_driver,
+        )
+    except RuntimeError as e:
+        print(f"[错误] {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    scheduler = Scheduled(
         config_path=config_path,
         storage=storage,
         interval_seconds=get_interval_seconds_from_env(),
         llm_max_workers=llm_max_workers,
     )
 
-    app.config["crawler"] = crawler
+    app.config["scheduler"] = scheduler
 
     @app.get("/health")
     def health() -> Any:
@@ -58,11 +78,11 @@ def create_app() -> Flask:
 
     @app.post("/tasks/crawl/run")
     def run_crawl_once() -> Any:
-        result = crawler.run_once()
+        result = scheduler.run_once()
         return jsonify(result)
 
     if _should_start_scheduler(app):
-        crawler.start()
+        scheduler.start()
 
     return app
 

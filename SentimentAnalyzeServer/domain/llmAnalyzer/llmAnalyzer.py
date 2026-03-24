@@ -1,8 +1,10 @@
 ﻿import json
 import os
+import random
+import time
 from typing import Any
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 
 EVENT_TYPE_MAP = {
@@ -28,7 +30,7 @@ ENTITY_TYPE_SET = {"company", "product", "person", "policy", "org", "unknown"}
 class LLMTitleAnalyzer:
     def __init__(
         self,
-        model: str = "qwen3.5-flash",
+        model: str = "qwen-turbo-2025-07-15", #qwen3.5-flash
         base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
     ) -> None:
         api_key = os.getenv("Qwen_SentimentAnalyze")
@@ -36,8 +38,11 @@ class LLMTitleAnalyzer:
             raise ValueError("Missing API key 'Qwen_SentimentAnalyze'.")
 
         self.model = model
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(api_key=api_key, base_url=base_url
+                            )
         self.prompt_file = os.path.join(os.path.dirname(__file__), "system_prompt.txt")
+        self.max_retries = 5
+        self.initial_retry_delay = 1.0
 
     def _get_system_prompt(self) -> str:
         with open(self.prompt_file, "r", encoding="utf-8") as f:
@@ -146,32 +151,49 @@ class LLMTitleAnalyzer:
         if not title or not title.strip():
             raise ValueError("title cannot be empty")
 
-        messages = [
-            {"role": "system", "content": self._get_system_prompt()},
-            {
-                "role": "user",
-                "content": (
-                    "请分析以下新闻标题并输出 json。仅输出 json，不要输出任何解释。"
-                    f"\n标题：{title}"
-                ),
-            },
-        ]
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                messages = [
+                    {"role": "system", "content": self._get_system_prompt()},
+                    {
+                        "role": "user",
+                        "content": (
+                            "请分析以下新闻标题并输出 json。仅输出 json，不要输出任何解释。"
+                            f"\n标题：{title}"
+                        ),
+                    },
+                ]
 
-        completion = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=0.1,
-            response_format={"type": "json_object"},
-        )
+                completion = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=0.1,
+                    response_format={"type": "json_object"},
+                    extra_body={"enable_thinking": False}
+                )
 
-        raw_content = completion.choices[0].message.content or ""
-        # print("Raw LLM reply:", raw_content)
-        payload = json.loads(self._strip_json_fence(raw_content))
-        formatted_result = self._normalize_result(payload)
-        return formatted_result
+                raw_content = completion.choices[0].message.content or ""
+                payload = json.loads(self._strip_json_fence(raw_content))
+                formatted_result = self._normalize_result(payload)
+                return formatted_result
+            except RateLimitError as e:
+                if attempt < self.max_retries:
+                    wait_seconds = self.initial_retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                    time.sleep(wait_seconds)
+                    continue
+                print(f"LLM 分析标题连续触发速率限制，已超过重试次数。标题: {title}")
+                raise
+            except Exception as e:
+                print(f"LLM 分析标题异常 (非速率限制)。标题: {title}，异常: {e}")
+                raise
 
     def analyze_titles(self, titles: list[str]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for title in titles:
-            results.append(self.analyze_title(title))
+            try:
+                results.append(self.analyze_title(title))
+            except Exception as e:
+                print(f"分析标题列表时遇到异常，跳过该标题。标题: {title}，异常: {e}")
+                continue
         return results
+

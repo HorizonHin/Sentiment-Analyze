@@ -268,15 +268,15 @@ class StorageBackend(ABC):
     """
 
     @abstractmethod
-    def add_news_data(self, data: NewsData) -> Optional[NewsData]:
+    def add_news_items(self, news_list: List[NewsItem]) -> List[NewsItem]:
         """
         保存新闻数据
 
         Args:
-            data: 新闻数据
+            news_list: 新闻条目列表
 
         Returns:
-            保存成功后的数据，失败时返回 None
+            保存成功后的新闻条目列表
         """
         pass
 
@@ -284,6 +284,12 @@ class StorageBackend(ABC):
     def update_news_list(self, news_list: List[NewsItem]) -> bool:
         """根据 NewsItem.id 批量更新新闻数据。"""
         pass
+
+    def update_crawled_news_list(self, news_list: List[NewsItem]) -> List[NewsItem]:
+        """仅更新抓取引起变化的字段（例如 rank/url/last_time/timeline）。"""
+        if self.update_news_list(news_list):
+            return news_list
+        return []
 
     @abstractmethod
     def get_news_list_by_source_title_list(self, source_title_list: List[tuple[str, str]]) -> List[NewsItem]:
@@ -514,41 +520,63 @@ class NewsDomainService:
             self.set_total_weight(target)
         return target
 
-    def add_news_data(self, data: NewsData) -> Optional[NewsData]:
-        incoming_items: List[NewsItem] = []
+    def add_news_items(self, data: NewsData) -> List[NewsItem]:
+        news_items = self.expand_news_data_to_items(data)
+        key_list = list({(item.source_id, item.title) for item in news_items if item.source_id and item.title})
+        if not key_list:
+            return []
+
+        for item in news_items:
+            self.set_total_weight(item)
+
+        saved = self.storage.add_news_items(news_items)
+        return saved
+
+    def add_news_items(self, news_list: List[NewsItem]) -> List[NewsItem]:
+        key_list = list({(item.source_id, item.title) for item in news_list if item.source_id and item.title})
+        if not key_list:
+            return []
+
+        for item in news_list:
+            self.set_total_weight(item)
+
+        return self.storage.add_news_items(news_list)
+
+    def expand_news_data_to_items(self, data: NewsData) -> List[NewsItem]:
+        news_items: List[NewsItem] = []
         for news_list in data.items.values():
-            incoming_items.extend(news_list)
+            news_items.extend(news_list)
+        return news_items
+    
+    def group_news_items_to_news_data(self, news_items: List[NewsItem]) -> NewsData:
+        items: Dict[str, List[NewsItem]] = {}
+        for item in news_items:
+            if item.source_id not in items:
+                items[item.source_id] = []
+            items[item.source_id].append(item)
 
-        if not incoming_items:
-            return self.storage.add_news_data(data)
-
-        key_list = list({(item.source_id, item.title) for item in incoming_items if item.source_id and item.title})
-        existing_items = self.get_news_list_by_source_title_list(key_list)
-        existing_map = {(item.source_id, item.title): item for item in existing_items}
-
-        merged_items_by_source: Dict[str, List[NewsItem]] = {}
-        for incoming in incoming_items:
-            key = (incoming.source_id, incoming.title)
-            existing = existing_map.get(key)
-
-            if existing:
-                merged = self.applyNewsField(incoming, existing)
-            else:
-                # 保留新增新闻
-                merged = incoming
-
-            self.set_total_weight(merged)
-            merged_items_by_source.setdefault(merged.source_id, []).append(merged)
-
-        merged_data = NewsData(
-            date=data.date,
-            last_time=data.last_time,
-            items=merged_items_by_source,
-            id_to_name=data.id_to_name,
-            failed_ids=data.failed_ids,
+        crawl_date = news_items[0].first_time[:10] if news_items and news_items[0].last_time else ""
+        last_time = news_items[0].last_time if news_items and news_items[0].last_time else ""
+        return NewsData(
+            date=crawl_date,
+            last_time=last_time,
+            items=items,
         )
-        return self.storage.add_news_data(merged_data)
-
+    
+    def update_existing_crawled_titles(self, news_list: List[NewsItem]) -> List[NewsItem]:
+        if not news_list:
+            return []
+    
+        key_list = list({(item.source_id, item.title) for item in news_list if item.source_id and item.title})
+        if not key_list:
+            return []
+    
+        for item in news_list:
+            self.set_total_weight(item)
+    
+        ok = self.storage.update_crawled_news_list(news_list)
+        return ok
+    
     def get_news_list_by_source_title_list(self, source_title_list: List[tuple[str, str]]) -> List[NewsItem]:
         return self.storage.get_news_list_by_source_title_list(source_title_list)
 
@@ -561,7 +589,7 @@ class NewsDomainService:
             return False
 
         existing_items = self.get_news_list_by_source_title_list(key_list)
-        existing_map = {(item.source_id, item.title): item for item in existing_items}
+        existing_map = self.group_news_items_to_news_data(existing_items).items
 
         merged_items: List[NewsItem] = []
         for incoming in news_list:

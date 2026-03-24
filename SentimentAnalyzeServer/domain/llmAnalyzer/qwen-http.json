@@ -1,0 +1,45 @@
+
+POST https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions \
+-"Authorization: Bearer $Qwen_SentimentAnalyze" \
+-"Content-Type: application/json" \
+{
+  "model": "qwen-plus",
+  "messages": [
+    {
+      "role": "system",
+      "content": "请抽取用户的姓名与年龄信息，以JSON格式返回"
+    },
+    {
+      "role": "user",
+      "content": "大家好，我叫刘五，今年34岁，邮箱是liuwu@example.com"
+    }
+  ],
+  "response_format": {
+    "type": "json_object"
+  },
+  "enable_thinking": false
+},
+{
+  "model": "qwen-plus",
+  "id": "chatcmpl-e36abf2a-8a1a-9bce-8489-8e4adbc0f949",
+  "choices": [
+    {
+      "message": {
+        "content": "{\n  \"姓名\": \"刘五\",\n  \"年龄\": 34\n}",
+        "role": "assistant"
+      },
+      "index": 0,
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1774261118,
+  "object": "chat.completion",
+  "usage": {
+    "total_tokens": 65,
+    "completion_tokens": 18,
+    "prompt_tokens": 47,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  }
+}
