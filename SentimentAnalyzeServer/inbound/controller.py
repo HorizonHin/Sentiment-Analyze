@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from flask import Blueprint, jsonify, request
@@ -39,8 +39,10 @@ def create_external_controller(
 	@bp.get("/news/latest-ranked")
 	def get_latest_ranked_news() -> object:
 		try:
-			start_time = _parse_datetime(request.args.get("start_time"))
-			end_time = _parse_datetime(request.args.get("end_time"))
+			default_start_time = datetime.now() - timedelta(hours=1)
+			default_end_time = datetime.now()
+			start_time = _parse_datetime(request.args.get("start_time")) or default_start_time
+			end_time = _parse_datetime(request.args.get("end_time")) or default_end_time
 
 			grouped = sentiment_app_service.get_analyzed_news_grouped_by_latest_time(
 				start_time=start_time,
@@ -57,8 +59,11 @@ def create_external_controller(
 	@bp.get("/topics/trending")
 	def get_trending_topics() -> object:
 		try:
-			topics = topic_app_service.get_trending_topics()
-			return jsonify(Result.success_result([topic.to_dict() for topic in topics]).to_dict())
+			result = topic_app_service.get_trending_topics()
+			if result.success:
+				return jsonify(result.to_dict())
+			else:
+				return jsonify(result.to_dict()), 404
 		except Exception as exc:
 			return jsonify(Result.failure_result(str(exc)).to_dict()), 500
 

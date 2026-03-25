@@ -86,6 +86,7 @@ class SentimentAnalyzeAppService:
 				"persisted_count": len(updated_items),
 			},
 		)
+		logger.info("Sentiment analysis flow completed successfully. persisted_count=%s", len(updated_items))
 		return True
 
 	def _analyze_with_retry(self, item: NewsItem) -> Optional[NewsItem]:
@@ -162,6 +163,7 @@ class SentimentAnalyzeAppService:
 				item.controversy_score = float(dimensions.get("controversy", 0.0))
 
 		item.analyzed_time = datetime.now()
+		item.deduplicate_entities_and_keywords()
 
 	def filter_news_items_not_analyzed(self, items: List[NewsItem]) -> List[NewsItem]:
 		return [

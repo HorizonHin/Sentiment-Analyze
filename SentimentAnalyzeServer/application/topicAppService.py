@@ -3,10 +3,15 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from datetime import datetime
+import logging
 from typing import Dict, List, Optional
 
 from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsDomainService, NewsItem
 from SentimentAnalyzeServer.domain.topic.topic import Topic, TopicDomainService
+from application.common import Result
+
+
+logger = logging.getLogger(__name__)
 
 
 class TopicCacheManager(ABC):
@@ -107,6 +112,8 @@ class TopicAppService:
         entity_ids: List[int],
         start_time: datetime,
         end_time: datetime,
+        keyword_terms: Optional[List[str]] = None,
+        entity_names: Optional[List[str]] = None,
     ) -> List[Topic]:
         """
         - 输入 keyword id list、entity id list
@@ -115,7 +122,10 @@ class TopicAppService:
         """
         keyword_id_set = {int(i) for i in keyword_ids if int(i) > 0}
         entity_id_set = {int(i) for i in entity_ids if int(i) > 0}
-        if not keyword_id_set and not entity_id_set:
+        keyword_term_set = {str(term).strip() for term in (keyword_terms or []) if str(term).strip()}
+        entity_name_set = {str(name).strip() for name in (entity_names or []) if str(name).strip()}
+
+        if not keyword_id_set and not entity_id_set and not keyword_term_set and not entity_name_set:
             return []
 
         topic_news_map: Dict[str, List[NewsItem]] = defaultdict(list)
@@ -130,7 +140,12 @@ class TopicAppService:
             for item in keyword_news_items:
                 for keyword in item.keywords:
                     topic_name = keyword.term.strip()
-                    if int(keyword.id) not in keyword_id_set or not topic_name:
+                    if not topic_name:
+                        continue
+                    if keyword_term_set:
+                        if topic_name not in keyword_term_set:
+                            continue
+                    elif int(keyword.id) not in keyword_id_set:
                         continue
                     if int(item.id) in topic_item_ids_map[topic_name]:
                         continue
@@ -146,7 +161,12 @@ class TopicAppService:
             for item in entity_news_items:
                 for entity in item.entities:
                     topic_name = entity.name.strip()
-                    if int(entity.id) not in entity_id_set or not topic_name:
+                    if not topic_name:
+                        continue
+                    if entity_name_set:
+                        if topic_name not in entity_name_set:
+                            continue
+                    elif int(entity.id) not in entity_id_set:
                         continue
                     if int(item.id) in topic_item_ids_map[topic_name]:
                         continue
@@ -183,16 +203,44 @@ class TopicAppService:
 
         keyword_ids = [int(keyword.id) for keyword in recommended_keywords if int(keyword.id) > 0]
         entity_ids = [int(entity.id) for entity in recommended_entities if int(entity.id) > 0]
+        keyword_terms = [keyword.term.strip() for keyword in recommended_keywords if keyword.term and keyword.term.strip()]
+        entity_names = [entity.name.strip() for entity in recommended_entities if entity.name and entity.name.strip()]
 
         topics = self.build_topics_by_keyword_entity_ids(
             keyword_ids=keyword_ids,
             entity_ids=entity_ids,
+            keyword_terms=keyword_terms,
+            entity_names=entity_names,
             start_time=start_time,
             end_time=end_time,
         )
 
         self.topic_cache_manager.save_topics(topics, limit=cache_limit)
+
+        logger.info(
+            "Topic recommendation cached successfully. topic_count=%s, top_n=%s, cache_limit=%s",
+            len(topics),
+            top_n,
+            cache_limit,
+        )
+        
         return topics
 
-    def get_trending_topics(self) -> List[Topic]:
-        return self.topic_cache_manager.get_topics()
+    def get_trending_topics(self) -> Result:
+        cache_topics = self.topic_cache_manager.get_topics()
+        if cache_topics:
+            return Result.success_result(cache_topics)
+        else:
+            now = datetime.now()
+            start_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_time = now
+            self.recommend_and_cache_topics(
+                start_time=start_time,
+                end_time=end_time,
+                top_n=10,
+                cache_limit=15,
+            )
+            refreshed_topics = self.topic_cache_manager.get_topics()
+            if refreshed_topics:
+                return Result.success_result(refreshed_topics)
+            return Result.failure_result("没有找到热门话题，系统正在重新计算")

@@ -1,0 +1,3 @@
+[submodule "Sentiment-Analyze-Vue"]
+	path = Sentiment-Analyze-Vue
+	url = https://github.com/pure-admin/pure-admin-thin.git

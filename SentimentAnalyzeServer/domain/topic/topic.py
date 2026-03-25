@@ -248,8 +248,8 @@ class TopicDomainService:
 		for item in news_items:
 			if not isinstance(item, NewsItem):
 				continue
-			rank_key = Topic.build_rank_key(item)
-			topic.rank_data.setdefault(rank_key, []).append(item)
+			source_key = (item.source_id or "").strip() or "unknown"
+			topic.rank_data.setdefault(source_key, []).append(item)
 			topic.total_weight += item.total_weigh
 			topic.news_count += 1
 			if item.first_time and (topic.start_time is None or item.first_time < topic.start_time):

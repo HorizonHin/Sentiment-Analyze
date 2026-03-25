@@ -101,6 +101,24 @@ class NewsItem:
         """出现次数由 rank_timeline 长度动态计算。"""
         return len(self.rank_timeline_obj)
 
+    def deduplicate_entities_and_keywords(self) -> None:
+        """去重 entities（按 name+type） 和 keywords（按 term）"""
+        # 去重 entities: 保留首次出现的，保留最高权重
+        seen_entities: Dict[Tuple[str, str], Entity] = {}
+        for entity in self.entities:
+            key = (entity.name.strip(), entity.type.strip())
+            if key not in seen_entities or entity.weigh > seen_entities[key].weigh:
+                seen_entities[key] = entity
+        self.entities = list(seen_entities.values())
+
+        # 去重 keywords: 保留首次出现的，保留最高权重
+        seen_keywords: Dict[str, Keyword] = {}
+        for keyword in self.keywords:
+            key = keyword.term.strip()
+            if key not in seen_keywords or keyword.weigh > seen_keywords[key].weigh:
+                seen_keywords[key] = keyword
+        self.keywords = list(seen_keywords.values())
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
@@ -708,6 +726,8 @@ class NewsDomainService:
             )
         if src.total_weigh is not None:
             self._set_total_weight(target)
+        # 去重 entities 和 keywords
+        target.deduplicate_entities_and_keywords()
         return target
 
     def add_news_items(self, data: NewsData) -> List[NewsItem]:

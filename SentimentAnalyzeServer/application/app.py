@@ -41,9 +41,13 @@ from SentimentAnalyzeServer.inbound.workflow_event_subscribers import WorkflowEv
 
 
 def _should_start_scheduler(app: Flask) -> bool:
-    if not app.debug:
+    """在 debug 自动重载模式下，仅允许子进程启动定时器。"""
+    _ = app
+    run_main = os.environ.get("WERKZEUG_RUN_MAIN")
+    if run_main is None:
+        # 非 reloader 场景（生产或未启用调试重载）
         return True
-    return os.environ.get("WERKZEUG_RUN_MAIN") == "true"
+    return run_main == "true"
 
 
 def create_app() -> Flask:
@@ -110,6 +114,9 @@ def create_app() -> Flask:
         interval_seconds=get_interval_seconds_from_env(),
         llm_max_workers=llm_max_workers,
         data_fetcher_app_service=data_fetcher_app_service,
+        sentiment_app_service=sentiment_app_service,
+        topic_app_service=topic_app_service,
+        # run_immediately=not app.debug,
     )
 
     app.config["scheduler"] = scheduler
@@ -139,4 +146,4 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=True)

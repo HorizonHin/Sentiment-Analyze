@@ -53,8 +53,6 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 "Trusted_Connection=yes;"
             )
 
-        self._init_db()
-
     def _get_connection(self) -> pyodbc.Connection:
         conn = pyodbc.connect(self.connection_string, timeout=10)
         # conn.setdecoding(pyodbc.SQL_CHAR, encoding='utf-8')
@@ -149,6 +147,16 @@ class SqlServerNewsItemRepository(NewsItemRepository):
 
         return (time_value, rank_int)
 
+    def _normalize_source_title_key(self, source_id: object, title: object) -> Tuple[str, str]:
+        """标准化 (source_id, title) 键，避免空白差异导致重复判断不一致。"""
+        normalized_source_id = str(source_id or "").strip()
+        normalized_title = str(title or "").strip()
+        return normalized_source_id, normalized_title
+
+    def _is_unique_violation(self, error: pyodbc.Error) -> bool:
+        text = str(error)
+        return "2627" in text or "2601" in text or "UNIQUE KEY" in text.upper()
+
     def _upsert_rank_timeline_for_item(self, cursor: pyodbc.Cursor, item: NewsItem) -> None:
         """仅插入新的 rank_timeline 记录（id<=0）。"""
         news_item_id = int(item.id)
@@ -176,191 +184,112 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             if inserted and inserted[0] is not None:
                 point.id = int(inserted[0])
 
-    def _init_db(self) -> None:
-        conn = self._get_connection()
-        try:
-            cursor = conn.cursor()
-
-            # 创建 NewsItem 表
-            cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'NewsItem')
-                CREATE TABLE NewsItem (
-                    id INT PRIMARY KEY IDENTITY(1,1),
-                    news_date DATE NOT NULL,
-                    title NVARCHAR(500) NOT NULL,
-                    source_id NVARCHAR(100) NOT NULL,
-                    source_name NVARCHAR(100) DEFAULT '',
-                    event_type NVARCHAR(100) DEFAULT '',
-                    summary NVARCHAR(2000) DEFAULT '',
-                    latest_rank INT DEFAULT 0,
-                    url NVARCHAR(1000) DEFAULT '',
-                    mobile_url NVARCHAR(1000) DEFAULT '',
-                    sentiment_polarity NVARCHAR(50) DEFAULT '',
-                    positive_ratio FLOAT DEFAULT 0.0,
-                    negative_ratio FLOAT DEFAULT 0.0,
-                    neutral_ratio FLOAT DEFAULT 0.0,
-                    optimism_score FLOAT DEFAULT 0.0,
-                    trust_score FLOAT DEFAULT 0.0,
-                    controversy_score FLOAT DEFAULT 0.0,
-                    attention_score FLOAT DEFAULT 0.0,
-                    first_time DATETIME2 DEFAULT GETDATE(),
-                    last_time DATETIME2 DEFAULT GETDATE(),
-                    analyzed_time DATETIME2,
-                    total_weigh FLOAT DEFAULT 0.0,
-                    UNIQUE(source_id, title)
-                );
-            """)
-
-            # 创建 Keyword 表
-            cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Keyword')
-                CREATE TABLE Keyword (
-                    id INT PRIMARY KEY IDENTITY(1,1),
-                    news_item_id INT NOT NULL,
-                    term NVARCHAR(500) NOT NULL,
-                    last_time DATETIME2 DEFAULT GETDATE(),
-                    importance FLOAT DEFAULT 0.0,
-                    weigh FLOAT DEFAULT 0.0,
-                    FOREIGN KEY (news_item_id) REFERENCES NewsItem(id) ON DELETE CASCADE
-                );
-            """)
-
-            # 创建 Entity 表
-            cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Entity')
-                CREATE TABLE Entity (
-                    id INT PRIMARY KEY IDENTITY(1,1),
-                    news_item_id INT NOT NULL,
-                    name NVARCHAR(200) NOT NULL,
-                    entity_type NVARCHAR(100) NOT NULL,
-                    last_time DATETIME2 DEFAULT GETDATE(),
-                    weigh FLOAT DEFAULT 0.0,
-                    FOREIGN KEY (news_item_id) REFERENCES NewsItem(id) ON DELETE CASCADE
-                );
-            """)
-
-            cursor.execute("""
-                IF COL_LENGTH('Keyword', 'last_time') IS NULL AND COL_LENGTH('Keyword', 'create_time') IS NOT NULL
-                EXEC sp_rename 'Keyword.create_time', 'last_time', 'COLUMN';
-            """)
-
-            cursor.execute("""
-                IF COL_LENGTH('Entity', 'last_time') IS NULL AND COL_LENGTH('Entity', 'create_time') IS NOT NULL
-                EXEC sp_rename 'Entity.create_time', 'last_time', 'COLUMN';
-            """)
-
-            cursor.execute("""
-                IF COL_LENGTH('Keyword', 'last_time') IS NULL
-                ALTER TABLE Keyword ADD last_time DATETIME2 DEFAULT GETDATE();
-            """)
-
-            cursor.execute("""
-                IF COL_LENGTH('Entity', 'last_time') IS NULL
-                ALTER TABLE Entity ADD last_time DATETIME2 DEFAULT GETDATE();
-            """)
-
-            cursor.execute("""
-                IF COL_LENGTH('Keyword', 'weigh') IS NULL
-                ALTER TABLE Keyword ADD weigh FLOAT DEFAULT 0.0;
-            """)
-
-            cursor.execute("""
-                IF COL_LENGTH('Entity', 'weigh') IS NULL
-                ALTER TABLE Entity ADD weigh FLOAT DEFAULT 0.0;
-            """)
-
-            # 创建 rank_timeline 表
-            cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'rank_timeline')
-                CREATE TABLE rank_timeline (
-                    id INT PRIMARY KEY IDENTITY(1,1),
-                    news_item_id INT NOT NULL,
-                    timeline_time DATETIME2 NOT NULL,
-                    rank_value INT,
-                    FOREIGN KEY (news_item_id) REFERENCES NewsItem(id) ON DELETE CASCADE
-                );
-            """)
-
-            # 创建索引
-            cursor.execute("""
-                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_news_date_last' AND object_id = OBJECT_ID('NewsItem'))
-                CREATE INDEX idx_news_date_last ON NewsItem(source_id, title);
-            """)
-
-            cursor.execute("""
-                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_news_source' AND object_id = OBJECT_ID('NewsItem'))
-                CREATE INDEX idx_news_source ON NewsItem(source_id);
-            """)
-
-            cursor.execute("""
-                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_keyword_news' AND object_id = OBJECT_ID('Keyword'))
-                CREATE INDEX idx_keyword_news ON Keyword(news_item_id);
-            """)
-
-            cursor.execute("""
-                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_entity_news' AND object_id = OBJECT_ID('Entity'))
-                CREATE INDEX idx_entity_news ON Entity(news_item_id);
-            """)
-
-            cursor.execute("""
-                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_timeline_news' AND object_id = OBJECT_ID('rank_timeline'))
-                CREATE INDEX idx_timeline_news ON rank_timeline(news_item_id);
-            """)
-
-            conn.commit()
-        except pyodbc.Error as e:
-            conn.rollback()
-            raise RuntimeError(f"MSSQL 数据库初始化失败: {e}") from e
-        finally:
-            conn.close()
-
     def _replace_keyword_and_entity(self, conn: pyodbc.Connection, valid_news: List[NewsItem]) -> None:
         """插入新数据；已有数据更新 weigh 和 last_time 字段。"""
         cursor = conn.cursor()
 
         for item in valid_news:
+            if item.id is None or int(item.id) <= 0:
+                continue
             last_time = self._parse_datetime_value(item.last_time) or datetime.now()
-            weigh_value = float(item.total_weigh)
             for keyword in item.keywords:
+                term = str(keyword.term or "").strip()
+                if not term:
+                    continue
+                keyword_weigh = float(keyword.weigh if keyword.weigh is not None else item.total_weigh)
                 if keyword.id and int(keyword.id) > 0:
                     cursor.execute(
                         "UPDATE Keyword SET weigh = ?, last_time = ? WHERE id = ? AND news_item_id = ?",
-                        weigh_value,
+                        keyword_weigh,
                         last_time,
                         int(keyword.id),
                         int(item.id),
                     )
                     continue
+
                 cursor.execute(
-                    "INSERT INTO Keyword(news_item_id, term, last_time, importance, weigh) VALUES (?, ?, ?, ?, ?)",
-                    int(item.id),
-                    keyword.term,
+                    "UPDATE Keyword SET last_time = ?, importance = ?, weigh = ? WHERE news_item_id = ? AND term = ?",
                     last_time,
                     keyword.importance,
-                    weigh_value,
+                    keyword_weigh,
+                    int(item.id),
+                    term,
                 )
+                if cursor.rowcount and int(cursor.rowcount) > 0:
+                    continue
+
+                try:
+                    cursor.execute(
+                        "INSERT INTO Keyword(news_item_id, term, last_time, importance, weigh) VALUES (?, ?, ?, ?, ?)",
+                        int(item.id),
+                        term,
+                        last_time,
+                        keyword.importance,
+                        keyword_weigh,
+                    )
+                except pyodbc.Error as keyword_error:
+                    if not self._is_unique_violation(keyword_error):
+                        raise
+                    cursor.execute(
+                        "UPDATE Keyword SET last_time = ?, importance = ?, weigh = ? WHERE news_item_id = ? AND term = ?",
+                        last_time,
+                        keyword.importance,
+                        keyword_weigh,
+                        int(item.id),
+                        term,
+                    )
 
         for item in valid_news:
+            if item.id is None or int(item.id) <= 0:
+                continue
             last_time = self._parse_datetime_value(item.last_time) or datetime.now()
-            weigh_value = float(item.total_weigh)
             for entity in item.entities:
+                entity_name = str(entity.name or "").strip()
+                entity_type = str(entity.type or "").strip()
+                if not entity_name or not entity_type:
+                    continue
+                entity_weigh = float(entity.weigh if entity.weigh is not None else item.total_weigh)
                 if entity.id and int(entity.id) > 0:
                     cursor.execute(
                         "UPDATE Entity SET weigh = ?, last_time = ? WHERE id = ? AND news_item_id = ?",
-                        weigh_value,
+                        entity_weigh,
                         last_time,
                         int(entity.id),
                         int(item.id),
                     )
                     continue
+
                 cursor.execute(
-                    "INSERT INTO Entity(news_item_id, name, entity_type, last_time, weigh) VALUES (?, ?, ?, ?, ?)",
-                    int(item.id),
-                    entity.name,
-                    entity.type,
+                    "UPDATE Entity SET last_time = ?, weigh = ? WHERE news_item_id = ? AND name = ? AND entity_type = ?",
                     last_time,
-                    weigh_value,
+                    entity_weigh,
+                    int(item.id),
+                    entity_name,
+                    entity_type,
                 )
+                if cursor.rowcount and int(cursor.rowcount) > 0:
+                    continue
+
+                try:
+                    cursor.execute(
+                        "INSERT INTO Entity(news_item_id, name, entity_type, last_time, weigh) VALUES (?, ?, ?, ?, ?)",
+                        int(item.id),
+                        entity_name,
+                        entity_type,
+                        last_time,
+                        entity_weigh,
+                    )
+                except pyodbc.Error as entity_error:
+                    if not self._is_unique_violation(entity_error):
+                        raise
+                    cursor.execute(
+                        "UPDATE Entity SET last_time = ?, weigh = ? WHERE news_item_id = ? AND name = ? AND entity_type = ?",
+                        last_time,
+                        entity_weigh,
+                        int(item.id),
+                        entity_name,
+                        entity_type,
+                    )
 
     def _build_datetime_range_clause(
         self,
@@ -370,34 +299,81 @@ class SqlServerNewsItemRepository(NewsItemRepository):
     ) -> Tuple[str, List]:
         where_clauses: List[str] = []
         params: List = []
+        # Some historical MSSQL data stores datetime as NVARCHAR and may contain
+        # trailing dots (e.g. 2026-03-23 23:41:20.). Normalize before converting.
+        trimmed = f"LTRIM(RTRIM({column_name}))"
+        normalized_column = (
+            f"CASE WHEN RIGHT({trimmed}, 1) = '.' "
+            f"THEN LEFT({trimmed}, LEN({trimmed}) - 1) ELSE {trimmed} END"
+        )
+        converted_column = f"TRY_CONVERT(DATETIME2, {normalized_column})"
 
         start_dt = self._parse_datetime_value(start_time) if start_time else None
         end_dt = self._parse_datetime_value(end_time) if end_time else None
 
         if start_dt and end_dt:
             if start_dt <= end_dt:
-                where_clauses.append(f"{column_name} >= ? AND {column_name} <= ?")
+                where_clauses.append(f"{converted_column} >= ? AND {converted_column} <= ?")
                 params.extend([start_dt, end_dt])
             else:
-                where_clauses.append(f"({column_name} >= ? OR {column_name} <= ?)")
+                where_clauses.append(f"({converted_column} >= ? OR {converted_column} <= ?)")
                 params.extend([start_dt, end_dt])
         elif start_dt:
-            where_clauses.append(f"{column_name} >= ?")
+            where_clauses.append(f"{converted_column} >= ?")
             params.append(start_dt)
         elif end_dt:
-            where_clauses.append(f"{column_name} <= ?")
+            where_clauses.append(f"{converted_column} <= ?")
             params.append(end_dt)
 
         if not where_clauses:
             return "1=1", params
         return " AND ".join(where_clauses), params
 
+    def _build_normalized_datetime_text_range_clause(
+        self,
+        column_name: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> Tuple[str, List, str]:
+        """For NVARCHAR datetime columns, compare normalized text to avoid conversion errors."""
+        trimmed = f"LTRIM(RTRIM({column_name}))"
+        normalized_column = (
+            f"CASE WHEN RIGHT({trimmed}, 1) = '.' "
+            f"THEN LEFT({trimmed}, LEN({trimmed}) - 1) ELSE {trimmed} END"
+        )
+
+        start_dt = self._parse_datetime_value(start_time) if start_time else None
+        end_dt = self._parse_datetime_value(end_time) if end_time else None
+
+        where_clauses: List[str] = []
+        params: List = []
+
+        start_text = start_dt.strftime("%Y-%m-%d %H:%M:%S") if start_dt else None
+        end_text = end_dt.strftime("%Y-%m-%d %H:%M:%S") if end_dt else None
+
+        if start_text and end_text:
+            if start_text <= end_text:
+                where_clauses.append(f"{normalized_column} >= ? AND {normalized_column} <= ?")
+                params.extend([start_text, end_text])
+            else:
+                where_clauses.append(f"({normalized_column} >= ? OR {normalized_column} <= ?)")
+                params.extend([start_text, end_text])
+        elif start_text:
+            where_clauses.append(f"{normalized_column} >= ?")
+            params.append(start_text)
+        elif end_text:
+            where_clauses.append(f"{normalized_column} <= ?")
+            params.append(end_text)
+
+        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+        return where_sql, params, normalized_column
+
     def get_keywords_by_last_time_range(
         self,
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
     ) -> List[Keyword]:
-        where_sql, params = self._build_datetime_range_clause(
+        where_sql, params, normalized_last_time = self._build_normalized_datetime_text_range_clause(
             column_name="last_time",
             start_time=start_time,
             end_time=end_time,
@@ -407,7 +383,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         cursor = conn.cursor()
         try:
             cursor.execute(
-                f"SELECT id, term, importance, weigh FROM Keyword WHERE {where_sql} ORDER BY last_time ASC, id ASC",
+                f"SELECT id, term, importance, weigh FROM Keyword WHERE {where_sql} ORDER BY {normalized_last_time} ASC, id ASC",
                 *params,
             )
             result: List[Keyword] = []
@@ -429,7 +405,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
     ) -> List[Entity]:
-        where_sql, params = self._build_datetime_range_clause(
+        where_sql, params, normalized_last_time = self._build_normalized_datetime_text_range_clause(
             column_name="last_time",
             start_time=start_time,
             end_time=end_time,
@@ -439,7 +415,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         cursor = conn.cursor()
         try:
             cursor.execute(
-                f"SELECT id, name, entity_type, weigh FROM Entity WHERE {where_sql} ORDER BY last_time ASC, id ASC",
+                f"SELECT id, name, entity_type, weigh FROM Entity WHERE {where_sql} ORDER BY {normalized_last_time} ASC, id ASC",
                 *params,
             )
             result: List[Entity] = []
@@ -466,11 +442,26 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         if not valid_ids:
             return []
 
-        placeholders = ",".join("?" * len(valid_ids))
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            id_placeholders = ",".join("?" * len(valid_ids))
+            cursor.execute(
+                f"SELECT DISTINCT term FROM Keyword WHERE id IN ({id_placeholders})",
+                *valid_ids,
+            )
+            terms = [str(row[0]).strip() for row in cursor.fetchall() if row and row[0] and str(row[0]).strip()]
+        finally:
+            conn.close()
+
+        if not terms:
+            return []
+
+        term_placeholders = ",".join("?" * len(terms))
         where_clauses = [
-            f"id IN (SELECT DISTINCT news_item_id FROM Keyword WHERE id IN ({placeholders}))"
+            f"id IN (SELECT DISTINCT news_item_id FROM Keyword WHERE term IN ({term_placeholders}))"
         ]
-        params: List = list(valid_ids)
+        params: List = list(terms)
 
         time_where_sql, time_params = self._build_datetime_range_clause(
             column_name="first_time",
@@ -495,11 +486,26 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         if not valid_ids:
             return []
 
-        placeholders = ",".join("?" * len(valid_ids))
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            id_placeholders = ",".join("?" * len(valid_ids))
+            cursor.execute(
+                f"SELECT DISTINCT name FROM Entity WHERE id IN ({id_placeholders})",
+                *valid_ids,
+            )
+            names = [str(row[0]).strip() for row in cursor.fetchall() if row and row[0] and str(row[0]).strip()]
+        finally:
+            conn.close()
+
+        if not names:
+            return []
+
+        name_placeholders = ",".join("?" * len(names))
         where_clauses = [
-            f"id IN (SELECT DISTINCT news_item_id FROM Entity WHERE id IN ({placeholders}))"
+            f"id IN (SELECT DISTINCT news_item_id FROM Entity WHERE name IN ({name_placeholders}))"
         ]
-        params: List = list(valid_ids)
+        params: List = list(names)
 
         time_where_sql, time_params = self._build_datetime_range_clause(
             column_name="first_time",
@@ -515,59 +521,87 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         return items if items is not None else []
 
     def add_news_items(self, news_list: List[NewsItem]) -> List[NewsItem]:
-        key_list = list(
-            {
-                (item.source_id, item.title)
-                for item in news_list
-                if item.source_id and item.title
-            }
-        )
-        if not key_list:
+        unique_items_by_key: Dict[Tuple[str, str], NewsItem] = {}
+        for item in news_list:
+            source_id, title = self._normalize_source_title_key(item.source_id, item.title)
+            if not source_id or not title:
+                continue
+            item.source_id = source_id
+            item.title = title
+            # 同批次出现重复 key 时，保留最后一个，避免批内插入冲突
+            unique_items_by_key[(source_id, title)] = item
+
+        if not unique_items_by_key:
             return []
+
+        deduplicated_news_list = list(unique_items_by_key.values())
+        key_list = list(unique_items_by_key.keys())
+
+        existing_items = self.get_news_list_by_source_title_list(key_list)
+        existing_keys = {
+            self._normalize_source_title_key(item.source_id, item.title)
+            for item in existing_items
+            if item.source_id and item.title
+        }
+        to_insert = [
+            item
+            for item in deduplicated_news_list
+            if self._normalize_source_title_key(item.source_id, item.title) not in existing_keys
+        ]
+
+        if not to_insert:
+            return existing_items
 
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
-            for item in news_list:
+            for item in to_insert:
                 data_date = self._parse_date_value(item.first_time) or date.today()
                 effective_last_time = self._parse_datetime_value(item.last_time) or datetime.now()
                 first_time = self._parse_datetime_value(item.first_time) or effective_last_time
                 analyzed_time = self._parse_datetime_value(item.analyzed_time)
-                cursor.execute("""
-                    INSERT INTO NewsItem (
-                        news_date, title, source_id, source_name, event_type,
-                        summary, latest_rank, url, mobile_url, sentiment_polarity,
-                        positive_ratio, negative_ratio, neutral_ratio,
-                        optimism_score, trust_score, controversy_score, attention_score,
-                        first_time, last_time, analyzed_time, total_weigh
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    data_date,
-                    item.title,
-                    item.source_id,
-                    item.source_name or item.source_id,
-                    item.event_type,
-                    item.summary,
-                    item.latest_rank,
-                    item.url,
-                    item.mobile_url,
-                    item.sentiment_polarity,
-                    item.positive_ratio,
-                    item.negative_ratio,
-                    item.neutral_ratio,
-                    item.optimism_score,
-                    item.trust_score,
-                    item.controversy_score,
-                    item.attention_score,
-                    first_time,
-                    effective_last_time,
-                    analyzed_time,
-                    item.total_weigh,
-                ))
+                try:
+                    cursor.execute("""
+                        INSERT INTO NewsItem (
+                            news_date, title, source_id, source_name, event_type,
+                            summary, latest_rank, url, mobile_url, sentiment_polarity,
+                            positive_ratio, negative_ratio, neutral_ratio,
+                            optimism_score, trust_score, controversy_score, attention_score,
+                            first_time, last_time, analyzed_time, total_weigh
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        data_date,
+                        item.title,
+                        item.source_id,
+                        item.source_name or item.source_id,
+                        item.event_type,
+                        item.summary,
+                        item.latest_rank,
+                        item.url,
+                        item.mobile_url,
+                        item.sentiment_polarity,
+                        item.positive_ratio,
+                        item.negative_ratio,
+                        item.neutral_ratio,
+                        item.optimism_score,
+                        item.trust_score,
+                        item.controversy_score,
+                        item.attention_score,
+                        first_time,
+                        effective_last_time,
+                        analyzed_time,
+                        item.total_weigh,
+                    ))
+                except pyodbc.Error as item_error:
+                    # 并发或竞态场景下，若已被其他事务插入则跳过，避免整批失败
+                    error_text = str(item_error)
+                    if "2627" in error_text or "2601" in error_text or "UNIQUE KEY" in error_text.upper():
+                        continue
+                    raise
                    
 
             # 查询并更新 item.id 和 last_time
-            for item in news_list:
+            for item in deduplicated_news_list:
                 cursor.execute(
                     "SELECT id, last_time FROM NewsItem WHERE source_id = ? AND title = ?",
                     item.source_id,
@@ -578,8 +612,10 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                     item.id = row[0]
                     item.last_time = self._parse_datetime_value(row[1])
 
-            for item in news_list:
+            for item in deduplicated_news_list:
                 self._upsert_rank_timeline_for_item(cursor, item)
+
+            self._replace_keyword_and_entity(conn, deduplicated_news_list)
 
             conn.commit()
             return self.get_news_list_by_source_title_list(key_list)
@@ -964,18 +1000,24 @@ class SqlServerNewsItemRepository(NewsItemRepository):
     ) -> Optional[List[NewsItem]]:
         where_clauses: List[str] = []
         params: List = []
+        trimmed_last_time = "LTRIM(RTRIM(last_time))"
+        normalized_last_time = (
+            f"CASE WHEN RIGHT({trimmed_last_time}, 1) = '.' "
+            f"THEN LEFT({trimmed_last_time}, LEN({trimmed_last_time}) - 1) ELSE {trimmed_last_time} END"
+        )
+        converted_last_time = f"TRY_CONVERT(DATETIME2, {normalized_last_time})"
 
         start_dt = self._parse_datetime_value(start_time) if start_time else None
         end_dt = self._parse_datetime_value(end_time) if end_time else None
 
         if start_dt and end_dt:
-            where_clauses.append("last_time >= ? AND last_time <= ?")
+            where_clauses.append(f"{converted_last_time} >= ? AND {converted_last_time} <= ?")
             params.extend([start_dt, end_dt])
         elif start_dt:
-            where_clauses.append("last_time >= ?")
+            where_clauses.append(f"{converted_last_time} >= ?")
             params.append(start_dt)
         elif end_dt:
-            where_clauses.append("last_time <= ?")
+            where_clauses.append(f"{converted_last_time} <= ?")
             params.append(end_dt)
 
         where_clauses.append("analyzed_time IS NOT NULL" if isAnalyzed else "analyzed_time IS NULL")
@@ -991,22 +1033,28 @@ class SqlServerNewsItemRepository(NewsItemRepository):
     ) -> Optional[List[NewsItem]]:
         where_clauses: List[str] = []
         params: List = []
+        trimmed_first_time = "LTRIM(RTRIM(first_time))"
+        normalized_first_time = (
+            f"CASE WHEN RIGHT({trimmed_first_time}, 1) = '.' "
+            f"THEN LEFT({trimmed_first_time}, LEN({trimmed_first_time}) - 1) ELSE {trimmed_first_time} END"
+        )
+        converted_first_time = f"TRY_CONVERT(DATETIME2, {normalized_first_time})"
 
         start_dt = self._parse_datetime_value(start_time) if start_time else None
         end_dt = self._parse_datetime_value(end_time) if end_time else None
 
         if start_dt and end_dt:
             if start_dt <= end_dt:
-                where_clauses.append("first_time >= ? AND first_time <= ?")
+                where_clauses.append(f"{converted_first_time} >= ? AND {converted_first_time} <= ?")
                 params.extend([start_dt, end_dt])
             else:
-                where_clauses.append("(first_time >= ? OR first_time <= ?)")
+                where_clauses.append(f"({converted_first_time} >= ? OR {converted_first_time} <= ?)")
                 params.extend([start_dt, end_dt])
         elif start_dt:
-            where_clauses.append("first_time >= ?")
+            where_clauses.append(f"{converted_first_time} >= ?")
             params.append(start_dt)
         elif end_dt:
-            where_clauses.append("first_time <= ?")
+            where_clauses.append(f"{converted_first_time} <= ?")
             params.append(end_dt)
 
         where_clauses.append("analyzed_time IS NOT NULL" if isAnalyzed else "analyzed_time IS NULL")

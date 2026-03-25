@@ -5,3 +5,5 @@ uml/*
 *.pyc
 *.db
 .vscode/*
+.vscode/settings.json
+SentimentAnalyzeServer/.vscode/*

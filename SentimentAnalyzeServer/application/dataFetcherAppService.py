@@ -1,5 +1,6 @@
 
 from datetime import datetime
+import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -13,6 +14,9 @@ from SentimentAnalyzeServer.domain.news.news import (
     NewsDomainService,
     RankTimelineEntry,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class DataFetcherAppService:
@@ -42,15 +46,10 @@ class DataFetcherAppService:
     def crawl_and_save_news_data(self) -> tuple[dict[str, Any], List[NewsItem]]:
         ids = self._load_platforms()
         if not ids:
-            print("[ScheduledCrawler] 未在配置中找到可抓取平台")
+            print("[dataFetcher] 未在配置中找到可抓取平台")
             return {"success": False, "reason": "no_platforms"}, []
 
-        print(f"[ScheduledCrawler] 开始抓取，平台数: {len(ids)}")
         results, id_to_name, failed_ids = self.fetcher.crawl_websites(ids)
-        print(
-            f"[ScheduledCrawler] 抓取完成，成功: {len(results)}，失败: {len(failed_ids)}"
-        )
-
         now = datetime.now()
         crawl_date = datetime(now.year, now.month, now.day)
         last_time = now
@@ -73,6 +72,13 @@ class DataFetcherAppService:
                 "id_to_name": id_to_name,
             }, []
 
+        logger.info(
+            "[dataFetcher] 抓取并入库成功。platform_count=%s, success_count=%s, failed_count=%s, saved_count=%s",
+            len(ids),
+            len(results),
+            len(failed_ids),
+            len(saved_items),
+        )
         return {
             "success": True,
             "platform_count": len(ids),
@@ -183,12 +189,18 @@ class DataFetcherAppService:
             new_items: List[NewsItem] = []
             for grouped_items in new_items_by_source.values():
                 new_items.extend(grouped_items)
+            # 去重 entities 和 keywords
+            for item in new_items:
+                item.deduplicate_entities_and_keywords()
             added_items = self.news_domain_service.add_news_items(new_items)
             if not added_items:
                 raise RuntimeError("保存新增新闻数据失败")
             saved_items.extend(added_items)
 
         if merged_items:
+            # 去重 entities 和 keywords
+            for item in merged_items:
+                item.deduplicate_entities_and_keywords()
             updated_items = self.news_domain_service.update_existing_crawled_titles(merged_items)
             if not updated_items:
                 raise RuntimeError("更新已存在新闻数据失败")
