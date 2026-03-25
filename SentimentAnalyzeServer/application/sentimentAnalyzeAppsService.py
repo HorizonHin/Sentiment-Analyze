@@ -5,6 +5,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
+from SentimentAnalyzeServer.application.common import EVENT_SENTIMENT_ANALYZED, EventManager
 from SentimentAnalyzeServer.application.tools.llmExecutorService import LLMExecutorService
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsItem, NewsDomainService
@@ -17,6 +18,7 @@ class SentimentAnalyzeAppService:
 	def __init__(self, storage: object, analyzer: LLMTitleAnalyzer, max_workers: int = 32) -> None:
 		self.news_domain_service = NewsDomainService(storage)
 		self.llm_domain_analyzer = analyzer
+		self.event_manager = EventManager()
 		self.max_retries = 5
 		self.retry_delay_seconds = 1
 		self.batch_save_size = 20
@@ -75,6 +77,14 @@ class SentimentAnalyzeAppService:
 			"Analysis and persistence completed. pending_count=%s, persisted_count=%s",
 			len(pending_items),
 			len(updated_items),
+		)
+		self.event_manager.publish(
+			EVENT_SENTIMENT_ANALYZED,
+			{
+				"analyzed_items": updated_items,
+				"pending_count": len(pending_items),
+				"persisted_count": len(updated_items),
+			},
 		)
 		return True
 
@@ -151,7 +161,7 @@ class SentimentAnalyzeAppService:
 				item.attention_score = float(dimensions.get("attention", 0.0))
 				item.controversy_score = float(dimensions.get("controversy", 0.0))
 
-		item.analyzed_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+		item.analyzed_time = datetime.now()
 
 	def filter_news_items_not_analyzed(self, items: List[NewsItem]) -> List[NewsItem]:
 		return [
@@ -160,55 +170,59 @@ class SentimentAnalyzeAppService:
 			if not (item.analyzed_time or item.sentiment_polarity or item.entities or item.keywords)
 		]
 
-	def analyze_first_pending_items(
+	def analyze_pending_items_by_first_time(
 		self,
-		start_time: Optional[str] = None,
-		end_time: Optional[str] = None,
-	) -> Optional[NewsItem]:
-		filtered_data = self.news_domain_service.get_data_by_first_time_range(
+		start_time: Optional[datetime] = None,
+		end_time: Optional[datetime] = None,
+	) -> bool:
+		all_items = self.news_domain_service.get_news_list_by_firt_time_range(
 			isAnalyzed=False,
 			start_time=start_time,
 			end_time=end_time,
 		)
-		if filtered_data is None:
+		if all_items is None:
+			logger.info("[ScheduledCrawler] 无可分析的数据")
 			return None
-
-		all_items: List[NewsItem] = []
-		for news_list in filtered_data.items.values():
-			all_items.extend(news_list)
-
 		pending_items = self.filter_news_items_not_analyzed(all_items)
 		if not pending_items:
+			logger.info("[ScheduledCrawler] 无可分析的数据")
 			return None
+		saved = self.analyze_and_update_news_items(pending_items)
+		return saved
 
-		item = pending_items[0]
-		saved = self.analyze_and_update_news_items([item])
-		if saved:
-			return item
-		return None
-
-	def analyze_latest_pending_items(
+	def analyze_pending_items_by_latest_time(
 		self,
-		start_time: Optional[str] = None,
-		end_time: Optional[str] = None,
+		start_time: Optional[datetime] = None,
+		end_time: Optional[datetime] = None,
 	) -> dict[str, Any]:
-		latest_data = self.news_domain_service.get_data_by_latest_crawl_range(
+		latest_items = self.news_domain_service.get_news_list_by_latest_crawl_range(
 			isAnalyzed=False,
 			start_time=start_time,
 			end_time=end_time,
 		)
-		if latest_data is None:
+		if not latest_items:
 			logger.info("[ScheduledCrawler] 无可分析的数据")
 			return {"success": False, "reason": "no_data"}
-
-		all_items: List[NewsItem] = []
-		for news_list in latest_data.items.values():
-			all_items.extend(news_list)
-
-		pending_items = self.filter_news_items_not_analyzed(all_items)
+		pending_items = self.filter_news_items_not_analyzed(latest_items)
 		if not pending_items:
+			logger.info("[ScheduledCrawler] 无可分析的数据")
 			return {"success": True, "item_count": 0}
 
 		saved = self.analyze_and_update_news_items(pending_items)
 		analyzed_count = len(pending_items) if saved else 0
 		return {"success": True, "item_count": analyzed_count}
+
+	def get_analyzed_news_grouped_by_latest_time(
+		self,
+		start_time: Optional[datetime] = None,
+		end_time: Optional[datetime] = None,
+	) -> Dict[str, List[NewsItem]]:
+		"""按 last_time 范围获取已分析新闻，并按 source_id 分组。"""
+		grouped = self.news_domain_service.get_group_news_by_latest_crawl_range(
+			isAnalyzed=True,
+			start_time=start_time,
+			end_time=end_time,
+		)
+		return grouped or {}
+	
+	

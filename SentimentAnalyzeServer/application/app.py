@@ -1,5 +1,5 @@
 # coding=utf-8
-"""Flask 应用入口，包含新闻平台定时抓取任务。"""
+"""Flask 应用入口"""
 
 from __future__ import annotations
 
@@ -11,7 +11,16 @@ from typing import Any
 from flask import Flask, jsonify
 import yaml
 
-_WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+_workspace_root_env = os.getenv("WORKSPACE_ROOT") or os.getenv("PYTHONPATH")
+if _workspace_root_env:
+    _workspace_root_value = _workspace_root_env.split(os.pathsep)[0].strip()
+    _workspace_root_path = Path(_workspace_root_value)
+    if not _workspace_root_path.is_absolute():
+        _workspace_root_path = (Path(__file__).resolve().parents[1] / _workspace_root_path).resolve()
+    _WORKSPACE_ROOT = _workspace_root_path
+else:
+    _WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+
 if str(_WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(_WORKSPACE_ROOT))
 
@@ -19,7 +28,16 @@ from SentimentAnalyzeServer.application.scheduled import (
     Scheduled,
     get_interval_seconds_from_env,
 )
-from SentimentAnalyzeServer.domain.news.mssql_backend import MSSQLStorageBackend
+from SentimentAnalyzeServer.application.common import Result
+from SentimentAnalyzeServer.application.dataFetcherAppService import DataFetcherAppService
+from SentimentAnalyzeServer.application.sentimentAnalyzeAppsService import SentimentAnalyzeAppService
+from SentimentAnalyzeServer.application.topicAppService import TopicAppService
+from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
+from SentimentAnalyzeServer.domain.news.news import NewsDomainService
+from SentimentAnalyzeServer.domain.news.sqlServerNewsItemRepository import SqlServerNewsItemRepository
+from SentimentAnalyzeServer.domain.topic.topic import TopicDomainService
+from SentimentAnalyzeServer.inbound.controller import create_external_controller
+from SentimentAnalyzeServer.inbound.workflow_event_subscribers import WorkflowEventSubscribers
 
 
 def _should_start_scheduler(app: Flask) -> bool:
@@ -52,7 +70,7 @@ def create_app() -> Flask:
     
     # 初始化数据库存储后端，失败则停止应用
     try:
-        storage = MSSQLStorageBackend(
+        storage = SqlServerNewsItemRepository(
             server=mssql_server,
             database=mssql_database,
             username=mssql_username,
@@ -63,23 +81,53 @@ def create_app() -> Flask:
         print(f"[错误] {e}", file=sys.stderr)
         sys.exit(1)
     
+    data_fetcher_app_service = DataFetcherAppService(config_path=config_path, storage=storage)
+    sentiment_app_service = SentimentAnalyzeAppService(
+        storage=storage,
+        analyzer=LLMTitleAnalyzer(),
+        max_workers=llm_max_workers,
+    )
+    topic_app_service = TopicAppService(
+        topic_domain_service=TopicDomainService(),
+        news_domain_service=NewsDomainService(storage),
+    )
+    workflow_subscribers = WorkflowEventSubscribers(
+        sentiment_app_service=sentiment_app_service,
+        topic_app_service=topic_app_service,
+    )
+    workflow_subscribers.register()
+
+    app.register_blueprint(
+        create_external_controller(
+            sentiment_app_service=sentiment_app_service,
+            topic_app_service=topic_app_service,
+        )
+    )
+
     scheduler = Scheduled(
         config_path=config_path,
         storage=storage,
         interval_seconds=get_interval_seconds_from_env(),
         llm_max_workers=llm_max_workers,
+        data_fetcher_app_service=data_fetcher_app_service,
     )
 
     app.config["scheduler"] = scheduler
 
     @app.get("/health")
     def health() -> Any:
-        return jsonify({"status": "ok"})
+        return jsonify(Result.success_result({"status": "ok"}).to_dict())
 
     @app.post("/tasks/crawl/run")
     def run_crawl_once() -> Any:
-        result = scheduler.run_once()
-        return jsonify(result)
+        try:
+            result = scheduler.run_once()
+            if result.get("success"):
+                return jsonify(Result.success_result(result).to_dict())
+            reason = str(result.get("reason", "crawl_failed"))
+            return jsonify(Result.failure_result(reason).to_dict()), 500
+        except Exception as exc:
+            return jsonify(Result.failure_result(str(exc)).to_dict()), 500
 
     if _should_start_scheduler(app):
         scheduler.start()

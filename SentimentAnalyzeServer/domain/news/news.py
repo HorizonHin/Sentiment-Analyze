@@ -1,23 +1,68 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Set
+from datetime import datetime
+from typing import Dict, List, Optional, Any, Set, Tuple
+
+DATETIME_FORMATS = (
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S.%f",
+)
+
+
+def parse_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    for fmt in DATETIME_FORMATS:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def format_datetime(value: Optional[datetime], fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    return value.strftime(fmt) if value else ""
 
 @dataclass
 class Entity:
-    name: str
-    type: str
+    id: int = field(default=-1)
+    name: str = ""
+    type: str = ""
+    weigh: float = 0.0
 
 @dataclass
 class Keyword:
-    term: str
-    importance: float
+    id: int = field(default=-1)
+    term: str = ""
+    importance: float = 0.0
+    weigh: float = 0.0
+
+
+@dataclass
+class RankTimelineEntry:
+    id: int = field(default=-1)
+    time: Optional[datetime] = None
+    rank: int = 0
 
 @dataclass
 class NewsItem:
     """新闻条目数据模型（热榜数据）"""
 
     id: int = field(default=-1)                             # 数据库主键ID
-    title: str = ""                          # 新闻标题
+    title: str = ""                          # 新闻标题,（source_id + title）联合唯一
     source_id: str = ""                      # 来源平台ID（如 toutiao, baidu）
     source_name: str = ""                    # 来源平台名称（运行时使用，数据库不存储）
     event_type: str = ""
@@ -38,18 +83,23 @@ class NewsItem:
     controversy_score: float = 0.0
     attention_score: float = 0.0
     # 统计信息（用于分析）
-    first_time: str = ""                # 首次出现时间
-    last_time: str = ""                 # 最后出现时间
-    analyzed_time: Optional[str] = None         # 分析时间
+    first_time: Optional[datetime] = None                # 首次出现时间
+    last_time: Optional[datetime] = None                 # 最后出现时间
+    analyzed_time: Optional[datetime] = None         # 分析时间
     total_weigh: float = 0.0            # 综合权重
-    rank_timeline: List[Dict[str, Any]] = field(default_factory=list)  # 完整排名时间线
-                                        # 格式: [{"time": "09:30", "rank": 1}, {"time": "10:00", "rank": 2}, ...]
-                                        # None 表示脱榜: [{"time": "11:00", "rank": None}]
+    rank_timeline_obj: List[RankTimelineEntry] = field(default_factory=list)  # 完整排名时间线对象
+                                        # 格式: [("09:30", 1), ("10:00", 2), ...]
+                                        # rank <= 0 表示脱榜
+
+    @property
+    def rank_timeline(self) -> List[Tuple[datetime, int]]:
+        """对外兼容旧结构，返回 (time, rank) 列表。"""
+        return [(point.time, point.rank) for point in self.rank_timeline_obj if point.time is not None]
 
     @property
     def count(self) -> int:
         """出现次数由 rank_timeline 长度动态计算。"""
-        return len(self.rank_timeline)
+        return len(self.rank_timeline_obj)
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -60,8 +110,8 @@ class NewsItem:
             "source_name": self.source_name,
             "event_type": self.event_type,
             "summary": self.summary,
-            "entities": [{"name": entity.name, "type": entity.type} for entity in self.entities],
-            "keywords": [{"term": keyword.term, "importance": keyword.importance} for keyword in self.keywords],
+            "entities": [{"id": entity.id, "name": entity.name, "type": entity.type, "weigh": entity.weigh} for entity in self.entities],
+            "keywords": [{"id": keyword.id, "term": keyword.term, "importance": keyword.importance, "weigh": keyword.weigh} for keyword in self.keywords],
             "latest_rank": self.latest_rank,
             "url": self.url,
             "mobile_url": self.mobile_url,
@@ -73,13 +123,50 @@ class NewsItem:
             "trust_score": self.trust_score,
             "controversy_score": self.controversy_score,
             "attention_score": self.attention_score,
-            "first_time": self.first_time,
-            "last_time": self.last_time,
-            "analyzed_time": self.analyzed_time,
+            "first_time": format_datetime(self.first_time, "%Y-%m-%d %H:%M"),
+            "last_time": format_datetime(self.last_time, "%Y-%m-%d %H:%M"),
+            "analyzed_time": format_datetime(self.analyzed_time),
             "count": self.count,
             "total_weigh": self.total_weigh,
-            "rank_timeline": self.rank_timeline,
+            "rank_timeline": [
+                {
+                    "id": point.id,
+                    "time": format_datetime(point.time, "%Y-%m-%d %H:%M") if point.time else "",
+                    "rank": point.rank if point.rank > 0 else None,
+                }
+                for point in self.rank_timeline_obj
+            ],
         }
+
+    @staticmethod
+    def _parse_rank_timeline(timeline_data: Any) -> List[RankTimelineEntry]:
+        """解析 rank_timeline 数据，转换为 RankTimelineEntry 列表。"""
+        if not timeline_data:
+            return []
+
+        result: List[RankTimelineEntry] = []
+        for item in timeline_data:
+            if isinstance(item, dict):
+                try:
+                    entry_id = int(item.get("id", -1) or -1)
+                    entry_time = parse_datetime(item.get("time"))
+                    entry_rank = int(item.get("rank") or 0)
+                    if entry_time is None:
+                        continue
+                    result.append(RankTimelineEntry(id=entry_id, time=entry_time, rank=entry_rank))
+                except (TypeError, ValueError):
+                    continue
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                try:
+                    entry_time = parse_datetime(item[0])
+                    entry_rank = int(item[1])
+                    if entry_time is None:
+                        continue
+                    result.append(RankTimelineEntry(time=entry_time, rank=entry_rank))
+                except (TypeError, ValueError, IndexError):
+                    continue
+
+        return result
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "NewsItem":
@@ -93,7 +180,7 @@ class NewsItem:
         if not latest_rank and legacy_ranks:
             latest_rank = legacy_ranks[0]
         legacy_time = data.get("crawl_time", "")
-        last_time = data.get("last_time", "") or legacy_time
+        last_time = parse_datetime(data.get("last_time")) or parse_datetime(legacy_time)
 
         return cls(
             id=int(data.get("id", -1) or -1),
@@ -102,9 +189,22 @@ class NewsItem:
             source_name=data.get("source_name", ""),
             event_type=data.get("event_type", ""),
             summary=data.get("summary", ""),
-            entities=[Entity(name=item.get("name", ""), type=item.get("type", "")) for item in raw_entities],
+            entities=[
+                Entity(
+                    id=int(item.get("id", -1) or -1),
+                    name=item.get("name", ""),
+                    type=item.get("type", ""),
+                    weigh=float(item.get("weigh", data.get("total_weigh", 0.0)) or 0.0),
+                )
+                for item in raw_entities
+            ],
             keywords=[
-                Keyword(term=item.get("term", ""), importance=float(item.get("importance", 0.0)))
+                Keyword(
+                    id=int(item.get("id", -1) or -1),
+                    term=item.get("term", ""),
+                    importance=float(item.get("importance", 0.0)),
+                    weigh=float(item.get("weigh", data.get("total_weigh", 0.0)) or 0.0),
+                )
                 for item in raw_keywords
             ],
             latest_rank=int(latest_rank or 0),
@@ -118,11 +218,11 @@ class NewsItem:
             trust_score=float(data.get("trust_score", 0.0)),
             controversy_score=float(data.get("controversy_score", 0.0)),
             attention_score=float(data.get("attention_score", 0.0)),
-            first_time=data.get("first_time", ""),
+            first_time=parse_datetime(data.get("first_time")),
             last_time=last_time,
-            analyzed_time=data.get("analyzed_time"),
+            analyzed_time=parse_datetime(data.get("analyzed_time")),
             total_weigh=float(data.get("total_weigh", 0.0)),
-            rank_timeline=data.get("rank_timeline", []),
+            rank_timeline_obj=cls._parse_rank_timeline(data.get("rank_timeline", [])),
         )
 
 @dataclass
@@ -138,8 +238,8 @@ class NewsData:
     - failed_ids: 失败的来源ID列表
     """
 
-    date: str                                   # 日期
-    last_time: str                              # 最新抓取时间
+    date: Optional[datetime]                              # 日期
+    last_time: Optional[datetime]                         # 最新抓取时间
     items: Dict[str, List[NewsItem]]            # 按来源分组的新闻
     id_to_name: Dict[str, str] = field(default_factory=dict)   # ID到名称映射
     failed_ids: List[str] = field(default_factory=list)        # 失败的ID
@@ -151,8 +251,8 @@ class NewsData:
             items_dict[source_id] = [item.to_dict() for item in news_list]
 
         return {
-            "date": self.date,
-            "last_time": self.last_time,
+            "date": format_datetime(self.date, "%Y-%m-%d"),
+            "last_time": format_datetime(self.last_time, "%Y-%m-%d %H:%M"),
             "items": items_dict,
             "id_to_name": self.id_to_name,
             "failed_ids": self.failed_ids,
@@ -167,8 +267,8 @@ class NewsData:
             items[source_id] = [NewsItem.from_dict(item) for item in news_list]
 
         return cls(
-            date=data.get("date", ""),
-            last_time=data.get("last_time", "") or data.get("crawl_time", ""),
+            date=parse_datetime(data.get("date")),
+            last_time=parse_datetime(data.get("last_time")) or parse_datetime(data.get("crawl_time")),
             items=items,
             id_to_name=data.get("id_to_name", {}),
             failed_ids=data.get("failed_ids", []),
@@ -178,86 +278,70 @@ class NewsData:
         """获取新闻总数"""
         return sum(len(news_list) for news_list in self.items.values())
 
-    def merge_with(self, other: "NewsData") -> "NewsData":
-        """
-        合并另一个 NewsData 到当前数据
+    @staticmethod
+    def _merge_rank_timeline(
+        base_timeline: List[RankTimelineEntry],
+        incoming_timeline: List[RankTimelineEntry],
+    ) -> List[RankTimelineEntry]:
+        """合并并去重 rank timeline，去重键为 (time, rank)。"""
+        combined_timeline = (base_timeline or []) + (incoming_timeline or [])
+        dedup_timeline: List[RankTimelineEntry] = []
+        seen: Set[Tuple[datetime, int]] = set()
 
-        合并规则:
-        - 相同 source_id + title 的新闻合并排名历史
-        - 更新 last_time
-        - 保留较早的 first_time
-        """
-        merged_items = {}
+        for point in combined_timeline:
+            if point.time is None:
+                continue
+            key = (point.time, point.rank)
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup_timeline.append(point)
 
-        # 复制当前数据
-        for source_id, news_list in self.items.items():
-            merged_items[source_id] = {item.title: item for item in news_list}
-
-        # 合并其他数据
-        for source_id, news_list in other.items.items():
-            if source_id not in merged_items:
-                merged_items[source_id] = {}
-
-            for item in news_list:
-                if item.title in merged_items[source_id]:
-                    # 合并已存在的新闻
-                    existing = merged_items[source_id][item.title]
-
-                    # 合并排名时间线
-                    combined_timeline = existing.rank_timeline + item.rank_timeline
-                    existing.rank_timeline = sorted(
-                        combined_timeline,
-                        key=lambda x: (x.get("time", ""), x.get("rank") is None, x.get("rank", 0)),
-                    )
-                    if item.latest_rank:
-                        existing.latest_rank = item.latest_rank
-
-                    # 更新时间
-                    if item.first_time and (not existing.first_time or item.first_time < existing.first_time):
-                        existing.first_time = item.first_time
-                    if item.last_time and (not existing.last_time or item.last_time > existing.last_time):
-                        existing.last_time = item.last_time
-
-                    # 合并结构化字段（只在缺失时补充）
-                    if not existing.summary and item.summary:
-                        existing.summary = item.summary
-                    if not existing.event_type and item.event_type:
-                        existing.event_type = item.event_type
-                    if not existing.entities and item.entities:
-                        existing.entities = item.entities
-                    if not existing.keywords and item.keywords:
-                        existing.keywords = item.keywords
-
-                    # 保留URL（如果原来没有）
-                    if not existing.url and item.url:
-                        existing.url = item.url
-                    if not existing.mobile_url and item.mobile_url:
-                        existing.mobile_url = item.mobile_url
-                else:
-                    # 添加新新闻
-                    merged_items[source_id][item.title] = item
-
-        # 转换回列表格式
-        final_items = {}
-        for source_id, items_dict in merged_items.items():
-            final_items[source_id] = list(items_dict.values())
-
-        # 合并 id_to_name
-        merged_id_to_name = {**self.id_to_name, **other.id_to_name}
-
-        # 合并 failed_ids（去重）
-        merged_failed_ids = list(set(self.failed_ids + other.failed_ids))
-
-        return NewsData(
-            date=self.date or other.date,
-            last_time=other.last_time,  # 使用较新的抓取时间
-            items=final_items,
-            id_to_name=merged_id_to_name,
-            failed_ids=merged_failed_ids,
+        return sorted(
+            dedup_timeline,
+            key=lambda x: (x.time, x.rank <= 0, x.rank if x.rank > 0 else 0),
         )
 
+    def merge_duplicate_titles_by_source(self) -> int:
+        """同一来源内按 title 合并重复新闻，仅合并 timeline。返回合并次数。"""
+        merged_count = 0
 
-class StorageBackend(ABC):
+        for source_id, news_list in self.items.items():
+            title_map: Dict[str, NewsItem] = {}
+            merged_list: List[NewsItem] = []
+
+            for item in news_list:
+                title_key = item.title
+                if title_key not in title_map:
+                    title_map[title_key] = item
+                    merged_list.append(item)
+                    continue
+
+                existing_item = title_map[title_key]
+                existing_item.rank_timeline_obj = self._merge_rank_timeline(
+                    existing_item.rank_timeline_obj,
+                    item.rank_timeline_obj,
+                )
+
+                # 合并后尽量保持时间字段和最新排名一致
+                if item.first_time and (not existing_item.first_time or item.first_time < existing_item.first_time):
+                    existing_item.first_time = item.first_time
+                if item.last_time and (not existing_item.last_time or item.last_time > existing_item.last_time):
+                    existing_item.last_time = item.last_time
+
+                valid_points = [point for point in existing_item.rank_timeline_obj if point.rank > 0]
+                if valid_points:
+                    latest_point = max(valid_points, key=lambda p: p.time)
+                    existing_item.latest_rank = latest_point.rank
+
+                merged_count += 1
+
+            self.items[source_id] = merged_list
+
+        return merged_count
+
+    
+class NewsItemRepository(ABC):
     """
     存储后端抽象基类
 
@@ -298,7 +382,7 @@ class StorageBackend(ABC):
 
 
     @abstractmethod
-    def get_latest_crawl_data(self, date: Optional[str] = None) -> Optional[NewsData]:
+    def get_latest_crawl_data(self, date: Optional[datetime] = None) -> Optional[NewsData]:
         """
         获取最新一次抓取的数据
 
@@ -311,20 +395,7 @@ class StorageBackend(ABC):
         pass
 
     @abstractmethod
-    def detect_new_titles(self, current_data: NewsData) -> Dict[str, Dict]:
-        """
-        检测新增的标题
-
-        Args:
-            current_data: 当前抓取的数据
-
-        Returns:
-            新增的标题数据，格式: {source_id: {title: title_data}}
-        """
-        pass
-
-    @abstractmethod
-    def is_first_crawl_today(self, date: Optional[str] = None) -> bool:
+    def is_first_crawl_today(self, date: Optional[datetime] = None) -> bool:
         """
         检查是否是当天第一次抓取
 
@@ -364,7 +435,7 @@ class StorageBackend(ABC):
         """
         pass
 
-    def record_period_execution(self, date_str: str, period_key: str, action: str) -> bool:
+    def record_period_execution(self, date_str: datetime, period_key: str, action: str) -> bool:
         """
         记录时间段的 action 执行
 
@@ -378,42 +449,80 @@ class StorageBackend(ABC):
         """
         return False
 
-    def save_analyzed_news(self, news_ids: List[str], source_type: str, interests_file: str, prompt_hash: str, matched_ids: Set[str], date: Optional[str] = None) -> int:
+    def save_analyzed_news(self, news_ids: List[str], source_type: str, interests_file: str, prompt_hash: str, matched_ids: Set[str], date: Optional[datetime] = None) -> int:
         return 0
 
-    def get_analyzed_news_ids(self, source_type: str = "hotlist", date: Optional[str] = None, interests_file: str = "ai_interests.txt") -> Set[str]:
+    def get_analyzed_news_ids(self, source_type: str = "hotlist", date: Optional[datetime] = None, interests_file: str = "ai_interests.txt") -> Set[str]:
         return set()
 
-    def clear_analyzed_news(self, date: Optional[str] = None, interests_file: str = "ai_interests.txt") -> int:
+    def clear_analyzed_news(self, date: Optional[datetime] = None, interests_file: str = "ai_interests.txt") -> int:
         return 0
 
-    def clear_unmatched_analyzed_news(self, date: Optional[str] = None, interests_file: str = "ai_interests.txt") -> int:
+    def clear_unmatched_analyzed_news(self, date: Optional[datetime] = None, interests_file: str = "ai_interests.txt") -> int:
         return 0
 
-    def get_all_news_ids(self, date: Optional[str] = None) -> List[Dict]:
+    def get_all_news_ids(self, date: Optional[datetime] = None) -> List[Dict]:
         return []
 
     @abstractmethod
-    def get_data_by_latest_crawl_range(
+    def get_news_list_by_latest_crawl_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[str] = None,
-        end_time: Optional[str] = None,
-    ) -> Optional[NewsData]:
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> Optional[List[NewsItem]]:
         pass
 
     @abstractmethod
-    def get_data_by_first_time_range(
+    def get_news_list_by_first_time_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[str] = None,
-        end_time: Optional[str] = None,
-    ) -> Optional[NewsData]:
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> Optional[List[NewsItem]]:
+        pass
+
+    @abstractmethod
+    def get_keywords_by_last_time_range(
+        self,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> List[Keyword]:
+        """根据 last_time 范围查询关键词表。"""
+        pass
+
+    @abstractmethod
+    def get_entities_by_last_time_range(
+        self,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> List[Entity]:
+        """根据 last_time 范围查询实体表。"""
+        pass
+
+    @abstractmethod
+    def get_news_list_by_keyword_ids(
+        self,
+        keyword_ids: List[int],
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> List[NewsItem]:
+        """根据 keyword id 列表查询 NewsItem。"""
+        pass
+
+    @abstractmethod
+    def get_news_list_by_entity_ids(
+        self,
+        entity_ids: List[int],
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> List[NewsItem]:
+        """根据 entity id 列表查询 NewsItem。"""
         pass
 
 
 class NewsDomainService:
-    def __init__(self, storage: StorageBackend) -> None:
+    def __init__(self, storage: NewsItemRepository) -> None:
         self.storage = storage
         self.rank_threshold: int = 10
         self.weight_config: Dict[str, float] = {
@@ -422,20 +531,21 @@ class NewsDomainService:
             "HOTNESS_WEIGHT": 0.1,
         }
 
-    def set_total_weight(self, item: NewsItem) -> float:
-        """基于 rank_timeline 计算并设置综合权重。"""
+    def _set_total_weight(self, item: NewsItem) -> float:
+        """基于 rank_timeline 计算并设置综合权重。
+        同步更新keywords/entities的weigh字段，默认使用total_weigh值。"""
         ranks: List[int] = []
-        for point in item.rank_timeline:
-            rank = point.get("rank")
-            if rank is None:
+        for _, rank in item.rank_timeline:
+            if rank <= 0:
                 continue
-            try:
-                ranks.append(int(rank))
-            except (TypeError, ValueError):
-                continue
+            ranks.append(rank)
 
         if not ranks:
             item.total_weigh = 0.0
+            for keyword in item.keywords:
+                keyword.weigh = item.total_weigh
+            for entity in item.entities:
+                entity.weigh = item.total_weigh
             return item.total_weigh
 
         count = item.count or len(ranks)
@@ -457,8 +567,86 @@ class NewsDomainService:
             + frequency_weight * float(self.weight_config.get("FREQUENCY_WEIGHT", 0.3))
             + hotness_weight * float(self.weight_config.get("HOTNESS_WEIGHT", 0.1))
         )
+
+        for keyword in item.keywords:
+            keyword.weigh = item.total_weigh*keyword.importance
+        for entity in item.entities:
+            entity.weigh = item.total_weigh
+
         return item.total_weigh
 
+    def recommend_hot_terms_by_time_range(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        top_n: int = 10,
+    ) -> Tuple[List[Keyword], List[Entity]]:
+        """
+        - 通过 keyword 和 entity 推荐热点 topic 候选
+        - 返回 (keyword_list, entity_list)
+        """
+        keywords = self.get_keywords_by_time_range(start_time, end_time)
+        entities = self.get_entities_by_time_range(start_time, end_time)
+
+        keyword_agg: Dict[str, Keyword] = {}
+        for keyword in keywords:
+            key = keyword.term.strip()
+            if not key:
+                continue
+
+            if key not in keyword_agg:
+                keyword_agg[key] = Keyword(
+                    id=int(keyword.id) if int(keyword.id) > 0 else -1,
+                    term=key,
+                    importance=float(keyword.importance),
+                    weigh=0.0,
+                )
+
+            agg_keyword = keyword_agg[key]
+            agg_keyword.weigh += float(keyword.weigh)
+            if int(keyword.id) > 0 and int(agg_keyword.id) <= 0:
+                agg_keyword.id = int(keyword.id)
+
+        entity_agg: Dict[str, Entity] = {}
+        for entity in entities:
+            key = entity.name.strip()
+            if not key:
+                continue
+
+            if key not in entity_agg:
+                entity_agg[key] = Entity(
+                    id=int(entity.id) if int(entity.id) > 0 else -1,
+                    name=key,
+                    type=entity.type,
+                    weigh=0.0,
+                )
+
+            agg_entity = entity_agg[key]
+            agg_entity.weigh += float(entity.weigh)
+            if int(entity.id) > 0 and int(agg_entity.id) <= 0:
+                agg_entity.id = int(entity.id)
+
+        # 去重：name 与 term 相同，保留 weigh 总和更高的一侧
+        overlap_keys = set(keyword_agg.keys()) & set(entity_agg.keys())
+        for key in overlap_keys:
+            if float(keyword_agg[key].weigh) >= float(entity_agg[key].weigh):
+                del entity_agg[key]
+            else:
+                del keyword_agg[key]
+
+        sorted_keywords = [
+            v
+            for _, v in sorted(keyword_agg.items(), key=lambda x: float(x[1].weigh), reverse=True)
+            if int(v.id) > 0
+        ][: max(1, top_n)]
+
+        sorted_entities = [
+            v
+            for _, v in sorted(entity_agg.items(), key=lambda x: float(x[1].weigh), reverse=True)
+            if int(v.id) > 0
+        ][: max(1, top_n)]
+
+        return sorted_keywords, sorted_entities
 
     def applyNewsField(self, src: NewsItem, target: NewsItem) -> NewsItem:
         if src.title not in (None, ""):
@@ -472,9 +660,9 @@ class NewsDomainService:
         if src.summary not in (None, ""):
             target.summary = src.summary
         if src.entities:
-            target.entities = [Entity(name=entity.name, type=entity.type) for entity in src.entities]
+            target.entities = [Entity(id=entity.id, name=entity.name, type=entity.type, weigh=entity.weigh) for entity in src.entities]
         if src.keywords:
-            target.keywords = [Keyword(term=keyword.term, importance=keyword.importance) for keyword in src.keywords]
+            target.keywords = [Keyword(id=keyword.id, term=keyword.term, importance=keyword.importance, weigh=keyword.weigh) for keyword in src.keywords]
         if src.latest_rank is not None:
             target.latest_rank = src.latest_rank
         if src.url not in (None, ""):
@@ -497,27 +685,29 @@ class NewsDomainService:
             target.controversy_score = src.controversy_score
         if src.attention_score is not None:
             target.attention_score = src.attention_score
-        if src.last_time not in (None, ""):
+        if src.last_time is not None:
             target.last_time = src.last_time
-        if src.analyzed_time not in (None, ""):
+        if src.analyzed_time is not None:
             target.analyzed_time = src.analyzed_time
-        if src.rank_timeline:
-            combined_timeline = target.rank_timeline + [dict(point) for point in src.rank_timeline]
-            dedup_timeline: List[Dict[str, Any]] = []
-            seen: Set[tuple[str, Any]] = set()
+        if src.rank_timeline_obj:
+            combined_timeline = target.rank_timeline_obj + src.rank_timeline_obj
+            dedup_timeline: List[RankTimelineEntry] = []
+            seen: Set[Tuple[datetime, int]] = set()
             for point in combined_timeline:
-                key = (str(point.get("time", "")), point.get("rank"))
+                if point.time is None:
+                    continue
+                key = (point.time, point.rank)
                 if key in seen:
                     continue
                 seen.add(key)
                 dedup_timeline.append(point)
 
-            target.rank_timeline = sorted(
+            target.rank_timeline_obj = sorted(
                 dedup_timeline,
-                key=lambda x: (x.get("time", ""), x.get("rank") is None, x.get("rank", 0)),
+                key=lambda x: (x.time, x.rank <= 0, x.rank if x.rank > 0 else 0),
             )
         if src.total_weigh is not None:
-            self.set_total_weight(target)
+            self._set_total_weight(target)
         return target
 
     def add_news_items(self, data: NewsData) -> List[NewsItem]:
@@ -527,7 +717,7 @@ class NewsDomainService:
             return []
 
         for item in news_items:
-            self.set_total_weight(item)
+            self._set_total_weight(item)
 
         saved = self.storage.add_news_items(news_items)
         return saved
@@ -538,7 +728,7 @@ class NewsDomainService:
             return []
 
         for item in news_list:
-            self.set_total_weight(item)
+            self._set_total_weight(item)
 
         return self.storage.add_news_items(news_list)
 
@@ -548,19 +738,58 @@ class NewsDomainService:
             news_items.extend(news_list)
         return news_items
     
-    def group_news_items_to_news_data(self, news_items: List[NewsItem]) -> NewsData:
+    def group_news_items_by_platform(self, news_items: List[NewsItem]) -> Dict[str, List[NewsItem]]:
         items: Dict[str, List[NewsItem]] = {}
         for item in news_items:
             if item.source_id not in items:
                 items[item.source_id] = []
             items[item.source_id].append(item)
+        return items
 
-        crawl_date = news_items[0].first_time[:10] if news_items and news_items[0].last_time else ""
-        last_time = news_items[0].last_time if news_items and news_items[0].last_time else ""
-        return NewsData(
-            date=crawl_date,
-            last_time=last_time,
-            items=items,
+    def get_keywords_by_time_range(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> List[Keyword]:
+        """根据起止时间获取关键词列表（直接查询关键词表）。"""
+        return self.storage.get_keywords_by_last_time_range(
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+    def get_entities_by_time_range(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> List[Entity]:
+        """根据起止时间获取实体列表（直接查询实体表）。"""
+        return self.storage.get_entities_by_last_time_range(
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+    def get_news_list_by_keyword_ids(
+        self,
+        keyword_ids: List[int],
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> List[NewsItem]:
+        return self.storage.get_news_list_by_keyword_ids(
+            keyword_ids=keyword_ids,
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+    def get_news_list_by_entity_ids(
+        self,
+        entity_ids: List[int],
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> List[NewsItem]:
+        return self.storage.get_news_list_by_entity_ids(
+            entity_ids=entity_ids,
+            start_time=start_time,
+            end_time=end_time,
         )
     
     def update_existing_crawled_titles(self, news_list: List[NewsItem]) -> List[NewsItem]:
@@ -572,7 +801,7 @@ class NewsDomainService:
             return []
     
         for item in news_list:
-            self.set_total_weight(item)
+            self._set_total_weight(item)
     
         ok = self.storage.update_crawled_news_list(news_list)
         return ok
@@ -589,7 +818,11 @@ class NewsDomainService:
             return False
 
         existing_items = self.get_news_list_by_source_title_list(key_list)
-        existing_map = self.group_news_items_to_news_data(existing_items).items
+        existing_map: Dict[Tuple[str, str], NewsItem] = {
+            (item.source_id, item.title): item
+            for item in existing_items
+            if item.source_id and item.title
+        }
 
         merged_items: List[NewsItem] = []
         for incoming in news_list:
@@ -599,7 +832,7 @@ class NewsDomainService:
                 continue
 
             merged = self.applyNewsField(incoming, existing)
-            self.set_total_weight(merged)
+            self._set_total_weight(merged)
             merged_items.append(merged)
 
         if not merged_items:
@@ -611,33 +844,44 @@ class NewsDomainService:
             return False
         return self.storage.update_news_list([item])
 
-    def get_latest_crawl_data(self, date: Optional[str] = None) -> Optional[NewsData]:
+    def get_latest_crawl_data(self, date: Optional[datetime] = None) -> Optional[NewsData]:
         return self.storage.get_latest_crawl_data(date)
 
-    def get_data_by_first_time_range(
+    def get_news_list_by_firt_time_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[str] = None,
-        end_time: Optional[str] = None,
-    ) -> Optional[NewsData]:
-        return self.storage.get_data_by_first_time_range(
-            isAnalyzed=isAnalyzed,
-            start_time=start_time,
-            end_time=end_time,
-        )
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> Optional[List[NewsItem]]:
+        return self.storage.get_news_list_by_first_time_range(isAnalyzed=isAnalyzed, start_time=start_time, end_time=end_time)
 
-    def get_data_by_latest_crawl_range(
+    def get_group_news_by_first_time_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[str] = None,
-        end_time: Optional[str] = None,
-    ) -> Optional[NewsData]:
-        return self.storage.get_data_by_latest_crawl_range(
-            isAnalyzed=isAnalyzed,
-            start_time=start_time,
-            end_time=end_time,
-        )
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> Dict[str, List[NewsItem]]:
+        news_items = self.get_news_list_by_firt_time_range(isAnalyzed=isAnalyzed, start_time=start_time, end_time=end_time)
+        result = self._group_items_by_source(news_items) if news_items else {}
+        return result
 
-    def detect_new_titles(self, current_data: NewsData) -> Dict[str, Dict]:
-        return self.storage.detect_new_titles(current_data)
+    def get_group_news_by_latest_crawl_range(
+        self,
+        isAnalyzed: bool,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> Optional[Dict[str, List[NewsItem]]]:
+        news_items = self.get_news_list_by_latest_crawl_range(isAnalyzed=isAnalyzed, start_time=start_time, end_time=end_time)
+        if news_items is None:
+            return None
+        result = self.group_news_items_by_platform(news_items)
+        return result
+    
+    def get_news_list_by_latest_crawl_range(
+        self,
+        isAnalyzed: bool,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> Optional[List[NewsItem]]:
+        return self.storage.get_news_list_by_latest_crawl_range(isAnalyzed=isAnalyzed, start_time=start_time, end_time=end_time)
 

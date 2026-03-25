@@ -1,10 +1,11 @@
 ﻿import json
+import logging
 import os
 import random
 import time
 from typing import Any
 
-from openai import OpenAI, RateLimitError
+from openai import BadRequestError, OpenAI, RateLimitError
 
 
 EVENT_TYPE_MAP = {
@@ -27,6 +28,9 @@ POLARITY_SET = {"positive", "negative", "neutral", "mixed"}
 ENTITY_TYPE_SET = {"company", "product", "person", "policy", "org", "unknown"}
 
 
+logger = logging.getLogger(__name__)
+
+
 class LLMTitleAnalyzer:
     def __init__(
         self,
@@ -40,11 +44,11 @@ class LLMTitleAnalyzer:
         self.model = model
         self.client = OpenAI(api_key=api_key, base_url=base_url
                             )
-        self.prompt_file = os.path.join(os.path.dirname(__file__), "system_prompt.txt")
+        self.prompt_file = os.path.join(os.path.dirname(__file__), "analyze_title_prompt.txt")
         self.max_retries = 5
         self.initial_retry_delay = 1.0
 
-    def _get_system_prompt(self) -> str:
+    def _get_analyze_title_prompt(self) -> str:
         with open(self.prompt_file, "r", encoding="utf-8") as f:
             return f.read().strip()
 
@@ -133,7 +137,7 @@ class LLMTitleAnalyzer:
             raise ValueError("LLM payload is not a JSON object")
 
         event_type_raw = str(payload.get("event_type", "other")).strip()
-        event_type = EVENT_TYPE_MAP.get(event_type_raw, "other")
+        event_type = EVENT_TYPE_MAP.get(event_type_raw, event_type_raw)
 
         summary = str(payload.get("summary", "")).strip()
         if not summary:
@@ -147,6 +151,40 @@ class LLMTitleAnalyzer:
             "sentiment_analysis": self._normalize_sentiment(payload.get("sentiment_analysis", {})),
         }
 
+    @staticmethod
+    def _extract_error_code(exc: BadRequestError) -> str:
+        # Compatible with different OpenAI SDK error payload shapes.
+        if getattr(exc, "code", None):
+            return str(exc.code)
+
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            err = body.get("error", {})
+            if isinstance(err, dict) and err.get("code"):
+                return str(err.get("code"))
+        return ""
+
+    def _build_empty_result(self) -> dict[str, Any]:
+        """Return a safe fallback payload that can be persisted by downstream logic."""
+        return {
+            "entities": [],
+            "event_type": "other",
+            "summary": "该标题触发内容审核，未返回可用分析结果。",
+            "keywords": [],
+            "sentiment_analysis": {
+                "polarity": "neutral",
+                "positive_ratio": 0.0,
+                "negative_ratio": 0.0,
+                "neutral_ratio": 1.0,
+                "dimensions": {
+                    "optimism": 0.5,
+                    "trust": 0.5,
+                    "attention": 0.75,
+                    "controversy": 0.0,
+                },
+            },
+        }
+
     def analyze_title(self, title: str) -> dict[str, Any]:
         if not title or not title.strip():
             raise ValueError("title cannot be empty")
@@ -154,7 +192,7 @@ class LLMTitleAnalyzer:
         for attempt in range(1, self.max_retries + 1):
             try:
                 messages = [
-                    {"role": "system", "content": self._get_system_prompt()},
+                    {"role": "system", "content": self._get_analyze_title_prompt()},
                     {
                         "role": "user",
                         "content": (
@@ -176,15 +214,36 @@ class LLMTitleAnalyzer:
                 payload = json.loads(self._strip_json_fence(raw_content))
                 formatted_result = self._normalize_result(payload)
                 return formatted_result
+            except BadRequestError as e:
+                error_code = self._extract_error_code(e)
+                if error_code == "data_inspection_failed":
+                    logger.warning(
+                        "LLM 内容审核拦截，返回空分析结果。title=%s, code=%s",
+                        title,
+                        error_code,
+                    )
+                    return self._build_empty_result()
+
+                logger.exception(
+                    "LLM 分析标题 BadRequest，停止重试。title=%s, code=%s",
+                    title,
+                    error_code,
+                )
+                raise
             except RateLimitError as e:
                 if attempt < self.max_retries:
                     wait_seconds = self.initial_retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
                     time.sleep(wait_seconds)
                     continue
-                print(f"LLM 分析标题连续触发速率限制，已超过重试次数。标题: {title}")
+                logger.exception("LLM 分析标题连续触发速率限制，已超过重试次数。title=%s", title)
                 raise
-            except Exception as e:
-                print(f"LLM 分析标题异常 (非速率限制)。标题: {title}，异常: {e}")
+            except Exception:
+                if attempt < self.max_retries:
+                    wait_seconds = self.initial_retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                    time.sleep(wait_seconds)
+                    continue
+
+                logger.exception("LLM 分析标题异常 (非速率限制)，已超过重试次数。title=%s", title)
                 raise
 
     def analyze_titles(self, titles: list[str]) -> list[dict[str, Any]]:

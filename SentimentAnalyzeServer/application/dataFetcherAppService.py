@@ -5,11 +5,13 @@ from typing import Any, Dict, List
 
 import yaml
 
+from SentimentAnalyzeServer.application.common import EVENT_CRAWL_SAVED, EventManager
 from SentimentAnalyzeServer.domain.crawler import DataFetcher
 from SentimentAnalyzeServer.domain.news.news import (
     NewsData,
     NewsItem,
     NewsDomainService,
+    RankTimelineEntry,
 )
 
 
@@ -18,6 +20,7 @@ class DataFetcherAppService:
         self.config_path = Path(config_path)
         self.fetcher = DataFetcher()
         self.news_domain_service = NewsDomainService(storage)
+        self.event_manager = EventManager()
 
     def _load_platforms(self) -> list[tuple[str, str]]:
         with self.config_path.open("r", encoding="utf-8") as f:
@@ -49,8 +52,8 @@ class DataFetcherAppService:
         )
 
         now = datetime.now()
-        crawl_date = now.strftime("%Y-%m-%d")
-        last_time = now.strftime("%Y-%m-%d %H:%M")
+        crawl_date = datetime(now.year, now.month, now.day)
+        last_time = now
         try:
             saved_items = self.convert_crawl_results_and_save(
                 results=results,
@@ -84,8 +87,8 @@ class DataFetcherAppService:
         results: Dict[str, Dict],
         id_to_name: Dict[str, str],
         failed_ids: List[str],
-        last_time: str,
-        crawl_date: str,
+        last_time: datetime,
+        crawl_date: datetime,
     ) -> NewsData:
         items: Dict[str, List[NewsItem]] = {}
 
@@ -99,6 +102,10 @@ class DataFetcherAppService:
                 mobile_url = data.get("mobileUrl", "")
 
                 latest_rank = ranks[0] if ranks else 99
+                try:
+                    latest_rank = int(latest_rank)
+                except (TypeError, ValueError):
+                    latest_rank = 99
 
                 news_item = NewsItem(
                     title=title,
@@ -109,7 +116,7 @@ class DataFetcherAppService:
                     mobile_url=mobile_url,
                     first_time=last_time,
                     last_time=last_time,
-                    rank_timeline=[{"time": last_time, "rank": latest_rank}],
+                    rank_timeline_obj=[RankTimelineEntry(time=last_time, rank=latest_rank)],
                 )
                 news_list.append(news_item)
 
@@ -134,8 +141,8 @@ class DataFetcherAppService:
         results: Dict[str, Dict],
         id_to_name: Dict[str, str],
         failed_ids: List[str],
-        last_time: str,
-        crawl_date: str,
+        last_time: datetime,
+        crawl_date: datetime,
     ) -> List[NewsItem]:
         current_data = self.convert_crawl_results_to_news_data(
             results=results,
@@ -144,6 +151,7 @@ class DataFetcherAppService:
             last_time=last_time,
             crawl_date=crawl_date,
         )
+        current_data.merge_duplicate_titles_by_source()
 
         incoming_items: List[NewsItem] = []
         for news_list in current_data.items.values():
@@ -154,14 +162,18 @@ class DataFetcherAppService:
 
         key_list = list({(item.source_id, item.title) for item in incoming_items if item.source_id and item.title})
         existing_items = self.news_domain_service.get_news_list_by_source_title_list(key_list)
-        existing_keys = {(item.source_id, item.title) for item in existing_items}
+        existing_item_map = {(item.source_id, item.title): item for item in existing_items}
 
         new_items_by_source: Dict[str, List[NewsItem]] = {}
-        existing_news_items: List[NewsItem] = []
+        merged_items: List[NewsItem] = []
         for source_id, news_list in current_data.items.items():
             for item in news_list:
-                if (item.source_id, item.title) in existing_keys:
-                    existing_news_items.append(item)
+                key = (item.source_id, item.title)
+                if key in existing_item_map:
+                    # 用新数据更新既存项
+                    existing_item = existing_item_map[key]
+                    self.news_domain_service.applyNewsField(item, existing_item)
+                    merged_items.append(existing_item)
                 else:
                     new_items_by_source.setdefault(source_id, []).append(item)
 
@@ -176,10 +188,20 @@ class DataFetcherAppService:
                 raise RuntimeError("保存新增新闻数据失败")
             saved_items.extend(added_items)
 
-        if existing_news_items:
-            updated_items = self.news_domain_service.update_existing_crawled_titles(existing_news_items)
+        if merged_items:
+            updated_items = self.news_domain_service.update_existing_crawled_titles(merged_items)
             if not updated_items:
                 raise RuntimeError("更新已存在新闻数据失败")
             saved_items.extend(updated_items)
+
+        if saved_items:
+            self.event_manager.publish(
+                EVENT_CRAWL_SAVED,
+                {
+                    "saved_items": saved_items,
+                    "last_time": last_time,
+                    "crawl_date": crawl_date,
+                },
+            )
 
         return saved_items

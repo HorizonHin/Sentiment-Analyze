@@ -1,17 +1,24 @@
 import os
 import time
 from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 try:
     import pyodbc
 except ImportError:
     raise ImportError("pyodbc is required for MSSQL backend. Install with: pip install pyodbc")
 
-from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsData, NewsItem, StorageBackend
+from SentimentAnalyzeServer.domain.news.news import (
+    Entity,
+    Keyword,
+    NewsData,
+    NewsItem,
+    NewsItemRepository,
+    RankTimelineEntry,
+)
 
 
-class MSSQLStorageBackend(StorageBackend):
+class SqlServerNewsItemRepository(NewsItemRepository):
     """基于 SQL Server 的新闻数据存储后端。"""
 
     def __init__(
@@ -85,6 +92,8 @@ class MSSQLStorageBackend(StorageBackend):
             return datetime(value.year, value.month, value.day)
 
         text = str(value).strip().replace("T", " ")
+        # 兼容历史数据里可能存在的尾随小数点：2026-03-25 13:26:48.
+        text = text.rstrip(".")
         if len(text) == 10:
             date_part = self._parse_date_value(text)
             if date_part is not None:
@@ -112,6 +121,60 @@ class MSSQLStorageBackend(StorageBackend):
         if parsed is not None:
             return parsed.strftime("%Y-%m-%d %H:%M:%S")
         return "" if value is None else str(value)
+
+    def _normalize_timeline_point(self, point: object) -> Optional[Tuple[str, int]]:
+        """兼容 tuple/list/dict 的 timeline 点，统一返回 (time, rank)。"""
+        time_value = ""
+        rank_value: Optional[object] = None
+
+        if isinstance(point, dict):
+            time_value = str(point.get("time", "")).strip()
+            rank_value = point.get("rank")
+        elif isinstance(point, (list, tuple)) and len(point) >= 2:
+            time_value = str(point[0]).strip()
+            rank_value = point[1]
+        else:
+            return None
+
+        if not time_value:
+            return None
+
+        if rank_value is None:
+            rank_int = 0
+        else:
+            try:
+                rank_int = int(rank_value)
+            except (TypeError, ValueError):
+                return None
+
+        return (time_value, rank_int)
+
+    def _upsert_rank_timeline_for_item(self, cursor: pyodbc.Cursor, item: NewsItem) -> None:
+        """仅插入新的 rank_timeline 记录（id<=0）。"""
+        news_item_id = int(item.id)
+        if news_item_id <= 0:
+            return
+
+        for point in item.rank_timeline_obj:
+            # 只插入新数据（id <= 0）
+            if point.id and int(point.id) > 0:
+                continue
+
+            timeline_time = self._parse_datetime_value(point.time)
+            if timeline_time is None:
+                timeline_time = self._parse_datetime_value(item.last_time) or datetime.now()
+
+            rank_value = point.rank if point.rank > 0 else None
+
+            cursor.execute(
+                "INSERT INTO rank_timeline(news_item_id, timeline_time, rank_value) OUTPUT INSERTED.id VALUES (?, ?, ?)",
+                news_item_id,
+                timeline_time,
+                rank_value,
+            )
+            inserted = cursor.fetchone()
+            if inserted and inserted[0] is not None:
+                point.id = int(inserted[0])
 
     def _init_db(self) -> None:
         conn = self._get_connection()
@@ -155,8 +218,9 @@ class MSSQLStorageBackend(StorageBackend):
                     id INT PRIMARY KEY IDENTITY(1,1),
                     news_item_id INT NOT NULL,
                     term NVARCHAR(500) NOT NULL,
-                    create_time DATETIME2 DEFAULT GETDATE(),
+                    last_time DATETIME2 DEFAULT GETDATE(),
                     importance FLOAT DEFAULT 0.0,
+                    weigh FLOAT DEFAULT 0.0,
                     FOREIGN KEY (news_item_id) REFERENCES NewsItem(id) ON DELETE CASCADE
                 );
             """)
@@ -169,9 +233,40 @@ class MSSQLStorageBackend(StorageBackend):
                     news_item_id INT NOT NULL,
                     name NVARCHAR(200) NOT NULL,
                     entity_type NVARCHAR(100) NOT NULL,
-                    create_time DATETIME2 DEFAULT GETDATE(),
+                    last_time DATETIME2 DEFAULT GETDATE(),
+                    weigh FLOAT DEFAULT 0.0,
                     FOREIGN KEY (news_item_id) REFERENCES NewsItem(id) ON DELETE CASCADE
                 );
+            """)
+
+            cursor.execute("""
+                IF COL_LENGTH('Keyword', 'last_time') IS NULL AND COL_LENGTH('Keyword', 'create_time') IS NOT NULL
+                EXEC sp_rename 'Keyword.create_time', 'last_time', 'COLUMN';
+            """)
+
+            cursor.execute("""
+                IF COL_LENGTH('Entity', 'last_time') IS NULL AND COL_LENGTH('Entity', 'create_time') IS NOT NULL
+                EXEC sp_rename 'Entity.create_time', 'last_time', 'COLUMN';
+            """)
+
+            cursor.execute("""
+                IF COL_LENGTH('Keyword', 'last_time') IS NULL
+                ALTER TABLE Keyword ADD last_time DATETIME2 DEFAULT GETDATE();
+            """)
+
+            cursor.execute("""
+                IF COL_LENGTH('Entity', 'last_time') IS NULL
+                ALTER TABLE Entity ADD last_time DATETIME2 DEFAULT GETDATE();
+            """)
+
+            cursor.execute("""
+                IF COL_LENGTH('Keyword', 'weigh') IS NULL
+                ALTER TABLE Keyword ADD weigh FLOAT DEFAULT 0.0;
+            """)
+
+            cursor.execute("""
+                IF COL_LENGTH('Entity', 'weigh') IS NULL
+                ALTER TABLE Entity ADD weigh FLOAT DEFAULT 0.0;
             """)
 
             # 创建 rank_timeline 表
@@ -220,33 +315,204 @@ class MSSQLStorageBackend(StorageBackend):
             conn.close()
 
     def _replace_keyword_and_entity(self, conn: pyodbc.Connection, valid_news: List[NewsItem]) -> None:
+        """插入新数据；已有数据更新 weigh 和 last_time 字段。"""
         cursor = conn.cursor()
 
         for item in valid_news:
-            cursor.execute("DELETE FROM Keyword WHERE news_item_id = ?", int(item.id))
-            cursor.execute("DELETE FROM Entity WHERE news_item_id = ?", int(item.id))
-
-        for item in valid_news:
-            create_time = self._parse_datetime_value(item.last_time) or datetime.now()
+            last_time = self._parse_datetime_value(item.last_time) or datetime.now()
+            weigh_value = float(item.total_weigh)
             for keyword in item.keywords:
+                if keyword.id and int(keyword.id) > 0:
+                    cursor.execute(
+                        "UPDATE Keyword SET weigh = ?, last_time = ? WHERE id = ? AND news_item_id = ?",
+                        weigh_value,
+                        last_time,
+                        int(keyword.id),
+                        int(item.id),
+                    )
+                    continue
                 cursor.execute(
-                    "INSERT INTO Keyword(news_item_id, term, create_time, importance) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO Keyword(news_item_id, term, last_time, importance, weigh) VALUES (?, ?, ?, ?, ?)",
                     int(item.id),
                     keyword.term,
-                    create_time,
+                    last_time,
                     keyword.importance,
+                    weigh_value,
                 )
 
         for item in valid_news:
-            create_time = self._parse_datetime_value(item.last_time) or datetime.now()
+            last_time = self._parse_datetime_value(item.last_time) or datetime.now()
+            weigh_value = float(item.total_weigh)
             for entity in item.entities:
+                if entity.id and int(entity.id) > 0:
+                    cursor.execute(
+                        "UPDATE Entity SET weigh = ?, last_time = ? WHERE id = ? AND news_item_id = ?",
+                        weigh_value,
+                        last_time,
+                        int(entity.id),
+                        int(item.id),
+                    )
+                    continue
                 cursor.execute(
-                    "INSERT INTO Entity(news_item_id, name, entity_type, create_time) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO Entity(news_item_id, name, entity_type, last_time, weigh) VALUES (?, ?, ?, ?, ?)",
                     int(item.id),
                     entity.name,
                     entity.type,
-                    create_time,
+                    last_time,
+                    weigh_value,
                 )
+
+    def _build_datetime_range_clause(
+        self,
+        column_name: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> Tuple[str, List]:
+        where_clauses: List[str] = []
+        params: List = []
+
+        start_dt = self._parse_datetime_value(start_time) if start_time else None
+        end_dt = self._parse_datetime_value(end_time) if end_time else None
+
+        if start_dt and end_dt:
+            if start_dt <= end_dt:
+                where_clauses.append(f"{column_name} >= ? AND {column_name} <= ?")
+                params.extend([start_dt, end_dt])
+            else:
+                where_clauses.append(f"({column_name} >= ? OR {column_name} <= ?)")
+                params.extend([start_dt, end_dt])
+        elif start_dt:
+            where_clauses.append(f"{column_name} >= ?")
+            params.append(start_dt)
+        elif end_dt:
+            where_clauses.append(f"{column_name} <= ?")
+            params.append(end_dt)
+
+        if not where_clauses:
+            return "1=1", params
+        return " AND ".join(where_clauses), params
+
+    def get_keywords_by_last_time_range(
+        self,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> List[Keyword]:
+        where_sql, params = self._build_datetime_range_clause(
+            column_name="last_time",
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                f"SELECT id, term, importance, weigh FROM Keyword WHERE {where_sql} ORDER BY last_time ASC, id ASC",
+                *params,
+            )
+            result: List[Keyword] = []
+            for row in cursor.fetchall():
+                result.append(
+                    Keyword(
+                        id=int(row[0]),
+                        term=str(row[1]),
+                        importance=float(row[2] if row[2] is not None else 0.0),
+                        weigh=float(row[3] if row[3] is not None else 0.0),
+                    )
+                )
+            return result
+        finally:
+            conn.close()
+
+    def get_entities_by_last_time_range(
+        self,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> List[Entity]:
+        where_sql, params = self._build_datetime_range_clause(
+            column_name="last_time",
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                f"SELECT id, name, entity_type, weigh FROM Entity WHERE {where_sql} ORDER BY last_time ASC, id ASC",
+                *params,
+            )
+            result: List[Entity] = []
+            for row in cursor.fetchall():
+                result.append(
+                    Entity(
+                        id=int(row[0]),
+                        name=str(row[1]),
+                        type=str(row[2]),
+                        weigh=float(row[3] if row[3] is not None else 0.0),
+                    )
+                )
+            return result
+        finally:
+            conn.close()
+
+    def get_news_list_by_keyword_ids(
+        self,
+        keyword_ids: List[int],
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> List[NewsItem]:
+        valid_ids = [int(i) for i in keyword_ids if int(i) > 0]
+        if not valid_ids:
+            return []
+
+        placeholders = ",".join("?" * len(valid_ids))
+        where_clauses = [
+            f"id IN (SELECT DISTINCT news_item_id FROM Keyword WHERE id IN ({placeholders}))"
+        ]
+        params: List = list(valid_ids)
+
+        time_where_sql, time_params = self._build_datetime_range_clause(
+            column_name="first_time",
+            start_time=start_time,
+            end_time=end_time,
+        )
+        if time_where_sql != "1=1":
+            where_clauses.append(time_where_sql)
+            params.extend(time_params)
+
+        where_sql = " AND ".join(where_clauses)
+        items = self._load_filtered_data(where_sql=where_sql, params=params)
+        return items if items is not None else []
+
+    def get_news_list_by_entity_ids(
+        self,
+        entity_ids: List[int],
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> List[NewsItem]:
+        valid_ids = [int(i) for i in entity_ids if int(i) > 0]
+        if not valid_ids:
+            return []
+
+        placeholders = ",".join("?" * len(valid_ids))
+        where_clauses = [
+            f"id IN (SELECT DISTINCT news_item_id FROM Entity WHERE id IN ({placeholders}))"
+        ]
+        params: List = list(valid_ids)
+
+        time_where_sql, time_params = self._build_datetime_range_clause(
+            column_name="first_time",
+            start_time=start_time,
+            end_time=end_time,
+        )
+        if time_where_sql != "1=1":
+            where_clauses.append(time_where_sql)
+            params.extend(time_params)
+
+        where_sql = " AND ".join(where_clauses)
+        items = self._load_filtered_data(where_sql=where_sql, params=params)
+        return items if items is not None else []
 
     def add_news_items(self, news_list: List[NewsItem]) -> List[NewsItem]:
         key_list = list(
@@ -310,28 +576,10 @@ class MSSQLStorageBackend(StorageBackend):
                 row = cursor.fetchone()
                 if row:
                     item.id = row[0]
-                    item.last_time = self._to_datetime_str(row[1])
+                    item.last_time = self._parse_datetime_value(row[1])
 
-            # 删除旧的 rank_timeline
-            news_ids = [int(item.id) for item in news_list if item.id and int(item.id) > 0]
-            if news_ids:
-                placeholders = ",".join("?" * len(news_ids))
-                cursor.execute(f"DELETE FROM rank_timeline WHERE news_item_id IN ({placeholders})", news_ids)
-
-            # 插入新的 rank_timeline
             for item in news_list:
-                if item.id < 0:
-                    continue
-                for point in item.rank_timeline:
-                    timeline_time = self._parse_datetime_value(point.get("time"))
-                    if timeline_time is None:
-                        timeline_time = self._parse_datetime_value(item.last_time) or datetime.now()
-                    cursor.execute(
-                        "INSERT INTO rank_timeline(news_item_id, timeline_time, rank_value) VALUES (?, ?, ?)",
-                        int(item.id),
-                        timeline_time,
-                        point.get("rank"),
-                    )
+                self._upsert_rank_timeline_for_item(cursor, item)
 
             conn.commit()
             return self.get_news_list_by_source_title_list(key_list)
@@ -391,21 +639,8 @@ class MSSQLStorageBackend(StorageBackend):
                         int(item.id),
                     ))
 
-                news_ids = [int(item.id) for item in valid_news]
-                placeholders = ",".join("?" * len(news_ids))
-                cursor.execute(f"DELETE FROM rank_timeline WHERE news_item_id IN ({placeholders})", news_ids)
-
                 for item in valid_news:
-                    for point in item.rank_timeline:
-                        timeline_time = self._parse_datetime_value(point.get("time"))
-                        if timeline_time is None:
-                            timeline_time = self._parse_datetime_value(item.last_time) or datetime.now()
-                        cursor.execute(
-                            "INSERT INTO rank_timeline(news_item_id, timeline_time, rank_value) VALUES (?, ?, ?)",
-                            int(item.id),
-                            timeline_time,
-                            point.get("rank"),
-                        )
+                    self._upsert_rank_timeline_for_item(cursor, item)
 
                 self._replace_keyword_and_entity(conn, valid_news)
 
@@ -472,21 +707,8 @@ class MSSQLStorageBackend(StorageBackend):
                         ),
                     )
 
-                news_ids = [int(item.id) for item in valid_news]
-                placeholders = ",".join("?" * len(news_ids))
-                cursor.execute(f"DELETE FROM rank_timeline WHERE news_item_id IN ({placeholders})", news_ids)
-
                 for item in valid_news:
-                    for point in item.rank_timeline:
-                        timeline_time = self._parse_datetime_value(point.get("time"))
-                        if timeline_time is None:
-                            timeline_time = self._parse_datetime_value(item.last_time) or datetime.now()
-                        cursor.execute(
-                            "INSERT INTO rank_timeline(news_item_id, timeline_time, rank_value) VALUES (?, ?, ?)",
-                            int(item.id),
-                            timeline_time,
-                            point.get("rank"),
-                        )
+                    self._upsert_rank_timeline_for_item(cursor, item)
 
                 conn.commit()
                 return self.get_news_list_by_source_title_list(key_list)
@@ -525,16 +747,10 @@ class MSSQLStorageBackend(StorageBackend):
             return []
 
         where_sql = " OR ".join(where_conditions)
-        data = self._load_filtered_data(where_sql=where_sql, params=params)
-        if data is None:
-            return []
+        items = self._load_filtered_data(where_sql=where_sql, params=params)
+        return items if items is not None else []
 
-        items: List[NewsItem] = []
-        for news_list in data.items.values():
-            items.extend(news_list)
-        return items
-
-    def _load_filtered_data(self, where_sql: str, params: List) -> Optional[NewsData]:
+    def _load_filtered_data(self, where_sql: str, params: List) -> Optional[List[NewsItem]]:
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
@@ -542,7 +758,7 @@ class MSSQLStorageBackend(StorageBackend):
                 SELECT * FROM NewsItem
                 WHERE {where_sql}
                 ORDER BY news_date ASC, last_time ASC, source_id, latest_rank ASC
-            """, params)
+            """, *params)
 
             rows = cursor.fetchall()
             if not rows:
@@ -554,43 +770,46 @@ class MSSQLStorageBackend(StorageBackend):
             keywords_by_news: Dict[int, List[Keyword]] = {}
             if row_ids:
                 placeholders = ",".join("?" * len(row_ids))
-                cursor.execute(f"SELECT news_item_id, term, importance FROM Keyword WHERE news_item_id IN ({placeholders}) ORDER BY id", row_ids)
+                cursor.execute(f"SELECT id, news_item_id, term, importance, weigh FROM Keyword WHERE news_item_id IN ({placeholders}) ORDER BY id", *row_ids)
                 for keyword_row in cursor.fetchall():
-                    news_item_id = int(keyword_row[0])
+                    news_item_id = int(keyword_row[1])
                     keywords_by_news.setdefault(news_item_id, []).append(
-                        Keyword(term=str(keyword_row[1]), importance=float(keyword_row[2]))
+                        Keyword(id=int(keyword_row[0]), term=str(keyword_row[2]), importance=float(keyword_row[3]), weigh=float(keyword_row[4] if keyword_row[4] is not None else 0.0))
                     )
 
             # 获取 entities
             entities_by_news: Dict[int, List[Entity]] = {}
             if row_ids:
                 placeholders = ",".join("?" * len(row_ids))
-                cursor.execute(f"SELECT news_item_id, name, entity_type FROM Entity WHERE news_item_id IN ({placeholders}) ORDER BY id", row_ids)
+                cursor.execute(f"SELECT id, news_item_id, name, entity_type, weigh FROM Entity WHERE news_item_id IN ({placeholders}) ORDER BY id", *row_ids)
                 for entity_row in cursor.fetchall():
-                    news_item_id = int(entity_row[0])
+                    news_item_id = int(entity_row[1])
                     entities_by_news.setdefault(news_item_id, []).append(
-                        Entity(name=str(entity_row[1]), type=str(entity_row[2]))
+                        Entity(id=int(entity_row[0]), name=str(entity_row[2]), type=str(entity_row[3]), weigh=float(entity_row[4] if entity_row[4] is not None else 0.0))
                     )
 
             # 获取 rank_timeline
-            timeline_by_news: Dict[int, List[dict]] = {}
+            timeline_by_news: Dict[int, List[RankTimelineEntry]] = {}
             if row_ids:
                 placeholders = ",".join("?" * len(row_ids))
-                cursor.execute(f"SELECT news_item_id, timeline_time, rank_value FROM rank_timeline WHERE news_item_id IN ({placeholders}) ORDER BY id", row_ids)
+                cursor.execute(f"SELECT id, news_item_id, timeline_time, rank_value FROM rank_timeline WHERE news_item_id IN ({placeholders}) ORDER BY id", *row_ids)
                 for timeline_row in cursor.fetchall():
-                    news_item_id = int(timeline_row[0])
-                    timeline_by_news.setdefault(news_item_id, []).append({
-                        "time": self._to_datetime_str(timeline_row[1]),
-                        "rank": timeline_row[2],
-                    })
+                    timeline_id = int(timeline_row[0])
+                    news_item_id = int(timeline_row[1])
+                    rank_value = timeline_row[3]
+                    try:
+                        rank_int = int(rank_value) if rank_value is not None else 0
+                    except (TypeError, ValueError):
+                        rank_int = 0
+                    timeline_by_news.setdefault(news_item_id, []).append(
+                        RankTimelineEntry(id=timeline_id, time=self._parse_datetime_value(timeline_row[2]), rank=rank_int)
+                    )
 
-            items: Dict[str, List[NewsItem]] = {}
-            id_to_name: Dict[str, str] = {}
+            items: List[NewsItem] = []
 
             for row in rows:
                 source_id = str(row[3])
                 source_name = str(row[4])
-                id_to_name[source_id] = source_name
                 news_item_id = int(row[0])
 
                 item = NewsItem(
@@ -613,30 +832,20 @@ class MSSQLStorageBackend(StorageBackend):
                     trust_score=float(row[15]),
                     controversy_score=float(row[16]),
                     attention_score=float(row[17]),
-                    first_time=self._to_datetime_str(row[18]),
-                    last_time=self._to_datetime_str(row[19]),
-                    analyzed_time=self._to_datetime_str(row[20]) if row[20] is not None else None,
+                    first_time=self._parse_datetime_value(row[18]),
+                    last_time=self._parse_datetime_value(row[19]),
+                    analyzed_time=self._parse_datetime_value(row[20]) if row[20] is not None else None,
                     total_weigh=float(row[21]),
-                    rank_timeline=timeline_by_news.get(news_item_id, []),
+                    rank_timeline_obj=timeline_by_news.get(news_item_id, []),
                 )
-                items.setdefault(source_id, []).append(item)
+                items.append(item)
 
-            latest_news_date = self._to_date_str(rows[-1][1]) if rows else ""
-            latest_news_last_time = self._to_datetime_str(rows[-1][19]) if rows else ""
-
-            return NewsData(
-                date=latest_news_date,
-                last_time=latest_news_last_time,
-                items=items,
-                id_to_name=id_to_name,
-                failed_ids=[],
-            )
+            return items
         finally:
             conn.close()
 
-    def get_latest_crawl_data(self, date: Optional[str] = None) -> Optional[NewsData]:
-        date_str = date or datetime.now().strftime("%Y-%m-%d")
-        date_obj = self._parse_date_value(date_str) or datetime.now().date()
+    def get_latest_crawl_data(self, date: Optional[datetime] = None) -> Optional[NewsData]:
+        date_obj = self._parse_date_value(date) or datetime.now().date()
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
@@ -667,33 +876,38 @@ class MSSQLStorageBackend(StorageBackend):
             keywords_by_news: Dict[int, List[Keyword]] = {}
             if row_ids:
                 placeholders = ",".join("?" * len(row_ids))
-                cursor.execute(f"SELECT news_item_id, term, importance FROM Keyword WHERE news_item_id IN ({placeholders})", row_ids)
+                cursor.execute(f"SELECT id, news_item_id, term, importance, weigh FROM Keyword WHERE news_item_id IN ({placeholders})", *row_ids)
                 for keyword_row in cursor.fetchall():
-                    news_item_id = int(keyword_row[0])
+                    news_item_id = int(keyword_row[1])
                     keywords_by_news.setdefault(news_item_id, []).append(
-                        Keyword(term=str(keyword_row[1]), importance=float(keyword_row[2]))
+                        Keyword(id=int(keyword_row[0]), term=str(keyword_row[2]), importance=float(keyword_row[3]), weigh=float(keyword_row[4] if keyword_row[4] is not None else 0.0))
                     )
 
             entities_by_news: Dict[int, List[Entity]] = {}
             if row_ids:
                 placeholders = ",".join("?" * len(row_ids))
-                cursor.execute(f"SELECT news_item_id, name, entity_type FROM Entity WHERE news_item_id IN ({placeholders})", row_ids)
+                cursor.execute(f"SELECT id, news_item_id, name, entity_type, weigh FROM Entity WHERE news_item_id IN ({placeholders})", *row_ids)
                 for entity_row in cursor.fetchall():
-                    news_item_id = int(entity_row[0])
+                    news_item_id = int(entity_row[1])
                     entities_by_news.setdefault(news_item_id, []).append(
-                        Entity(name=str(entity_row[1]), type=str(entity_row[2]))
+                        Entity(id=int(entity_row[0]), name=str(entity_row[2]), type=str(entity_row[3]), weigh=float(entity_row[4] if entity_row[4] is not None else 0.0))
                     )
 
-            timeline_by_news: Dict[int, List[dict]] = {}
+            timeline_by_news: Dict[int, List[RankTimelineEntry]] = {}
             if row_ids:
                 placeholders = ",".join("?" * len(row_ids))
-                cursor.execute(f"SELECT news_item_id, timeline_time, rank_value FROM rank_timeline WHERE news_item_id IN ({placeholders})", row_ids)
+                cursor.execute(f"SELECT id, news_item_id, timeline_time, rank_value FROM rank_timeline WHERE news_item_id IN ({placeholders}) ORDER BY id", *row_ids)
                 for timeline_row in cursor.fetchall():
-                    news_item_id = int(timeline_row[0])
-                    timeline_by_news.setdefault(news_item_id, []).append({
-                        "time": self._to_datetime_str(timeline_row[1]),
-                        "rank": timeline_row[2],
-                    })
+                    timeline_id = int(timeline_row[0])
+                    news_item_id = int(timeline_row[1])
+                    rank_value = timeline_row[3]
+                    try:
+                        rank_int = int(rank_value) if rank_value is not None else 0
+                    except (TypeError, ValueError):
+                        rank_int = 0
+                    timeline_by_news.setdefault(news_item_id, []).append(
+                        RankTimelineEntry(id=timeline_id, time=self._parse_datetime_value(timeline_row[2]), rank=rank_int)
+                    )
 
             items: Dict[str, List[NewsItem]] = {}
             id_to_name: Dict[str, str] = {}
@@ -724,17 +938,17 @@ class MSSQLStorageBackend(StorageBackend):
                     trust_score=float(row[15]),
                     controversy_score=float(row[16]),
                     attention_score=float(row[17]),
-                    first_time=self._to_datetime_str(row[18]),
-                    last_time=self._to_datetime_str(row[19]),
-                    analyzed_time=self._to_datetime_str(row[20]) if row[20] is not None else None,
+                    first_time=self._parse_datetime_value(row[18]),
+                    last_time=self._parse_datetime_value(row[19]),
+                    analyzed_time=self._parse_datetime_value(row[20]) if row[20] is not None else None,
                     total_weigh=float(row[21]),
-                    rank_timeline=timeline_by_news.get(news_item_id, []),
+                    rank_timeline_obj=timeline_by_news.get(news_item_id, []),
                 )
                 items.setdefault(source_id, []).append(item)
 
             return NewsData(
-                date=self._to_date_str(date_value),
-                last_time=self._to_datetime_str(last_time),
+                date=self._parse_datetime_value(date_value),
+                last_time=self._parse_datetime_value(last_time),
                 items=items,
                 id_to_name=id_to_name,
                 failed_ids=[],
@@ -742,12 +956,12 @@ class MSSQLStorageBackend(StorageBackend):
         finally:
             conn.close()
 
-    def get_data_by_latest_crawl_range(
+    def get_news_list_by_latest_crawl_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[str] = None,
-        end_time: Optional[str] = None,
-    ) -> Optional[NewsData]:
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> Optional[List[NewsItem]]:
         where_clauses: List[str] = []
         params: List = []
 
@@ -769,12 +983,12 @@ class MSSQLStorageBackend(StorageBackend):
         where_sql = " AND ".join(where_clauses)
         return self._load_filtered_data(where_sql, params)
 
-    def get_data_by_first_time_range(
+    def get_news_list_by_first_time_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[str] = None,
-        end_time: Optional[str] = None,
-    ) -> Optional[NewsData]:
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> Optional[List[NewsItem]]:
         where_clauses: List[str] = []
         params: List = []
 
@@ -800,38 +1014,8 @@ class MSSQLStorageBackend(StorageBackend):
         where_sql = " AND ".join(where_clauses)
         return self._load_filtered_data(where_sql, params)
 
-    def detect_new_titles(self, current_data: NewsData) -> Dict[str, Dict]:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        try:
-            news_date = self._parse_date_value(current_data.date)
-            last_time = self._parse_datetime_value(current_data.last_time)
-            if news_date is None or last_time is None:
-                return {}
-
-            cursor.execute("""
-                SELECT source_id, title FROM NewsItem
-                WHERE news_date = ? AND last_time < ?
-            """, news_date, last_time)
-
-            old_rows = cursor.fetchall()
-            seen_titles = {(str(row[0]), str(row[1])) for row in old_rows}
-            new_titles: Dict[str, Dict] = {}
-
-            for source_id, news_list in current_data.items.items():
-                for item in news_list:
-                    key = (source_id, item.title)
-                    if key in seen_titles:
-                        continue
-                    new_titles.setdefault(source_id, {})[item.title] = item.to_dict()
-
-            return new_titles
-        finally:
-            conn.close()
-
-    def is_first_crawl_today(self, date: Optional[str] = None) -> bool:
-        date_str = date or datetime.now().strftime("%Y-%m-%d")
-        date_obj = self._parse_date_value(date_str) or datetime.now().date()
+    def is_first_crawl_today(self, date: Optional[datetime] = None) -> bool:
+        date_obj = self._parse_date_value(date) or datetime.now().date()
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
