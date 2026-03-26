@@ -157,7 +157,7 @@ class TopicDomainService:
 	def __init__(self) -> None:
 		pass
 	
-	def calculate_platform_distribution(self, topic: Topic) -> Topic:
+	def aggregate_topic_metrics(self, topic: Topic) -> Topic:
         
 		"""
 		计算平台分布信息
@@ -173,13 +173,13 @@ class TopicDomainService:
 		start_time: Optional[datetime] = None
 		end_time: Optional[datetime] = None
 		
-		# 遍历所有 rank_data 中的 NewsItem
-		for key, news_items in topic.rank_data.items():
+		# 单次遍历所有 NewsItem，完成 topic 层和平台层所需的基础统计。
+		for _, news_items in topic.rank_data.items():
 			if not isinstance(news_items, list):
 				continue
 			
 			for item in news_items:
-				platform = item.source_id
+				platform = (item.source_id or "").strip() or "unknown"
 				news_count += 1
 				total_weight += item.total_weigh
 				if item.first_time and (start_time is None or item.first_time < start_time):
@@ -202,8 +202,9 @@ class TopicDomainService:
 				platform_data[platform][sentiment] += item.total_weigh
 				sentiment_totals[sentiment] = sentiment_totals.get(sentiment, 0.0) + item.total_weigh
 		
-		# 构建 platform_distribution
+		# 构建 platform_distribution，并同时汇总 topic 情感评分。
 		result_distribution: List[TopicPlatformStats] = []
+		topic_sentiment_scores: Dict[str, float] = {}
 		
 		for platform, sentiments in platform_data.items():
 			# 找出该平台权重最大的情感极性
@@ -221,6 +222,11 @@ class TopicDomainService:
 				ratio=ratio
 			)
 			result_distribution.append(topic_platform_stats)
+
+			sentiment_key = (max_sentiment or "").strip() or "neutral"
+			topic_sentiment_scores[sentiment_key] = topic_sentiment_scores.get(sentiment_key, 0.0) + (
+				float(platform_volumes[platform]) * ratio
+			)
 		
 		# 按 volume 排序，大的放前面
 		result_distribution.sort(key=lambda x: x.volume, reverse=True)
@@ -233,7 +239,14 @@ class TopicDomainService:
 			topic.window_size = max(0, int((end_time - start_time).total_seconds() // 60)) # 单位分钟
 		else:
 			topic.window_size = 0
-		topic.sentiment = max(sentiment_totals.items(), key=lambda x: x[1])[0] if sentiment_totals else ""
+
+		if topic_sentiment_scores:
+			topic.sentiment = max(topic_sentiment_scores.items(), key=lambda x: x[1])[0]
+		elif sentiment_totals:
+			# 兼容兜底：若平台分布为空，则回退到 item 级别累计权重。
+			topic.sentiment = max(sentiment_totals.items(), key=lambda x: x[1])[0]
+		else:
+			topic.sentiment = ""
 		topic.news_count = news_count
 		topic.total_weight = total_weight
 		now = datetime.now()
@@ -263,7 +276,7 @@ class TopicDomainService:
 		if not topic.created_at:
 			topic.created_at = now
 		topic.updated_at = now
-		return self.calculate_platform_distribution(topic)
+		return self.aggregate_topic_metrics(topic)
 
 class TopicRepository(ABC):
 	pass

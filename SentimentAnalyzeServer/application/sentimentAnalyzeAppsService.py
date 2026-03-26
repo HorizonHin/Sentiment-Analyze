@@ -1,11 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from SentimentAnalyzeServer.application.common import EVENT_SENTIMENT_ANALYZED, EventManager
+from SentimentAnalyzeServer.application.common import (
+	EVENT_SENTIMENT_ANALYZED,
+	REDIS_KEY_LATEST_UPDATED_ANALYZED_NEWS,
+	REDIS_KEY_RECENT_30M_ANALYZED_NEWS,
+	CommonThreadPool,
+	EventManager,
+	MyRedis,
+)
 from SentimentAnalyzeServer.application.tools.llmExecutorService import LLMExecutorService
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsItem, NewsDomainService
@@ -19,10 +26,80 @@ class SentimentAnalyzeAppService:
 		self.news_domain_service = NewsDomainService(storage)
 		self.llm_domain_analyzer = analyzer
 		self.event_manager = EventManager()
+		self.redis = MyRedis()
+		self.common_thread_pool = CommonThreadPool()
 		self.max_retries = 5
 		self.retry_delay_seconds = 1
 		self.batch_save_size = 20
 		self.executor_service = LLMExecutorService(max_workers=max_workers)
+
+	def _serialize_news_items(self, items: List[NewsItem]) -> List[Dict[str, Any]]:
+		return [item.to_dict() for item in items]
+
+	def _deserialize_news_items(self, payload: Any) -> List[NewsItem]:
+		if not isinstance(payload, list):
+			return []
+
+		result: List[NewsItem] = []
+		for raw in payload:
+			if not isinstance(raw, dict):
+				continue
+			try:
+				result.append(NewsItem.from_dict(raw))
+			except Exception:
+				logger.exception("Failed to deserialize cached news item.")
+		return result
+
+	def _cache_recent_analyzed_news(self, items: List[NewsItem]) -> None:
+		payload = self._serialize_news_items(items)
+		self.redis.set(REDIS_KEY_RECENT_30M_ANALYZED_NEWS, payload)
+
+	def _deduplicate_news_items(self, items: List[NewsItem]) -> List[NewsItem]:
+		key_to_item: Dict[tuple[str, str], NewsItem] = {}
+		for item in items:
+			key = (item.source_id or "", item.title or "")
+			if key == ("", ""):
+				continue
+			existing = key_to_item.get(key)
+			if existing is None:
+				key_to_item[key] = item
+				continue
+
+			existing_ts = existing.analyzed_time or existing.last_time or datetime.min
+			incoming_ts = item.analyzed_time or item.last_time or datetime.min
+			if incoming_ts >= existing_ts:
+				key_to_item[key] = item
+
+		return list(key_to_item.values())
+
+	def _filter_items_by_last_time_range(
+		self,
+		items: List[NewsItem],
+		start_time: Optional[datetime],
+		end_time: Optional[datetime],
+	) -> List[NewsItem]:
+		if start_time is None and end_time is None:
+			return items
+
+		filtered: List[NewsItem] = []
+		for item in items:
+			if item.last_time is None:
+				continue
+			if start_time and end_time:
+				if start_time <= end_time:
+					if start_time <= item.last_time <= end_time:
+						filtered.append(item)
+				else:
+					if item.last_time >= start_time or item.last_time <= end_time:
+						filtered.append(item)
+			elif start_time:
+				if item.last_time >= start_time:
+					filtered.append(item)
+			elif end_time:
+				if item.last_time <= end_time:
+					filtered.append(item)
+
+		return filtered
 
 	def analyze_and_update_news_items(self, items: List[NewsItem]) -> bool:
 		if not items:
@@ -78,6 +155,15 @@ class SentimentAnalyzeAppService:
 			len(pending_items),
 			len(updated_items),
 		)
+		now = datetime.now()
+		recent_threshold = now - timedelta(minutes=30)
+		recent_items = [
+			item for item in updated_items
+			if item.last_time is not None and item.last_time >= recent_threshold
+		]
+		if recent_items:
+			self.common_thread_pool.submit(self._cache_recent_analyzed_news, recent_items)
+
 		self.event_manager.publish(
 			EVENT_SENTIMENT_ANALYZED,
 			{
@@ -220,6 +306,23 @@ class SentimentAnalyzeAppService:
 		end_time: Optional[datetime] = None,
 	) -> Dict[str, List[NewsItem]]:
 		"""按 last_time 范围获取已分析新闻，并按 source_id 分组。"""
+		cached_payload_map = self.redis.get_many(
+			[
+				REDIS_KEY_LATEST_UPDATED_ANALYZED_NEWS,
+				REDIS_KEY_RECENT_30M_ANALYZED_NEWS,
+			]
+		)
+		if cached_payload_map:
+			cached_items: List[NewsItem] = []
+			for payload in cached_payload_map.values():
+				cached_items.extend(self._deserialize_news_items(payload))
+
+			if cached_items:
+				cached_items = self._deduplicate_news_items(cached_items)
+				cached_items = self._filter_items_by_last_time_range(cached_items, start_time, end_time)
+				if cached_items:
+					return self.news_domain_service.group_news_items_by_platform(cached_items)
+
 		grouped = self.news_domain_service.get_group_news_by_latest_crawl_range(
 			isAnalyzed=True,
 			start_time=start_time,

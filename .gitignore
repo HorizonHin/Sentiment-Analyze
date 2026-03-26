@@ -7,3 +7,4 @@ uml/*
 .vscode/*
 .vscode/settings.json
 SentimentAnalyzeServer/.vscode/*
+SentimentAnalyzeServer/system/last_scheduler_run.txt

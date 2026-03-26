@@ -35,7 +35,7 @@ CREATE TABLE Keyword (
     id INT PRIMARY KEY IDENTITY(1,1),
     news_item_id INT NOT NULL,
     term NVARCHAR(500) NOT NULL,
-    last_time DATETIME2 DEFAULT GETDATE(),
+    first_time DATETIME2 DEFAULT GETDATE(),
     importance FLOAT DEFAULT 0.0,
     weigh FLOAT DEFAULT 0.0,
     FOREIGN KEY (news_item_id) REFERENCES NewsItem(id) ON DELETE CASCADE,
@@ -49,31 +49,11 @@ CREATE TABLE Entity (
     news_item_id INT NOT NULL,
     name NVARCHAR(200) NOT NULL,
     entity_type NVARCHAR(100) NOT NULL,
-    last_time DATETIME2 DEFAULT GETDATE(),
+    first_time DATETIME2 DEFAULT GETDATE(),
     weigh FLOAT DEFAULT 0.0,
     FOREIGN KEY (news_item_id) REFERENCES NewsItem(id) ON DELETE CASCADE,
     UNIQUE(news_item_id, name, entity_type)
 );
-
--- 迁移兼容性：重命名列
-IF COL_LENGTH('Keyword', 'last_time') IS NULL AND COL_LENGTH('Keyword', 'create_time') IS NOT NULL
-    EXEC sp_rename 'Keyword.create_time', 'last_time', 'COLUMN';
-
-IF COL_LENGTH('Entity', 'last_time') IS NULL AND COL_LENGTH('Entity', 'create_time') IS NOT NULL
-    EXEC sp_rename 'Entity.create_time', 'last_time', 'COLUMN';
-
--- 迁移兼容性：添加缺失列
-IF COL_LENGTH('Keyword', 'last_time') IS NULL
-    ALTER TABLE Keyword ADD last_time DATETIME2 DEFAULT GETDATE();
-
-IF COL_LENGTH('Entity', 'last_time') IS NULL
-    ALTER TABLE Entity ADD last_time DATETIME2 DEFAULT GETDATE();
-
-IF COL_LENGTH('Keyword', 'weigh') IS NULL
-    ALTER TABLE Keyword ADD weigh FLOAT DEFAULT 0.0;
-
-IF COL_LENGTH('Entity', 'weigh') IS NULL
-    ALTER TABLE Entity ADD weigh FLOAT DEFAULT 0.0;
 
 -- 创建 rank_timeline 表
 IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'rank_timeline')

@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 
 from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsDomainService, NewsItem
 from SentimentAnalyzeServer.domain.topic.topic import Topic, TopicDomainService
-from application.common import Result
+from SentimentAnalyzeServer.application.common import Result
 
 
 logger = logging.getLogger(__name__)
@@ -237,8 +237,8 @@ class TopicAppService:
             self.recommend_and_cache_topics(
                 start_time=start_time,
                 end_time=end_time,
-                top_n=10,
-                cache_limit=15,
+                top_n=30,
+                cache_limit=35,
             )
             refreshed_topics = self.topic_cache_manager.get_topics()
             if refreshed_topics:

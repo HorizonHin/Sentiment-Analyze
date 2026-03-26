@@ -506,7 +506,7 @@ class NewsItemRepository(ABC):
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
     ) -> List[Keyword]:
-        """根据 last_time 范围查询关键词表。"""
+        """根据 first_time 范围查询关键词表。"""
         pass
 
     @abstractmethod
@@ -515,7 +515,7 @@ class NewsItemRepository(ABC):
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
     ) -> List[Entity]:
-        """根据 last_time 范围查询实体表。"""
+        """根据 first_time 范围查询实体表。"""
         pass
 
     @abstractmethod

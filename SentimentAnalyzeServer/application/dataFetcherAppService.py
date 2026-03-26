@@ -6,7 +6,13 @@ from typing import Any, Dict, List
 
 import yaml
 
-from SentimentAnalyzeServer.application.common import EVENT_CRAWL_SAVED, EventManager
+from SentimentAnalyzeServer.application.common import (
+    EVENT_CRAWL_SAVED,
+    REDIS_KEY_LATEST_UPDATED_ANALYZED_NEWS,
+    CommonThreadPool,
+    EventManager,
+    MyRedis,
+)
 from SentimentAnalyzeServer.domain.crawler import DataFetcher
 from SentimentAnalyzeServer.domain.news.news import (
     NewsData,
@@ -25,6 +31,15 @@ class DataFetcherAppService:
         self.fetcher = DataFetcher()
         self.news_domain_service = NewsDomainService(storage)
         self.event_manager = EventManager()
+        self.redis = MyRedis()
+        self.common_thread_pool = CommonThreadPool()
+
+    def _serialize_news_items(self, items: List[NewsItem]) -> List[Dict[str, Any]]:
+        return [item.to_dict() for item in items]
+
+    def _cache_latest_updated_analyzed_items(self, items: List[NewsItem]) -> None:
+        payload = self._serialize_news_items(items)
+        self.redis.set(REDIS_KEY_LATEST_UPDATED_ANALYZED_NEWS, payload)
 
     def _load_platforms(self) -> list[tuple[str, str]]:
         with self.config_path.open("r", encoding="utf-8") as f:
@@ -204,6 +219,14 @@ class DataFetcherAppService:
             updated_items = self.news_domain_service.update_existing_crawled_titles(merged_items)
             if not updated_items:
                 raise RuntimeError("更新已存在新闻数据失败")
+
+            analyzed_updated_items = [item for item in updated_items if item.analyzed_time is not None]
+            if analyzed_updated_items:
+                self.common_thread_pool.submit(
+                    self._cache_latest_updated_analyzed_items,
+                    analyzed_updated_items,
+                )
+
             saved_items.extend(updated_items)
 
         if saved_items:

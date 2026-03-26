@@ -40,11 +40,14 @@ class WorkflowEventSubscribers:
         if not valid_items:
             return
 
-        self.sentiment_app_service.analyze_and_update_news_items(valid_items)
+        try:
+            self.sentiment_app_service.analyze_and_update_news_items(valid_items)
+        except Exception:
+            logger.exception("analyze_and_update_news_items failed")
 
     def _on_sentiment_analyzed(self, payload: Dict[str, Any]) -> None:
-        # 在情感分析完成后，尝试推荐和缓存前3小时内的热点话题
-        start_time = datetime.now() - timedelta(hours=3)
+        # 在情感分析完成后，尝试推荐和缓存前6小时内的热点话题
+        start_time = datetime.now() - timedelta(hours=6.2)
         end_time = datetime.now()
 
         try:
@@ -53,4 +56,4 @@ class WorkflowEventSubscribers:
                 end_time=end_time,
             )
         except Exception:
-            logger.exception("Failed to recommend and cache topics after sentiment analyzed event")
+            logger.exception("recommend_and_cache_topics failed")

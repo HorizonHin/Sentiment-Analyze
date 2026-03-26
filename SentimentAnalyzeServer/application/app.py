@@ -10,20 +10,6 @@ from typing import Any
 
 from flask import Flask, jsonify
 import yaml
-
-_workspace_root_env = os.getenv("WORKSPACE_ROOT") or os.getenv("PYTHONPATH")
-if _workspace_root_env:
-    _workspace_root_value = _workspace_root_env.split(os.pathsep)[0].strip()
-    _workspace_root_path = Path(_workspace_root_value)
-    if not _workspace_root_path.is_absolute():
-        _workspace_root_path = (Path(__file__).resolve().parents[1] / _workspace_root_path).resolve()
-    _WORKSPACE_ROOT = _workspace_root_path
-else:
-    _WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
-
-if str(_WORKSPACE_ROOT) not in sys.path:
-    sys.path.insert(0, str(_WORKSPACE_ROOT))
-
 from SentimentAnalyzeServer.application.scheduled import (
     Scheduled,
     get_interval_seconds_from_env,
@@ -38,16 +24,6 @@ from SentimentAnalyzeServer.domain.news.sqlServerNewsItemRepository import SqlSe
 from SentimentAnalyzeServer.domain.topic.topic import TopicDomainService
 from SentimentAnalyzeServer.inbound.controller import create_external_controller
 from SentimentAnalyzeServer.inbound.workflow_event_subscribers import WorkflowEventSubscribers
-
-
-def _should_start_scheduler(app: Flask) -> bool:
-    """在 debug 自动重载模式下，仅允许子进程启动定时器。"""
-    _ = app
-    run_main = os.environ.get("WERKZEUG_RUN_MAIN")
-    if run_main is None:
-        # 非 reloader 场景（生产或未启用调试重载）
-        return True
-    return run_main == "true"
 
 
 def create_app() -> Flask:
@@ -116,7 +92,6 @@ def create_app() -> Flask:
         data_fetcher_app_service=data_fetcher_app_service,
         sentiment_app_service=sentiment_app_service,
         topic_app_service=topic_app_service,
-        # run_immediately=not app.debug,
     )
 
     app.config["scheduler"] = scheduler
@@ -125,25 +100,8 @@ def create_app() -> Flask:
     def health() -> Any:
         return jsonify(Result.success_result({"status": "ok"}).to_dict())
 
-    @app.post("/tasks/crawl/run")
-    def run_crawl_once() -> Any:
-        try:
-            result = scheduler.run_once()
-            if result.get("success"):
-                return jsonify(Result.success_result(result).to_dict())
-            reason = str(result.get("reason", "crawl_failed"))
-            return jsonify(Result.failure_result(reason).to_dict()), 500
-        except Exception as exc:
-            return jsonify(Result.failure_result(str(exc)).to_dict()), 500
-
-    if _should_start_scheduler(app):
-        scheduler.start()
-
-    return app
-
-
 app = create_app()
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=False)

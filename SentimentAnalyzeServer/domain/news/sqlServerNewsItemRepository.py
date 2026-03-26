@@ -185,13 +185,13 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 point.id = int(inserted[0])
 
     def _replace_keyword_and_entity(self, conn: pyodbc.Connection, valid_news: List[NewsItem]) -> None:
-        """插入新数据；已有数据更新 weigh 和 last_time 字段。"""
+        """插入新数据；已有数据仅更新业务字段，不回写 first_time。"""
         cursor = conn.cursor()
 
         for item in valid_news:
             if item.id is None or int(item.id) <= 0:
                 continue
-            last_time = self._parse_datetime_value(item.last_time) or datetime.now()
+            first_time = self._parse_datetime_value(item.first_time) or self._parse_datetime_value(item.last_time) or datetime.now()
             for keyword in item.keywords:
                 term = str(keyword.term or "").strip()
                 if not term:
@@ -199,17 +199,15 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 keyword_weigh = float(keyword.weigh if keyword.weigh is not None else item.total_weigh)
                 if keyword.id and int(keyword.id) > 0:
                     cursor.execute(
-                        "UPDATE Keyword SET weigh = ?, last_time = ? WHERE id = ? AND news_item_id = ?",
+                        "UPDATE Keyword SET weigh = ? WHERE id = ? AND news_item_id = ?",
                         keyword_weigh,
-                        last_time,
                         int(keyword.id),
                         int(item.id),
                     )
                     continue
 
                 cursor.execute(
-                    "UPDATE Keyword SET last_time = ?, importance = ?, weigh = ? WHERE news_item_id = ? AND term = ?",
-                    last_time,
+                    "UPDATE Keyword SET importance = ?, weigh = ? WHERE news_item_id = ? AND term = ?",
                     keyword.importance,
                     keyword_weigh,
                     int(item.id),
@@ -220,10 +218,10 @@ class SqlServerNewsItemRepository(NewsItemRepository):
 
                 try:
                     cursor.execute(
-                        "INSERT INTO Keyword(news_item_id, term, last_time, importance, weigh) VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO Keyword(news_item_id, term, first_time, importance, weigh) VALUES (?, ?, ?, ?, ?)",
                         int(item.id),
                         term,
-                        last_time,
+                        first_time,
                         keyword.importance,
                         keyword_weigh,
                     )
@@ -231,8 +229,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                     if not self._is_unique_violation(keyword_error):
                         raise
                     cursor.execute(
-                        "UPDATE Keyword SET last_time = ?, importance = ?, weigh = ? WHERE news_item_id = ? AND term = ?",
-                        last_time,
+                        "UPDATE Keyword SET importance = ?, weigh = ? WHERE news_item_id = ? AND term = ?",
                         keyword.importance,
                         keyword_weigh,
                         int(item.id),
@@ -242,7 +239,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         for item in valid_news:
             if item.id is None or int(item.id) <= 0:
                 continue
-            last_time = self._parse_datetime_value(item.last_time) or datetime.now()
+            first_time = self._parse_datetime_value(item.first_time) or self._parse_datetime_value(item.last_time) or datetime.now()
             for entity in item.entities:
                 entity_name = str(entity.name or "").strip()
                 entity_type = str(entity.type or "").strip()
@@ -251,17 +248,15 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 entity_weigh = float(entity.weigh if entity.weigh is not None else item.total_weigh)
                 if entity.id and int(entity.id) > 0:
                     cursor.execute(
-                        "UPDATE Entity SET weigh = ?, last_time = ? WHERE id = ? AND news_item_id = ?",
+                        "UPDATE Entity SET weigh = ? WHERE id = ? AND news_item_id = ?",
                         entity_weigh,
-                        last_time,
                         int(entity.id),
                         int(item.id),
                     )
                     continue
 
                 cursor.execute(
-                    "UPDATE Entity SET last_time = ?, weigh = ? WHERE news_item_id = ? AND name = ? AND entity_type = ?",
-                    last_time,
+                    "UPDATE Entity SET weigh = ? WHERE news_item_id = ? AND name = ? AND entity_type = ?",
                     entity_weigh,
                     int(item.id),
                     entity_name,
@@ -272,19 +267,18 @@ class SqlServerNewsItemRepository(NewsItemRepository):
 
                 try:
                     cursor.execute(
-                        "INSERT INTO Entity(news_item_id, name, entity_type, last_time, weigh) VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO Entity(news_item_id, name, entity_type, first_time, weigh) VALUES (?, ?, ?, ?, ?)",
                         int(item.id),
                         entity_name,
                         entity_type,
-                        last_time,
+                        first_time,
                         entity_weigh,
                     )
                 except pyodbc.Error as entity_error:
                     if not self._is_unique_violation(entity_error):
                         raise
                     cursor.execute(
-                        "UPDATE Entity SET last_time = ?, weigh = ? WHERE news_item_id = ? AND name = ? AND entity_type = ?",
-                        last_time,
+                        "UPDATE Entity SET weigh = ? WHERE news_item_id = ? AND name = ? AND entity_type = ?",
                         entity_weigh,
                         int(item.id),
                         entity_name,
@@ -373,8 +367,8 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
     ) -> List[Keyword]:
-        where_sql, params, normalized_last_time = self._build_normalized_datetime_text_range_clause(
-            column_name="last_time",
+        where_sql, params, normalized_first_time = self._build_normalized_datetime_text_range_clause(
+            column_name="first_time",
             start_time=start_time,
             end_time=end_time,
         )
@@ -383,7 +377,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         cursor = conn.cursor()
         try:
             cursor.execute(
-                f"SELECT id, term, importance, weigh FROM Keyword WHERE {where_sql} ORDER BY {normalized_last_time} ASC, id ASC",
+                f"SELECT id, term, importance, weigh FROM Keyword WHERE {where_sql} ORDER BY {normalized_first_time} ASC, id ASC",
                 *params,
             )
             result: List[Keyword] = []
@@ -405,8 +399,8 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
     ) -> List[Entity]:
-        where_sql, params, normalized_last_time = self._build_normalized_datetime_text_range_clause(
-            column_name="last_time",
+        where_sql, params, normalized_first_time = self._build_normalized_datetime_text_range_clause(
+            column_name="first_time",
             start_time=start_time,
             end_time=end_time,
         )
@@ -415,7 +409,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         cursor = conn.cursor()
         try:
             cursor.execute(
-                f"SELECT id, name, entity_type, weigh FROM Entity WHERE {where_sql} ORDER BY {normalized_last_time} ASC, id ASC",
+                f"SELECT id, name, entity_type, weigh FROM Entity WHERE {where_sql} ORDER BY {normalized_first_time} ASC, id ASC",
                 *params,
             )
             result: List[Entity] = []
