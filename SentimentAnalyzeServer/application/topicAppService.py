@@ -6,19 +6,20 @@ from datetime import datetime
 import logging
 from typing import Dict, List, Optional
 
+from SentimentAnalyzeServer.application.common import CommonThreadPool
+from SentimentAnalyzeServer.application.common import Result
 from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsDomainService, NewsItem
 from SentimentAnalyzeServer.domain.topic.topic import Topic, TopicDomainService
-from SentimentAnalyzeServer.application.common import Result
 
 
 logger = logging.getLogger(__name__)
 
 
 class TopicCacheManager(ABC):
-    # 热门话题数量上限暂时定为15个
+    # 热门话题数量上限暂时定为30个
 
     @abstractmethod
-    def save_topics(self, topics: List[Topic], limit: int = 15) -> None:
+    def save_topics(self, topics: List[Topic], limit: int = 30) -> None:
         pass
 
     @abstractmethod
@@ -60,7 +61,7 @@ class TopicCacheManager_Memory(TopicCacheManager):
         freshness = 1.0 / (1.0 + age_hours)
         return cls._topic_weight(topic) * freshness
 
-    def save_topics(self, topics: List[Topic], limit: int = 15) -> None:
+    def save_topics(self, topics: List[Topic], limit: int = 30) -> None:
         capped_limit = max(1, limit)
         now = datetime.now()
 
@@ -105,6 +106,31 @@ class TopicAppService:
         self.topic_domain_service = topic_domain_service
         self.news_domain_service = news_domain_service
         self.topic_cache_manager = topic_cache_manager or TopicCacheManager_Memory()
+        self.common_thread_pool = CommonThreadPool()
+
+    @staticmethod
+    def _is_persisted_topic(topic: Topic) -> bool:
+        return isinstance(topic.created_at, datetime) and int(getattr(topic, "id", -1) or -1) > 0
+
+    def _append_topic_history_async(self, topic: Topic) -> None:
+        future = self.common_thread_pool.submit(
+            self.topic_domain_service.append_topic_metrics_history_async_safe,
+            topic,
+            topic.updated_at,
+        )
+
+        def _on_done(done_future) -> None:
+            try:
+                done_future.result()
+            except Exception:
+                logger.exception(
+                    "append topic metrics history failed. created_at=%s, id=%s, topic=%s",
+                    topic.created_at,
+                    topic.id,
+                    topic.topic,
+                )
+
+        future.add_done_callback(_on_done)
 
     def build_topics_by_keyword_entity_ids(
         self,
@@ -215,6 +241,24 @@ class TopicAppService:
             end_time=end_time,
         )
 
+        enriched_topics: List[Topic] = []
+        for topic in topics:
+            topic.updated_at = datetime.now()
+            enriched_topic = self.topic_domain_service.enrich_topic_with_history(topic)
+            persisted_topic = self.topic_domain_service.save_topic_snapshot(enriched_topic)
+            if self._is_persisted_topic(persisted_topic):
+                enriched_topics.append(persisted_topic)
+                self._append_topic_history_async(persisted_topic)
+            else:
+                logger.warning(
+                    "skip non-persisted topic for cache. created_at=%s, id=%s, topic=%s",
+                    persisted_topic.created_at,
+                    persisted_topic.id,
+                    persisted_topic.topic,
+                )
+
+        topics = enriched_topics
+
         self.topic_cache_manager.save_topics(topics, limit=cache_limit)
 
         logger.info(
@@ -225,6 +269,27 @@ class TopicAppService:
         )
         
         return topics
+
+    def get_topic_snapshot_detail(
+        self,
+        topic_created_at: datetime,
+        topic_id: int,
+        history_limit: int = 100,
+    ) -> Result:
+        timeline = self.topic_domain_service.get_topic_timeline_and_latest(
+            topic_created_at=topic_created_at,
+            topic_id=int(topic_id),
+            history_limit=max(1, int(history_limit)),
+        )
+
+        if not timeline:
+            return Result.failure_result("未找到对应的Topic快照")
+
+        payload = {
+            "topic": timeline[0].to_dict(),
+            "timeline": [entry.to_dict() for entry in timeline],
+        }
+        return Result.success_result(payload)
 
     def get_trending_topics(self) -> Result:
         cache_topics = self.topic_cache_manager.get_topics()

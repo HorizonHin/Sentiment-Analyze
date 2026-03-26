@@ -17,15 +17,20 @@ from SentimentAnalyzeServer.domain.news.news import NewsItem
 logger = logging.getLogger(__name__)
 
 
+_TOPIC_LOOKBACK_MULTIPLIER = 12.4
+
+
 class WorkflowEventSubscribers:
     def __init__(
         self,
         sentiment_app_service: SentimentAnalyzeAppService,
         topic_app_service: TopicAppService,
+        crawl_interval_seconds: int,
     ) -> None:
         self.event_manager = EventManager()
         self.sentiment_app_service = sentiment_app_service
         self.topic_app_service = topic_app_service
+        self.crawl_interval_seconds = max(60, int(crawl_interval_seconds))
 
     def register(self) -> None:
         self.event_manager.subscribe(EVENT_CRAWL_SAVED, self._on_crawl_saved)
@@ -46,8 +51,9 @@ class WorkflowEventSubscribers:
             logger.exception("analyze_and_update_news_items failed")
 
     def _on_sentiment_analyzed(self, payload: Dict[str, Any]) -> None:
-        # 在情感分析完成后，尝试推荐和缓存前6小时内的热点话题
-        start_time = datetime.now() - timedelta(hours=6.2)
+        # 在情感分析完成后，尝试推荐和缓存一个动态窗口内的热点话题
+        lookback_seconds = self.crawl_interval_seconds * _TOPIC_LOOKBACK_MULTIPLIER
+        start_time = datetime.now() - timedelta(seconds=lookback_seconds)
         end_time = datetime.now()
 
         try:

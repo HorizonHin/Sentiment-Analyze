@@ -1,4 +1,3 @@
-import os
 import time
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -16,6 +15,7 @@ from SentimentAnalyzeServer.domain.news.news import (
     NewsItemRepository,
     RankTimelineEntry,
 )
+from SentimentAnalyzeServer.system.datetime_utils import datetime_to_timestamp, parse_datetime_value
 
 
 class SqlServerNewsItemRepository(NewsItemRepository):
@@ -29,10 +29,10 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         password: Optional[str] = None,
         driver: str = "ODBC Driver 17 for SQL Server",
     ) -> None:
-        self.server = server or os.getenv("MSSQL_SERVER", "localhost")
-        self.database = database or os.getenv("MSSQL_DATABASE", "sentiment_analyze")
-        self.username = username or os.getenv("MSSQL_USERNAME", "sa")
-        self.password = password or os.getenv("MSSQL_PASSWORD", "")
+        self.server = server or "localhost"
+        self.database = database or "sentiment_analyze"
+        self.username = username or "sa"
+        self.password = password or ""
         self.driver = driver
 
         # 构建连接字符串
@@ -84,32 +84,49 @@ class SqlServerNewsItemRepository(NewsItemRepository):
     def _parse_datetime_value(self, value: Optional[object]) -> Optional[datetime]:
         if value is None or value == "":
             return None
-        if isinstance(value, datetime):
-            return value
-        if isinstance(value, date):
+        if isinstance(value, date) and not isinstance(value, datetime):
             return datetime(value.year, value.month, value.day)
 
-        text = str(value).strip().replace("T", " ")
-        # 兼容历史数据里可能存在的尾随小数点：2026-03-25 13:26:48.
-        text = text.rstrip(".")
+        parsed = parse_datetime_value(value)
+        if parsed is not None:
+            return parsed
+
+        text = str(value).strip().replace("T", " ").rstrip(".")
         if len(text) == 10:
             date_part = self._parse_date_value(text)
             if date_part is not None:
                 return datetime(date_part.year, date_part.month, date_part.day)
+        return None
 
-        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
-            try:
-                return datetime.strptime(text, fmt)
-            except ValueError:
-                continue
+    def _to_timestamp(self, value: Optional[object], fallback_now: bool = False) -> Optional[int]:
+        dt = self._parse_datetime_value(value)
+        if dt is None:
+            if not fallback_now:
+                return None
+            dt = datetime.utcnow()
+        ts = datetime_to_timestamp(dt)
+        return int(ts) if ts is not None else None
 
-        try:
-            return datetime.fromisoformat(text)
-        except ValueError:
-            return None
+    def _to_day_timestamp(self, value: Optional[object], fallback_today: bool = False) -> Optional[int]:
+        day = self._parse_date_value(value)
+        if day is None:
+            dt = self._parse_datetime_value(value)
+            if dt is not None:
+                day = dt.date()
+        if day is None:
+            if not fallback_today:
+                return None
+            day = datetime.utcnow().date()
+
+        day_start = datetime(day.year, day.month, day.day)
+        ts = datetime_to_timestamp(day_start)
+        return int(ts) if ts is not None else None
 
     def _to_date_str(self, value: Optional[object]) -> str:
         parsed = self._parse_date_value(value)
+        if parsed is None:
+            parsed_dt = self._parse_datetime_value(value)
+            parsed = parsed_dt.date() if parsed_dt is not None else None
         if parsed is not None:
             return parsed.strftime("%Y-%m-%d")
         return "" if value is None else str(value)
@@ -168,9 +185,9 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             if point.id and int(point.id) > 0:
                 continue
 
-            timeline_time = self._parse_datetime_value(point.time)
+            timeline_time = self._to_timestamp(point.time)
             if timeline_time is None:
-                timeline_time = self._parse_datetime_value(item.last_time) or datetime.now()
+                timeline_time = self._to_timestamp(item.last_time, fallback_now=True)
 
             rank_value = point.rank if point.rank > 0 else None
 
@@ -191,7 +208,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         for item in valid_news:
             if item.id is None or int(item.id) <= 0:
                 continue
-            first_time = self._parse_datetime_value(item.first_time) or self._parse_datetime_value(item.last_time) or datetime.now()
+            first_time = self._to_timestamp(item.first_time) or self._to_timestamp(item.last_time, fallback_now=True)
             for keyword in item.keywords:
                 term = str(keyword.term or "").strip()
                 if not term:
@@ -239,7 +256,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         for item in valid_news:
             if item.id is None or int(item.id) <= 0:
                 continue
-            first_time = self._parse_datetime_value(item.first_time) or self._parse_datetime_value(item.last_time) or datetime.now()
+            first_time = self._to_timestamp(item.first_time) or self._to_timestamp(item.last_time, fallback_now=True)
             for entity in item.entities:
                 entity_name = str(entity.name or "").strip()
                 entity_type = str(entity.type or "").strip()
@@ -293,31 +310,34 @@ class SqlServerNewsItemRepository(NewsItemRepository):
     ) -> Tuple[str, List]:
         where_clauses: List[str] = []
         params: List = []
-        # Some historical MSSQL data stores datetime as NVARCHAR and may contain
-        # trailing dots (e.g. 2026-03-23 23:41:20.). Normalize before converting.
-        trimmed = f"LTRIM(RTRIM({column_name}))"
+        trimmed = f"LTRIM(RTRIM(CONVERT(NVARCHAR(64), {column_name})))"
         normalized_column = (
             f"CASE WHEN RIGHT({trimmed}, 1) = '.' "
             f"THEN LEFT({trimmed}, LEN({trimmed}) - 1) ELSE {trimmed} END"
         )
-        converted_column = f"TRY_CONVERT(DATETIME2, {normalized_column})"
+        converted_column = (
+            f"COALESCE("
+            f"TRY_CONVERT(BIGINT, {normalized_column}), "
+            f"DATEDIFF_BIG(SECOND, '1970-01-01', TRY_CONVERT(DATETIME2, {normalized_column}))"
+            f")"
+        )
 
-        start_dt = self._parse_datetime_value(start_time) if start_time else None
-        end_dt = self._parse_datetime_value(end_time) if end_time else None
+        start_ts = self._to_timestamp(start_time)
+        end_ts = self._to_timestamp(end_time)
 
-        if start_dt and end_dt:
-            if start_dt <= end_dt:
+        if start_ts is not None and end_ts is not None:
+            if start_ts <= end_ts:
                 where_clauses.append(f"{converted_column} >= ? AND {converted_column} <= ?")
-                params.extend([start_dt, end_dt])
+                params.extend([start_ts, end_ts])
             else:
                 where_clauses.append(f"({converted_column} >= ? OR {converted_column} <= ?)")
-                params.extend([start_dt, end_dt])
-        elif start_dt:
+                params.extend([start_ts, end_ts])
+        elif start_ts is not None:
             where_clauses.append(f"{converted_column} >= ?")
-            params.append(start_dt)
-        elif end_dt:
+            params.append(start_ts)
+        elif end_ts is not None:
             where_clauses.append(f"{converted_column} <= ?")
-            params.append(end_dt)
+            params.append(end_ts)
 
         if not where_clauses:
             return "1=1", params
@@ -329,38 +349,41 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
     ) -> Tuple[str, List, str]:
-        """For NVARCHAR datetime columns, compare normalized text to avoid conversion errors."""
-        trimmed = f"LTRIM(RTRIM({column_name}))"
+        """Build a timestamp range clause compatible with BIGINT and legacy datetime text."""
+        trimmed = f"LTRIM(RTRIM(CONVERT(NVARCHAR(64), {column_name})))"
         normalized_column = (
             f"CASE WHEN RIGHT({trimmed}, 1) = '.' "
             f"THEN LEFT({trimmed}, LEN({trimmed}) - 1) ELSE {trimmed} END"
         )
+        epoch_column = (
+            f"COALESCE("
+            f"TRY_CONVERT(BIGINT, {normalized_column}), "
+            f"DATEDIFF_BIG(SECOND, '1970-01-01', TRY_CONVERT(DATETIME2, {normalized_column}))"
+            f")"
+        )
 
-        start_dt = self._parse_datetime_value(start_time) if start_time else None
-        end_dt = self._parse_datetime_value(end_time) if end_time else None
+        start_ts = self._to_timestamp(start_time)
+        end_ts = self._to_timestamp(end_time)
 
         where_clauses: List[str] = []
         params: List = []
 
-        start_text = start_dt.strftime("%Y-%m-%d %H:%M:%S") if start_dt else None
-        end_text = end_dt.strftime("%Y-%m-%d %H:%M:%S") if end_dt else None
-
-        if start_text and end_text:
-            if start_text <= end_text:
-                where_clauses.append(f"{normalized_column} >= ? AND {normalized_column} <= ?")
-                params.extend([start_text, end_text])
+        if start_ts is not None and end_ts is not None:
+            if start_ts <= end_ts:
+                where_clauses.append(f"{epoch_column} >= ? AND {epoch_column} <= ?")
+                params.extend([start_ts, end_ts])
             else:
-                where_clauses.append(f"({normalized_column} >= ? OR {normalized_column} <= ?)")
-                params.extend([start_text, end_text])
-        elif start_text:
-            where_clauses.append(f"{normalized_column} >= ?")
-            params.append(start_text)
-        elif end_text:
-            where_clauses.append(f"{normalized_column} <= ?")
-            params.append(end_text)
+                where_clauses.append(f"({epoch_column} >= ? OR {epoch_column} <= ?)")
+                params.extend([start_ts, end_ts])
+        elif start_ts is not None:
+            where_clauses.append(f"{epoch_column} >= ?")
+            params.append(start_ts)
+        elif end_ts is not None:
+            where_clauses.append(f"{epoch_column} <= ?")
+            params.append(end_ts)
 
         where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-        return where_sql, params, normalized_column
+        return where_sql, params, epoch_column
 
     def get_keywords_by_last_time_range(
         self,
@@ -550,10 +573,10 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         cursor = conn.cursor()
         try:
             for item in to_insert:
-                data_date = self._parse_date_value(item.first_time) or date.today()
-                effective_last_time = self._parse_datetime_value(item.last_time) or datetime.now()
-                first_time = self._parse_datetime_value(item.first_time) or effective_last_time
-                analyzed_time = self._parse_datetime_value(item.analyzed_time)
+                data_date = self._to_day_timestamp(item.first_time, fallback_today=True)
+                effective_last_time = self._to_timestamp(item.last_time, fallback_now=True)
+                first_time = self._to_timestamp(item.first_time) or effective_last_time
+                analyzed_time = self._to_timestamp(item.analyzed_time)
                 try:
                     cursor.execute("""
                         INSERT INTO NewsItem (
@@ -633,9 +656,9 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             cursor = conn.cursor()
             try:
                 for item in valid_news:
-                    first_time = self._parse_datetime_value(item.first_time) or datetime.now()
-                    last_time = self._parse_datetime_value(item.last_time) or datetime.now()
-                    analyzed_time = self._parse_datetime_value(item.analyzed_time)
+                    first_time = self._to_timestamp(item.first_time, fallback_now=True)
+                    last_time = self._to_timestamp(item.last_time, fallback_now=True)
+                    analyzed_time = self._to_timestamp(item.analyzed_time)
                     cursor.execute("""
                         UPDATE NewsItem SET
                             title = ?, source_id = ?, source_name = ?, event_type = ?,
@@ -718,7 +741,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             cursor = conn.cursor()
             try:
                 for item in valid_news:
-                    last_time = self._parse_datetime_value(item.last_time) or datetime.now()
+                    last_time = self._to_timestamp(item.last_time, fallback_now=True)
                     cursor.execute(
                         """
                         UPDATE NewsItem SET
@@ -875,7 +898,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             conn.close()
 
     def get_latest_crawl_data(self, date: Optional[datetime] = None) -> Optional[NewsData]:
-        date_obj = self._parse_date_value(date) or datetime.now().date()
+        date_obj = self._to_day_timestamp(date, fallback_today=True)
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
@@ -887,7 +910,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         finally:
             conn.close()
 
-    def _load_snapshot(self, date_value: date, last_time: datetime) -> Optional[NewsData]:
+    def _load_snapshot(self, date_value: int, last_time: object) -> Optional[NewsData]:
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
@@ -992,27 +1015,15 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
     ) -> Optional[List[NewsItem]]:
-        where_clauses: List[str] = []
-        params: List = []
-        trimmed_last_time = "LTRIM(RTRIM(last_time))"
-        normalized_last_time = (
-            f"CASE WHEN RIGHT({trimmed_last_time}, 1) = '.' "
-            f"THEN LEFT({trimmed_last_time}, LEN({trimmed_last_time}) - 1) ELSE {trimmed_last_time} END"
+        time_where_sql, params = self._build_datetime_range_clause(
+            column_name="last_time",
+            start_time=start_time,
+            end_time=end_time,
         )
-        converted_last_time = f"TRY_CONVERT(DATETIME2, {normalized_last_time})"
 
-        start_dt = self._parse_datetime_value(start_time) if start_time else None
-        end_dt = self._parse_datetime_value(end_time) if end_time else None
-
-        if start_dt and end_dt:
-            where_clauses.append(f"{converted_last_time} >= ? AND {converted_last_time} <= ?")
-            params.extend([start_dt, end_dt])
-        elif start_dt:
-            where_clauses.append(f"{converted_last_time} >= ?")
-            params.append(start_dt)
-        elif end_dt:
-            where_clauses.append(f"{converted_last_time} <= ?")
-            params.append(end_dt)
+        where_clauses: List[str] = []
+        if time_where_sql != "1=1":
+            where_clauses.append(time_where_sql)
 
         where_clauses.append("analyzed_time IS NOT NULL" if isAnalyzed else "analyzed_time IS NULL")
 
@@ -1025,31 +1036,15 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
     ) -> Optional[List[NewsItem]]:
-        where_clauses: List[str] = []
-        params: List = []
-        trimmed_first_time = "LTRIM(RTRIM(first_time))"
-        normalized_first_time = (
-            f"CASE WHEN RIGHT({trimmed_first_time}, 1) = '.' "
-            f"THEN LEFT({trimmed_first_time}, LEN({trimmed_first_time}) - 1) ELSE {trimmed_first_time} END"
+        time_where_sql, params = self._build_datetime_range_clause(
+            column_name="first_time",
+            start_time=start_time,
+            end_time=end_time,
         )
-        converted_first_time = f"TRY_CONVERT(DATETIME2, {normalized_first_time})"
 
-        start_dt = self._parse_datetime_value(start_time) if start_time else None
-        end_dt = self._parse_datetime_value(end_time) if end_time else None
-
-        if start_dt and end_dt:
-            if start_dt <= end_dt:
-                where_clauses.append(f"{converted_first_time} >= ? AND {converted_first_time} <= ?")
-                params.extend([start_dt, end_dt])
-            else:
-                where_clauses.append(f"({converted_first_time} >= ? OR {converted_first_time} <= ?)")
-                params.extend([start_dt, end_dt])
-        elif start_dt:
-            where_clauses.append(f"{converted_first_time} >= ?")
-            params.append(start_dt)
-        elif end_dt:
-            where_clauses.append(f"{converted_first_time} <= ?")
-            params.append(end_dt)
+        where_clauses: List[str] = []
+        if time_where_sql != "1=1":
+            where_clauses.append(time_where_sql)
 
         where_clauses.append("analyzed_time IS NOT NULL" if isAnalyzed else "analyzed_time IS NULL")
 
@@ -1057,7 +1052,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         return self._load_filtered_data(where_sql, params)
 
     def is_first_crawl_today(self, date: Optional[datetime] = None) -> bool:
-        date_obj = self._parse_date_value(date) or datetime.now().date()
+        date_obj = self._to_day_timestamp(date, fallback_today=True)
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
@@ -1074,7 +1069,8 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         if retention_days <= 0:
             return 0
 
-        threshold = date.today() - timedelta(days=retention_days)
+        threshold_day = date.today() - timedelta(days=retention_days)
+        threshold = self._to_day_timestamp(threshold_day)
         conn = self._get_connection()
         cursor = conn.cursor()
         try:

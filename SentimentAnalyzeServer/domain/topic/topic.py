@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from abc import ABC
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from SentimentAnalyzeServer.domain.news.news import NewsItem
+from SentimentAnalyzeServer.system.datetime_utils import datetime_to_timestamp, parse_datetime_value
 
 DATETIME_FORMATS = (
 	"%Y-%m-%d %H:%M:%S",
@@ -14,31 +15,24 @@ DATETIME_FORMATS = (
 	"%Y-%m-%dT%H:%M:%S.%f",
 )
 
+STAGE_SET = {
+	"Inception",
+	"Growth",
+	"Climax",
+	"Decline",
+}
+
 
 def parse_datetime(value: Any) -> Optional[datetime]:
-	if value is None:
-		return None
-	if isinstance(value, datetime):
-		return value
-
-	text = str(value).strip()
-	if not text:
-		return None
-
-	for fmt in DATETIME_FORMATS:
-		try:
-			return datetime.strptime(text, fmt)
-		except ValueError:
-			continue
-
-	try:
-		return datetime.fromisoformat(text)
-	except ValueError:
-		return None
+	return parse_datetime_value(value, formats=DATETIME_FORMATS)
 
 
-def format_datetime(value: Optional[datetime], fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+def format_datetime(value: Optional[datetime], fmt: str = "%Y-%m-%d %H:%M") -> str:
 	return value.strftime(fmt) if value else ""
+
+
+def format_timestamp(value: Optional[datetime]) -> Optional[int]:
+	return datetime_to_timestamp(value)
 
 @dataclass(slots=True)
 class TopicPlatformStats:
@@ -66,22 +60,28 @@ class TopicPlatformStats:
 		)
 
 @dataclass(slots=True)
-class Topic:
+class Topic: #后续会持久化Topic快照
+	created_at: Optional[datetime] = None #不是now，而是第一次构建Topic的时间
 	id: int = field(default=-1)  
 	topic: str = ""
 	rank_data: Dict[str, List[NewsItem]] = field(default_factory=dict)
 	platform_distribution: List[TopicPlatformStats] = field(default_factory=list)
-	start_time: Optional[datetime] = None
-	end_time: Optional[datetime] = None
+	start_time: Optional[datetime] = None #时间窗口的开始时间，等同于rank_data中最早的first_time
+	end_time: Optional[datetime] = None #时间窗口的结束时间，等同于rank_data中最新的last_time
 	window_size: int = 0  #单位分钟
 	sentiment: str = ""
 	news_count: int = 0
-	total_weight: float = 0.0
-	created_at: Optional[datetime] = None
-	updated_at: Optional[datetime] = None
-	
+	updated_at: Optional[datetime] = None #等同于timestamp
 	version: int = 0
 
+	total_weight: float = 0.0 #等同于热度
+	heat_change_percent: float = 0.0
+	stage: str = ""
+
+	@property
+	def source_diversity(self) -> int:
+		return len(self.platform_distribution)*10
+	
 	@staticmethod
 	def build_rank_key(item: NewsItem) -> str:
 		return f"{item.source_id}::{item.id}::{item.title}"
@@ -95,14 +95,14 @@ class Topic:
 				for key, items in self.rank_data.items()
 			},
 			"platform_distribution": [item.to_dict() for item in self.platform_distribution],
-			"start_time": format_datetime(self.start_time, "%Y-%m-%d %H:%M"),
-			"end_time": format_datetime(self.end_time, "%Y-%m-%d %H:%M"),
+			"start_time": format_timestamp(self.start_time),
+			"end_time": format_timestamp(self.end_time),
 			"window_size": self.window_size,
 			"sentiment": self.sentiment,
 			"news_count": self.news_count,
 			"total_weight": self.total_weight,
-			"created_at": format_datetime(self.created_at),
-			"updated_at": format_datetime(self.updated_at),
+			"created_at": format_timestamp(self.created_at),
+			"updated_at": format_timestamp(self.updated_at),
 			"version": self.version,
 		}
 
@@ -154,8 +154,134 @@ class Topic:
 		)
 
 class TopicDomainService:
-	def __init__(self) -> None:
-		pass
+	def __init__(
+		self,
+		topic_repository: Optional["TopicRepository"] = None,
+		heat_stage_config: Optional[Dict[str, Any]] = None,
+	) -> None:
+		self.topic_repository = topic_repository
+		config = heat_stage_config or {}
+		self.decline_threshold_percent = self._to_float(config.get("decline_threshold_percent"), -15.0)
+		self.climax_peak_ratio = self._to_float(config.get("climax_peak_ratio"), 0.9)
+		self.climax_change_abs_limit_percent = self._to_float(config.get("climax_change_abs_limit_percent"), 20.0)
+		self.growth_threshold_percent = self._to_float(config.get("growth_threshold_percent"), 20.0)
+
+	@staticmethod
+	def _to_float(value: Any, default: float) -> float:
+		try:
+			return float(value)
+		except (TypeError, ValueError):
+			return default
+
+	def calculate_heat_change_and_stage(self, topic: Topic, history_snapshots: List[Topic]) -> Topic:
+		"""根据历史快照计算热度变化百分比与阶段。"""
+		current_heat = float(topic.total_weight or 0.0)
+		history = [
+			s for s in history_snapshots
+			if isinstance(s, Topic)
+		]
+		history.sort(
+			key=lambda s: (s.updated_at or datetime.min, s.created_at or datetime.min, int(s.id or -1)),
+			reverse=True,
+		)
+
+		prev_heat = float(history[0].total_weight or 0.0) if history else 0.0
+		if prev_heat > 0:
+			topic.heat_change_percent = ((current_heat - prev_heat) / prev_heat) * 100.0
+		elif current_heat > 0:
+			topic.heat_change_percent = 100.0
+		else:
+			topic.heat_change_percent = 0.0
+
+		heat_series = [float(s.total_weight or 0.0) for s in history]
+		heat_series.append(current_heat)
+		peak_heat = max(heat_series) if heat_series else current_heat
+		change = float(topic.heat_change_percent or 0.0)
+
+		if not history:
+			topic.stage = "Inception"
+		elif change <= self.decline_threshold_percent:
+			topic.stage = "Decline"
+		elif (
+			peak_heat > 0
+			and current_heat >= peak_heat * self.climax_peak_ratio
+			and abs(change) < self.climax_change_abs_limit_percent
+		):
+			topic.stage = "Climax"
+		elif change >= self.growth_threshold_percent:
+			topic.stage = "Growth"
+		elif current_heat >= prev_heat:
+			topic.stage = "Growth"
+		else:
+			topic.stage = "Decline"
+
+		if topic.stage not in STAGE_SET:
+			topic.stage = "Inception"
+		return topic
+
+	def enrich_topic_with_history(self, topic: Topic, history_limit: int = 12) -> Topic:
+		if self.topic_repository is None:
+			if not topic.stage:
+				topic.stage = "Inception"
+			topic.heat_change_percent = float(topic.heat_change_percent or 0.0)
+			return topic
+
+		history = self.topic_repository.list_topic_history(
+			topic_name=topic.topic,
+			limit=max(1, int(history_limit)),
+			end_time=topic.updated_at,
+		)
+		return self.calculate_heat_change_and_stage(topic, history)
+
+	def save_topic_snapshot(self, topic: Topic) -> Topic:
+		if self.topic_repository is None:
+			return topic
+		return self.topic_repository.save_topic_snapshot(topic)
+
+	def append_topic_metrics_history_async_safe(self, topic: Topic, snapshot_time: Optional[datetime] = None) -> None:
+		if self.topic_repository is None:
+			return
+		self.topic_repository.append_topic_metrics_history(topic, snapshot_time=snapshot_time)
+
+	def get_topic_timeline_and_latest(
+		self,
+		topic_created_at: datetime,
+		topic_id: int,
+		history_limit: int = 100,
+	) -> List[Topic]:
+		if self.topic_repository is None:
+			return []
+
+		base_topic = self.topic_repository.get_topic_by_composite_key(topic_created_at, topic_id)
+		if base_topic is None:
+			return []
+
+		history = self.topic_repository.list_topic_metrics_history_by_composite_key(
+			topic_created_at=topic_created_at,
+			topic_id=topic_id,
+			limit=max(1, int(history_limit)),
+		)
+
+		latest_topic = self.topic_repository.get_latest_topic_snapshot(base_topic.topic)
+
+		combined: List[Topic] = []
+		seen_keys: set[tuple[str, int, str]] = set()
+
+		for item in [base_topic, latest_topic, *history]:
+			if item is None:
+				continue
+			updated_at_key = format_datetime(item.updated_at) or ""
+			key = (format_datetime(item.created_at) or "", int(item.id or -1), updated_at_key)
+			if key in seen_keys:
+				continue
+			seen_keys.add(key)
+			combined.append(item)
+
+		combined.sort(
+			key=lambda x: (x.updated_at or datetime.min, x.created_at or datetime.min, int(x.id or -1)),
+			reverse=True,
+		)
+		return combined
 	
 	def aggregate_topic_metrics(self, topic: Topic) -> Topic:
         
@@ -249,6 +375,7 @@ class TopicDomainService:
 			topic.sentiment = ""
 		topic.news_count = news_count
 		topic.total_weight = total_weight
+		topic.total_weight+=topic.source_diversity #考虑增加平台多样性对热度的贡献
 		now = datetime.now()
 		if not topic.created_at:
 			topic.created_at = now
@@ -279,5 +406,37 @@ class TopicDomainService:
 		return self.aggregate_topic_metrics(topic)
 
 class TopicRepository(ABC):
-	pass
+	@abstractmethod
+	def save_topic_snapshot(self, topic: Topic) -> Topic:
+		pass
+
+	@abstractmethod
+	def get_latest_topic_snapshot(self, topic_name: str) -> Optional[Topic]:
+		pass
+
+	@abstractmethod
+	def list_topic_history(
+		self,
+		topic_name: str,
+		limit: int = 30,
+		end_time: Optional[datetime] = None,
+	) -> List[Topic]:
+		pass
+
+	@abstractmethod
+	def get_topic_by_composite_key(self, topic_created_at: datetime, topic_id: int) -> Optional[Topic]:
+		pass
+
+	@abstractmethod
+	def append_topic_metrics_history(self, topic: Topic, snapshot_time: Optional[datetime] = None) -> None:
+		pass
+
+	@abstractmethod
+	def list_topic_metrics_history_by_composite_key(
+		self,
+		topic_created_at: datetime,
+		topic_id: int,
+		limit: int = 100,
+	) -> List[Topic]:
+		pass
     

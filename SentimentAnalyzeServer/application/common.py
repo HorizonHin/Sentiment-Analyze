@@ -3,9 +3,14 @@ from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import logging
-import os
 import threading
 from typing import Any, Callable, Dict, List, Optional
+
+from SentimentAnalyzeServer.system.datetime_utils import (
+    DEFAULT_DATETIME_FORMATS,
+    format_datetime_value,
+    parse_datetime_value,
+)
 
 
 EVENT_CRAWL_SAVED = "crawl.saved"
@@ -20,18 +25,19 @@ logger = logging.getLogger(__name__)
 class CommonThreadPool:
     _instance: "CommonThreadPool | None" = None
     _instance_lock = threading.Lock()
+    _configured_max_workers = 8
+
+    @classmethod
+    def configure(cls, max_workers: int) -> None:
+        cls._configured_max_workers = max(1, int(max_workers))
 
     def __new__(cls) -> "CommonThreadPool":
         if cls._instance is None:
             with cls._instance_lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
-                    try:
-                        max_workers = max(1, int(os.getenv("COMMON_THREAD_POOL_MAX_WORKERS", "8")))
-                    except ValueError:
-                        max_workers = 8
                     cls._instance._executor = ThreadPoolExecutor(
-                        max_workers=max_workers,
+                        max_workers=cls._configured_max_workers,
                         thread_name_prefix="common-worker",
                     )
         return cls._instance

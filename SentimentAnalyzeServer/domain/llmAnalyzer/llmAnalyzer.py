@@ -36,8 +36,9 @@ class LLMTitleAnalyzer:
         self,
         model: str = "qwen-turbo-2025-07-15", #qwen3.5-flash
         base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        api_key: str | None = None,
     ) -> None:
-        api_key = os.getenv("Qwen_SentimentAnalyze")
+        api_key = api_key or os.getenv("Qwen_SentimentAnalyze")
         if not api_key:
             raise ValueError("Missing API key 'Qwen_SentimentAnalyze'.")
 

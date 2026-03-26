@@ -34,9 +34,25 @@ weight:
 llm_executor:
   max_workers: 4
 
+scheduler:
+  crawl_interval_minutes: 30       # 系统周期（原 CRAWL_INTERVAL_MINUTES）
+
+common_thread_pool:
+  max_workers: 8
+
+llm:
+  api_key: ""                      # 必填：请填写通义千问 API Key #不填则默认使用环境变量中的 API Key
+
+topic:
+  heat_stage:
+    decline_threshold_percent: -15.0
+    climax_peak_ratio: 0.9
+    climax_change_abs_limit_percent: 20.0
+    growth_threshold_percent: 20.0
+
 mssql:
-  server: "localhost"              # 优先级：配置文件 > 环境变量(MSSQL_SERVER) > 默认值(localhost)
-  database: "sentiment_analyze"    # 优先级：配置文件 > 环境变量(MSSQL_DATABASE) > 默认值(sentiment_analyze)
-  username: "月迷津渡"                   # 优先级：配置文件 > 环境变量(MSSQL_USERNAME) > 默认值(sa)
-  password: ""                     # 优先级：配置文件 > 环境变量(MSSQL_PASSWORD) > 默认值("")
+  server: "localhost"              # 优先级：配置文件 > 默认值(localhost)
+  database: "sentiment_analyze"    # 优先级：配置文件 > 默认值(sentiment_analyze)
+  username: "月迷津渡"                   # 优先级：配置文件 > 默认值(sa)
+  password: ""                     # 优先级：配置文件 > 默认值("")
   driver: "ODBC Driver 17 for SQL Server"

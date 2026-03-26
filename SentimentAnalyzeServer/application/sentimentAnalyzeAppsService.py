@@ -22,12 +22,19 @@ logger = logging.getLogger(__name__)
 
 
 class SentimentAnalyzeAppService:
-	def __init__(self, storage: object, analyzer: LLMTitleAnalyzer, max_workers: int = 32) -> None:
+	def __init__(
+		self,
+		storage: object,
+		analyzer: LLMTitleAnalyzer,
+		max_workers: int = 32,
+		recent_window_seconds: int = 30 * 60,
+	) -> None:
 		self.news_domain_service = NewsDomainService(storage)
 		self.llm_domain_analyzer = analyzer
 		self.event_manager = EventManager()
 		self.redis = MyRedis()
 		self.common_thread_pool = CommonThreadPool()
+		self.recent_window_seconds = max(60, int(recent_window_seconds))
 		self.max_retries = 5
 		self.retry_delay_seconds = 1
 		self.batch_save_size = 20
@@ -156,7 +163,7 @@ class SentimentAnalyzeAppService:
 			len(updated_items),
 		)
 		now = datetime.now()
-		recent_threshold = now - timedelta(minutes=30)
+		recent_threshold = now - timedelta(seconds=self.recent_window_seconds)
 		recent_items = [
 			item for item in updated_items
 			if item.last_time is not None and item.last_time >= recent_threshold

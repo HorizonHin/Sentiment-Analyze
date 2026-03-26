@@ -1,11 +1,11 @@
 -- MSSQL 数据库初始化脚本
 -- 创建新闻数据存储表结构及索引
-
+use sentiment_analyze;
 -- 创建 NewsItem 表
 IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'NewsItem')
 CREATE TABLE NewsItem (
     id INT PRIMARY KEY IDENTITY(1,1),
-    news_date DATE NOT NULL,
+    news_date BIGINT NOT NULL,
     title NVARCHAR(500) NOT NULL,
     source_id NVARCHAR(100) NOT NULL,
     source_name NVARCHAR(100) DEFAULT '',
@@ -22,9 +22,9 @@ CREATE TABLE NewsItem (
     trust_score FLOAT DEFAULT 0.0,
     controversy_score FLOAT DEFAULT 0.0,
     attention_score FLOAT DEFAULT 0.0,
-    first_time DATETIME2 DEFAULT GETDATE(),
-    last_time DATETIME2 DEFAULT GETDATE(),
-    analyzed_time DATETIME2,
+    first_time BIGINT DEFAULT DATEDIFF_BIG(SECOND, '1970-01-01', SYSUTCDATETIME()),
+    last_time BIGINT DEFAULT DATEDIFF_BIG(SECOND, '1970-01-01', SYSUTCDATETIME()),
+    analyzed_time BIGINT,
     total_weigh FLOAT DEFAULT 0.0,
     UNIQUE(source_id, title)
 );
@@ -35,7 +35,7 @@ CREATE TABLE Keyword (
     id INT PRIMARY KEY IDENTITY(1,1),
     news_item_id INT NOT NULL,
     term NVARCHAR(500) NOT NULL,
-    first_time DATETIME2 DEFAULT GETDATE(),
+    first_time BIGINT DEFAULT DATEDIFF_BIG(SECOND, '1970-01-01', SYSUTCDATETIME()),
     importance FLOAT DEFAULT 0.0,
     weigh FLOAT DEFAULT 0.0,
     FOREIGN KEY (news_item_id) REFERENCES NewsItem(id) ON DELETE CASCADE,
@@ -49,7 +49,7 @@ CREATE TABLE Entity (
     news_item_id INT NOT NULL,
     name NVARCHAR(200) NOT NULL,
     entity_type NVARCHAR(100) NOT NULL,
-    first_time DATETIME2 DEFAULT GETDATE(),
+    first_time BIGINT DEFAULT DATEDIFF_BIG(SECOND, '1970-01-01', SYSUTCDATETIME()),
     weigh FLOAT DEFAULT 0.0,
     FOREIGN KEY (news_item_id) REFERENCES NewsItem(id) ON DELETE CASCADE,
     UNIQUE(news_item_id, name, entity_type)
@@ -60,7 +60,7 @@ IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'rank_
 CREATE TABLE rank_timeline (
     id INT PRIMARY KEY IDENTITY(1,1),
     news_item_id INT NOT NULL,
-    timeline_time DATETIME2 NOT NULL,
+    timeline_time BIGINT NOT NULL,
     rank_value INT,
     FOREIGN KEY (news_item_id) REFERENCES NewsItem(id) ON DELETE CASCADE
 );

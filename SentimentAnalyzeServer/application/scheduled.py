@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-import os
 import threading
 import time
 from pathlib import Path
@@ -17,6 +16,7 @@ from SentimentAnalyzeServer.application.topicAppService import TopicAppService
 
 
 _DEFAULT_INTERVAL_SECONDS = 30 * 60
+_TOPIC_LOOKBACK_MULTIPLIER = 12.4
 
 
 class Scheduled:
@@ -45,6 +45,39 @@ class Scheduled:
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._thread_lock = threading.Lock()
+
+    def start(self) -> bool:
+        """Start scheduler loop in a daemon thread, return True if started now."""
+        with self._thread_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False
+
+            self._stop_event.clear()
+            self._thread = threading.Thread(target=self._loop, name="scheduled-worker", daemon=True)
+            self._thread.start()
+            return True
+
+    def stop(self, timeout: float = 10.0) -> bool:
+        """Stop scheduler loop, return True when worker is fully stopped."""
+        with self._thread_lock:
+            thread = self._thread
+            if thread is None:
+                return True
+
+            self._stop_event.set()
+
+        thread.join(timeout=timeout)
+
+        with self._thread_lock:
+            stopped = not thread.is_alive()
+            if stopped and self._thread is thread:
+                self._thread = None
+            return stopped
+
+    def is_running(self) -> bool:
+        thread = self._thread
+        return thread is not None and thread.is_alive()
 
     def fetch_and_store_news_data(self) -> dict[str, Any]:
         result, _ = self.dataFetcher_app_service.crawl_and_save_news_data()
@@ -54,7 +87,7 @@ class Scheduled:
         if self.sentiment_app_service is None:
             return {"success": False, "reason": "sentiment_service_not_configured"}
 
-        end_time = datetime.now() - timedelta(minutes=30)
+        end_time = datetime.now() - timedelta(seconds=self.interval_seconds)
         return self.sentiment_app_service.analyze_pending_items_by_latest_time(
             start_time=None,
             end_time=end_time,
@@ -64,7 +97,8 @@ class Scheduled:
         if self.topic_app_service is None:
             return {"success": False, "reason": "topic_service_not_configured"}
 
-        now = datetime.now()-timedelta(hours=6.2)
+        lookback_seconds = self.interval_seconds * _TOPIC_LOOKBACK_MULTIPLIER
+        now = datetime.now() - timedelta(seconds=lookback_seconds)
         start_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
         topics = self.topic_app_service.recommend_and_cache_topics(
             start_time=start_time,
@@ -148,8 +182,9 @@ class Scheduled:
             self._stop_event.wait(wait_seconds)
 
 
-def get_interval_seconds_from_env() -> int:
-    raw = os.getenv("CRAWL_INTERVAL_MINUTES", "30").strip()
+def get_interval_seconds_from_config(config: dict[str, Any] | None) -> int:
+    scheduler_config = ((config or {}).get("scheduler") or {})
+    raw = str(scheduler_config.get("crawl_interval_minutes", "30")).strip()
     try:
         minutes = max(1, int(raw))
     except ValueError:

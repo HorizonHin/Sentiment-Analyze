@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Set, Tuple
 
+from SentimentAnalyzeServer.system.datetime_utils import datetime_to_timestamp, parse_datetime_value
+
 DATETIME_FORMATS = (
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d %H:%M",
@@ -12,29 +14,15 @@ DATETIME_FORMATS = (
 
 
 def parse_datetime(value: Any) -> Optional[datetime]:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-
-    text = str(value).strip()
-    if not text:
-        return None
-
-    for fmt in DATETIME_FORMATS:
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-
-    try:
-        return datetime.fromisoformat(text)
-    except ValueError:
-        return None
+    return parse_datetime_value(value, formats=DATETIME_FORMATS)
 
 
-def format_datetime(value: Optional[datetime], fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+def format_datetime(value: Optional[datetime], fmt: str = "%Y-%m-%d %H:%M") -> str:
     return value.strftime(fmt) if value else ""
+
+
+def format_timestamp(value: Optional[datetime]) -> Optional[int]:
+    return datetime_to_timestamp(value)
 
 @dataclass
 class Entity:
@@ -141,15 +129,15 @@ class NewsItem:
             "trust_score": self.trust_score,
             "controversy_score": self.controversy_score,
             "attention_score": self.attention_score,
-            "first_time": format_datetime(self.first_time, "%Y-%m-%d %H:%M"),
-            "last_time": format_datetime(self.last_time, "%Y-%m-%d %H:%M"),
-            "analyzed_time": format_datetime(self.analyzed_time),
+            "first_time": format_timestamp(self.first_time),
+            "last_time": format_timestamp(self.last_time),
+            "analyzed_time": format_timestamp(self.analyzed_time),
             "count": self.count,
             "total_weigh": self.total_weigh,
             "rank_timeline": [
                 {
                     "id": point.id,
-                    "time": format_datetime(point.time, "%Y-%m-%d %H:%M") if point.time else "",
+                    "time": format_timestamp(point.time),
                     "rank": point.rank if point.rank > 0 else None,
                 }
                 for point in self.rank_timeline_obj
@@ -269,8 +257,8 @@ class NewsData:
             items_dict[source_id] = [item.to_dict() for item in news_list]
 
         return {
-            "date": format_datetime(self.date, "%Y-%m-%d"),
-            "last_time": format_datetime(self.last_time, "%Y-%m-%d %H:%M"),
+            "date": format_timestamp(self.date),
+            "last_time": format_timestamp(self.last_time),
             "items": items_dict,
             "id_to_name": self.id_to_name,
             "failed_ids": self.failed_ids,
