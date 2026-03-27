@@ -7,7 +7,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from SentimentAnalyzeServer.system.infra import CommonThreadPool
+from SentimentAnalyzeServer.system.infra import CommonThreadPool, EventManager, EVENT_TOPIC_RANK_UPDATED
 from SentimentAnalyzeServer.application.common import Result
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsDomainService, NewsItem
@@ -118,6 +118,7 @@ class TopicAppService:
         self.topic_cache_manager = topic_cache_manager or TopicCacheManager_Memory()
         self.llm_title_analyzer = llm_title_analyzer
         self.common_thread_pool = CommonThreadPool()
+        self.event_manager = EventManager()
 
     def _resolve_topic_lookback_window(self) -> int:
         raw_hours = (self.topic_config or {}).get("lookback_hours")
@@ -305,12 +306,23 @@ class TopicAppService:
         topics = enriched_topics
 
         self.topic_cache_manager.save_topics(topics, limit=cache_limit)
-
+        
         logger.info(
             "Topic recommendation cached successfully. topic_count=%s, top_n=%s, cache_limit=%s",
             len(topics),
             top_n,
             cache_limit,
+        )
+
+        self.event_manager.publish(
+            EVENT_TOPIC_RANK_UPDATED,
+            {
+                "topic_count": len(topics),
+                "top_n": int(top_n),
+                "cache_limit": int(cache_limit),
+                "start_time": int(resolved_start_time),
+                "end_time": int(resolved_end_time),
+            },
         )
         
         return topics

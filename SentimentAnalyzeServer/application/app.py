@@ -44,6 +44,13 @@ def create_app() -> Flask:
 
     interval_seconds = get_interval_seconds_from_config(config)
 
+    sentiment_config = config.get("sentiment") or {}
+    try:
+        first_time_lookback_days = max(1, int(sentiment_config.get("first_time_lookback_days", 7)))
+    except (TypeError, ValueError):
+        first_time_lookback_days = 7
+    first_time_lookback_seconds = first_time_lookback_days * 24 * 60 * 60
+
     common_thread_pool_config = config.get("common_thread_pool") or {}
     try:
         common_thread_pool_max_workers = max(1, int(common_thread_pool_config.get("max_workers", 8)))
@@ -90,6 +97,7 @@ def create_app() -> Flask:
         analyzer=llm_title_analyzer,
         max_workers=llm_max_workers,
         recent_window_seconds=interval_seconds,
+        first_time_lookback_seconds=first_time_lookback_seconds,
     )
     topic_app_service = TopicAppService(
         topic_domain_service=TopicDomainService(
@@ -113,6 +121,7 @@ def create_app() -> Flask:
             sentiment_app_service=sentiment_app_service,
             topic_app_service=topic_app_service,
             crawl_interval_seconds=interval_seconds,
+            first_time_lookback_seconds=first_time_lookback_seconds,
         )
     )
 
@@ -124,6 +133,7 @@ def create_app() -> Flask:
         data_fetcher_app_service=data_fetcher_app_service,
         sentiment_app_service=sentiment_app_service,
         topic_app_service=topic_app_service,
+        first_time_lookback_seconds=first_time_lookback_seconds,
     )
 
     app.config["scheduler"] = scheduler

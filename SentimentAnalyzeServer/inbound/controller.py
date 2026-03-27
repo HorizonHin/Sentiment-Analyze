@@ -23,6 +23,7 @@ def create_external_controller(
 	sentiment_app_service: SentimentAnalyzeAppService,
 	topic_app_service: TopicAppService,
 	crawl_interval_seconds: int,
+	first_time_lookback_seconds: int,
 ) -> Blueprint:
 	bp = Blueprint("external_controller", __name__)
 
@@ -31,11 +32,14 @@ def create_external_controller(
 		try:
 			lookback_seconds = max(60, int(crawl_interval_seconds)) * _LATEST_RANKED_LOOKBACK_MULTIPLIER
 			default_end_time = int(time.time())
-			default_start_time = default_end_time - int(lookback_seconds)
+			default_start_time = default_end_time - int(lookback_seconds*1.3)
+			default_first_time = default_end_time - max(60, int(first_time_lookback_seconds))
+			first_time = parse_int_timestamp(request.args.get("first_time")) or default_first_time
 			start_time = parse_int_timestamp(request.args.get("start_time")) or default_start_time
 			end_time = parse_int_timestamp(request.args.get("end_time")) or default_end_time
 
 			grouped = sentiment_app_service.get_analyzed_news_grouped_by_latest_time(
+				first_time=first_time,
 				start_time=start_time,
 				end_time=end_time,
 			)

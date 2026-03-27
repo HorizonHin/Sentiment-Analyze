@@ -300,15 +300,11 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         where_clauses: List[str] = []
         params: List = []
         converted_column = column_name
-        lower_bound_prefilter_column = "first_time" if column_name == "last_time" else None
 
         start_ts = self._to_timestamp(start_time)
         end_ts = self._to_timestamp(end_time)
 
         if start_ts is not None and end_ts is not None:
-            if lower_bound_prefilter_column is not None:
-                where_clauses.append(f"{lower_bound_prefilter_column} >= ?")
-                params.append(start_ts)
             if start_ts <= end_ts:
                 where_clauses.append(f"{converted_column} >= ? AND {converted_column} <= ?")
                 params.extend([start_ts, end_ts])
@@ -316,9 +312,6 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 where_clauses.append(f"({converted_column} >= ? OR {converted_column} <= ?)")
                 params.extend([start_ts, end_ts])
         elif start_ts is not None:
-            if lower_bound_prefilter_column is not None:
-                where_clauses.append(f"{lower_bound_prefilter_column} >= ?")
-                params.append(start_ts)
             where_clauses.append(f"{converted_column} >= ?")
             params.append(start_ts)
         elif end_ts is not None:
@@ -944,26 +937,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             return items
         finally:
             conn.close()
-
-    def get_latest_crawl_data(self, date: Optional[int] = None) -> Optional[NewsData]:
-        date_obj = self._to_day_timestamp(date, fallback_today=True)
-        next_day_obj = int(date_obj) + 24 * 60 * 60
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                "SELECT MAX(last_time) FROM NewsItem WHERE news_date = ? AND first_time >= ? AND first_time < ?",
-                date_obj,
-                date_obj,
-                next_day_obj,
-            )
-            row = cursor.fetchone()
-            if row is None or row[0] is None:
-                return None
-            return self._load_snapshot(date_obj, row[0])
-        finally:
-            conn.close()
-
+            
     def _load_snapshot(self, date_value: int, last_time: object) -> Optional[NewsData]:
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -1045,9 +1019,14 @@ class SqlServerNewsItemRepository(NewsItemRepository):
     def get_news_list_by_latest_crawl_range(
         self,
         isAnalyzed: bool,
+        first_time: int,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> Optional[List[NewsItem]]:
+        partition_first_time = self._to_timestamp(first_time)
+        if partition_first_time is None:
+            raise ValueError("first_time is required for partition filtering")
+
         time_where_sql, params = self._build_datetime_range_clause(
             column_name="last_time",
             start_time=start_time,
@@ -1055,6 +1034,8 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         )
 
         where_clauses: List[str] = []
+        where_clauses.append("first_time >= ?")
+        params = [partition_first_time] + params
         if time_where_sql != "1=1":
             where_clauses.append(time_where_sql)
 
@@ -1066,7 +1047,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
     def get_news_list_by_first_time_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[int] = None,
+        start_time: int,
         end_time: Optional[int] = None,
     ) -> Optional[List[NewsItem]]:
         time_where_sql, params = self._build_datetime_range_clause(

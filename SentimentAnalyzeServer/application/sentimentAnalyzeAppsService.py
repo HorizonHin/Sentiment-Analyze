@@ -28,6 +28,7 @@ class SentimentAnalyzeAppService:
 		analyzer: LLMTitleAnalyzer,
 		max_workers: int = 32,
 		recent_window_seconds: int = 30 * 60,
+		first_time_lookback_seconds: int = 7 * 24 * 60 * 60,
 	) -> None:
 		self.news_domain_service = NewsDomainService(storage)
 		self.llm_domain_analyzer = analyzer
@@ -35,6 +36,7 @@ class SentimentAnalyzeAppService:
 		self.redis = MyRedis()
 		self.common_thread_pool = CommonThreadPool()
 		self.recent_window_seconds = max(60, int(recent_window_seconds))
+		self.first_time_lookback_seconds = max(60, int(first_time_lookback_seconds))
 		self.max_retries = 5
 		self.retry_delay_seconds = 1
 		self.batch_save_size = 20
@@ -270,33 +272,16 @@ class SentimentAnalyzeAppService:
 			if not (item.analyzed_time or item.sentiment_polarity or item.entities or item.keywords)
 		]
 
-	def analyze_pending_items_by_first_time(
-		self,
-		start_time: Optional[int] = None,
-		end_time: Optional[int] = None,
-	) -> bool:
-		all_items = self.news_domain_service.get_news_list_by_firt_time_range(
-			isAnalyzed=False,
-			start_time=start_time,
-			end_time=end_time,
-		)
-		if all_items is None:
-			logger.info("[ScheduledCrawler] 无可分析的数据")
-			return None
-		pending_items = self.filter_news_items_not_analyzed(all_items)
-		if not pending_items:
-			logger.info("[ScheduledCrawler] 无可分析的数据")
-			return None
-		saved = self.analyze_and_update_news_items(pending_items)
-		return saved
-
 	def analyze_pending_items_by_latest_time(
 		self,
+		first_time: Optional[int] = None,
 		start_time: Optional[int] = None,
 		end_time: Optional[int] = None,
 	) -> dict[str, Any]:
+		resolved_first_time = int(first_time) if first_time is not None else int(time.time()) - self.first_time_lookback_seconds
 		latest_items = self.news_domain_service.get_news_list_by_latest_crawl_range(
 			isAnalyzed=False,
+			first_time=resolved_first_time,
 			start_time=start_time,
 			end_time=end_time,
 		)
@@ -314,10 +299,12 @@ class SentimentAnalyzeAppService:
 
 	def get_analyzed_news_grouped_by_latest_time(
 		self,
+		first_time: Optional[int] = None,
 		start_time: Optional[int] = None,
 		end_time: Optional[int] = None,
 	) -> Dict[str, List[NewsItem]]:
 		"""按 last_time 范围获取已分析新闻，并按 source_id 分组。"""
+		resolved_first_time = int(first_time) if first_time is not None else int(time.time()) - self.first_time_lookback_seconds
 		cached_payload_map = self.redis.get_many(
 			[
 				REDIS_KEY_LATEST_UPDATED_ANALYZED_NEWS,
@@ -331,12 +318,18 @@ class SentimentAnalyzeAppService:
 
 			if cached_items:
 				cached_items = self._deduplicate_news_items(cached_items)
+				cached_items = [
+					item
+					for item in cached_items
+					if item.first_time is not None and item.first_time >= resolved_first_time
+				]
 				cached_items = self._filter_items_by_last_time_range(cached_items, start_time, end_time)
 				if cached_items:
 					return self.news_domain_service.group_news_items_by_platform(cached_items)
 
 		grouped = self.news_domain_service.get_group_news_by_latest_crawl_range(
 			isAnalyzed=True,
+			first_time=resolved_first_time,
 			start_time=start_time,
 			end_time=end_time,
 		)

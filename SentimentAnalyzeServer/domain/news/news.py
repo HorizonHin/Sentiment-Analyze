@@ -469,20 +469,6 @@ class NewsItemRepository(ABC):
         """根据 (source_id, title) 列表查询新闻数据。"""
         pass
 
-
-    @abstractmethod
-    def get_latest_crawl_data(self, date: Optional[int] = None) -> Optional[NewsData]:
-        """
-        获取最新一次抓取的数据
-
-        Args:
-            date: 日期字符串，默认为今天
-
-        Returns:
-            最新抓取的新闻数据
-        """
-        pass
-
     @abstractmethod
     def is_first_crawl_today(self, date: Optional[int] = None) -> bool:
         """
@@ -537,6 +523,7 @@ class NewsItemRepository(ABC):
     def get_news_list_by_latest_crawl_range(
         self,
         isAnalyzed: bool,
+        first_time: int,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> Optional[List[NewsItem]]:
@@ -546,7 +533,7 @@ class NewsItemRepository(ABC):
     def get_news_list_by_first_time_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[int] = None,
+        start_time: int,
         end_time: Optional[int] = None,
     ) -> Optional[List[NewsItem]]:
         pass
@@ -937,34 +924,19 @@ class NewsDomainService:
             return False
         return self.storage.update_news_list([item])
 
-    def get_latest_crawl_data(self, date: Optional[int] = None) -> Optional[NewsData]:
-        return self.storage.get_latest_crawl_data(date)
-
-    def get_news_list_by_firt_time_range(
-        self,
-        isAnalyzed: bool,
-        start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
-    ) -> Optional[List[NewsItem]]:
-        return self.storage.get_news_list_by_first_time_range(isAnalyzed=isAnalyzed, start_time=start_time, end_time=end_time)
-
-    def get_group_news_by_first_time_range(
-        self,
-        isAnalyzed: bool,
-        start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
-    ) -> Dict[str, List[NewsItem]]:
-        news_items = self.get_news_list_by_firt_time_range(isAnalyzed=isAnalyzed, start_time=start_time, end_time=end_time)
-        result = self._group_items_by_source(news_items) if news_items else {}
-        return result
-
     def get_group_news_by_latest_crawl_range(
         self,
         isAnalyzed: bool,
+        first_time: int,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> Optional[Dict[str, List[NewsItem]]]:
-        news_items = self.get_news_list_by_latest_crawl_range(isAnalyzed=isAnalyzed, start_time=start_time, end_time=end_time)
+        news_items = self.get_news_list_by_latest_crawl_range(
+            isAnalyzed=isAnalyzed,
+            first_time=first_time,
+            start_time=start_time,
+            end_time=end_time,
+        )
         if news_items is None:
             return None
         result = self.group_news_items_by_platform(news_items)
@@ -973,8 +945,14 @@ class NewsDomainService:
     def get_news_list_by_latest_crawl_range(
         self,
         isAnalyzed: bool,
+        first_time: int,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> Optional[List[NewsItem]]:
-        return self.storage.get_news_list_by_latest_crawl_range(isAnalyzed=isAnalyzed, start_time=start_time, end_time=end_time)
+        return self.storage.get_news_list_by_latest_crawl_range(
+            isAnalyzed=isAnalyzed,
+            first_time=first_time,
+            start_time=start_time,
+            end_time=end_time,
+        )
 

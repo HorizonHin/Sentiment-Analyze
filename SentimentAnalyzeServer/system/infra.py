@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 EVENT_CRAWL_SAVED = "crawl.saved"
 EVENT_SENTIMENT_ANALYZED = "sentiment.analyzed"
+EVENT_TOPIC_RANK_UPDATED = "topic.rank_updated"
 REDIS_KEY_LATEST_UPDATED_ANALYZED_NEWS = "news:latest_updated_analyzed"
 REDIS_KEY_RECENT_30M_ANALYZED_NEWS = "news:recent_30m_analyzed"
 

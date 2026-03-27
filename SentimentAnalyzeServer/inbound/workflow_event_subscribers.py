@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 from SentimentAnalyzeServer.system.infra import (
     EVENT_CRAWL_SAVED,
     EVENT_SENTIMENT_ANALYZED,
+    EVENT_TOPIC_RANK_UPDATED,
     EventManager,
 )
 from SentimentAnalyzeServer.application.sentimentAnalyzeAppsService import SentimentAnalyzeAppService
@@ -35,6 +36,7 @@ class WorkflowEventSubscribers:
     def register(self) -> None:
         self.event_manager.subscribe(EVENT_CRAWL_SAVED, self._on_crawl_saved)
         self.event_manager.subscribe(EVENT_SENTIMENT_ANALYZED, self._on_sentiment_analyzed)
+        self.event_manager.subscribe(EVENT_TOPIC_RANK_UPDATED, self._on_topic_rank_updated)
 
     def _on_crawl_saved(self, payload: Dict[str, Any]) -> None:
         saved_items = payload.get("saved_items", [])
@@ -63,3 +65,15 @@ class WorkflowEventSubscribers:
             )
         except Exception:
             logger.exception("recommend_and_cache_topics failed")
+
+    def _on_topic_rank_updated(self, payload: Dict[str, Any]) -> None:
+        raw_limit = payload.get("cache_limit", 50)
+        try:
+            limit = max(1, min(200, int(raw_limit)))
+        except (TypeError, ValueError):
+            limit = 50
+
+        try:
+            self.topic_app_service.backfill_missing_llm_titles(limit=limit)
+        except Exception:
+            logger.exception("backfill_missing_llm_titles failed")

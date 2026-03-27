@@ -31,6 +31,7 @@ class Scheduled:
         data_fetcher_app_service: DataFetcherAppService | None = None,
         sentiment_app_service: SentimentAnalyzeAppService | None = None,
         topic_app_service: TopicAppService | None = None,
+        first_time_lookback_seconds: int = 7 * 24 * 60 * 60,
     ) -> None:
         self.config_path = Path(config_path)
         self.interval_seconds = max(60, int(interval_seconds))
@@ -40,6 +41,7 @@ class Scheduled:
         self.sentiment_app_service = sentiment_app_service
         self.topic_app_service = topic_app_service
         self.common_thread_pool = CommonThreadPool()
+        self.first_time_lookback_seconds = max(60, int(first_time_lookback_seconds))
 
         self.system_dir = self.config_path.parent / "system"
         self.system_dir.mkdir(parents=True, exist_ok=True)
@@ -92,7 +94,9 @@ class Scheduled:
             return {"success": False, "reason": "sentiment_service_not_configured"}
 
         end_time = int(time.time()) - int(self.interval_seconds)
+        first_time = end_time - self.first_time_lookback_seconds
         return self.sentiment_app_service.analyze_pending_items_by_latest_time(
+            first_time=first_time,
             start_time=None,
             end_time=end_time,
         )
@@ -113,13 +117,6 @@ class Scheduled:
             cache_limit=50,
         )
         return {"success": True, "topic_count": len(topics)}
-
-    def run_backfill_topic_titles_once(self) -> dict[str, Any]:
-        logger.info("[scheduler] 开始执行 llm_title 托底更新任务")
-        if self.topic_app_service is None:
-            logger.error("[scheduler] topic_app_service 未配置")
-            return {"success": False, "reason": "topic_service_not_configured"}
-        return self.topic_app_service.backfill_missing_llm_titles(limit=50)
 
     def _read_last_completed_time(self) -> int | None:
         if not self.last_run_file.exists():
@@ -187,11 +184,6 @@ class Scheduled:
                 self._run_in_common_pool(self.run_refresh_topics_once, "topicRefresher")
             except Exception as exc:
                 print(f"[topicRefresher] 热门话题刷新失败: {exc}")
-
-            try:
-                self._run_in_common_pool(self.run_backfill_topic_titles_once, "topicTitleBackfill")
-            except Exception as exc:
-                print(f"[topicTitleBackfill] llm_title托底更新失败: {exc}")
 
             try:
                 self._run_in_common_pool(self.fetch_and_store_news_data, "dataFetcher")
