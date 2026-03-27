@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import logging
+from queue import Queue
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -13,6 +14,45 @@ REDIS_KEY_RECENT_30M_ANALYZED_NEWS = "news:recent_30m_analyzed"
 
 
 logger = logging.getLogger(__name__)
+
+
+class QueueBatchManager:
+    def __init__(self, batch_size: int, consume_batch: Callable[[List[Any]], None]) -> None:
+        self.batch_size = max(1, int(batch_size))
+        self.consume_batch = consume_batch
+        self._queue: Queue[Optional[Any]] = Queue()
+        self._error: Optional[Exception] = None
+        self._error_lock = threading.Lock()
+        self._consumer = threading.Thread(target=self._consume_loop, daemon=True)
+        self._consumer.start()
+
+    def put(self, item: Any) -> None:
+        self._queue.put(item)
+
+    def close_and_wait(self) -> None:
+        self._queue.put(None)
+        self._consumer.join()
+        if self._error is not None:
+            raise RuntimeError("Queue batch consumer failed.") from self._error
+
+    def _consume_loop(self) -> None:
+        try:
+            batch: List[Any] = []
+            while True:
+                item = self._queue.get()
+                if item is None:
+                    if batch:
+                        self.consume_batch(batch)
+                    break
+
+                batch.append(item)
+                if len(batch) >= self.batch_size:
+                    self.consume_batch(batch)
+                    batch = []
+        except Exception as e:
+            with self._error_lock:
+                self._error = e
+            logger.exception("QueueBatchManager consumer loop failed.")
 
 
 class CommonThreadPool:
@@ -37,6 +77,13 @@ class CommonThreadPool:
 
     def submit(self, fn: Callable[..., Any], *args: Any, **kwargs: Any):
         return self._executor.submit(fn, *args, **kwargs)
+
+    @staticmethod
+    def create_queue_batch_manager(
+        batch_size: int,
+        consume_batch: Callable[[List[Any]], None],
+    ) -> QueueBatchManager:
+        return QueueBatchManager(batch_size=batch_size, consume_batch=consume_batch)
 
 
 class MyRedis:

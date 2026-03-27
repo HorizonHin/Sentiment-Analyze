@@ -58,6 +58,7 @@ CREATE TABLE Keyword (
     id INT IDENTITY(1,1) NOT NULL,
     news_item_id INT NOT NULL,
     news_first_time BIGINT NOT NULL,
+    last_time BIGINT DEFAULT DATEDIFF_BIG(SECOND, '1970-01-01', SYSUTCDATETIME()),
     term NVARCHAR(500) NOT NULL,
     importance FLOAT DEFAULT 0.0,
     weigh FLOAT DEFAULT 0.0,
@@ -73,6 +74,7 @@ CREATE TABLE Entity (
     id INT IDENTITY(1,1) NOT NULL,
     news_item_id INT NOT NULL,
     news_first_time BIGINT NOT NULL,
+    last_time BIGINT DEFAULT DATEDIFF_BIG(SECOND, '1970-01-01', SYSUTCDATETIME()),
     name NVARCHAR(200) NOT NULL,
     entity_type NVARCHAR(100) NOT NULL,
     weigh FLOAT DEFAULT 0.0,
@@ -111,11 +113,17 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_keyword_news' AND obj
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_keyword_term' AND object_id = OBJECT_ID('Keyword'))
     CREATE INDEX idx_keyword_term ON Keyword(term, news_first_time, news_item_id);
 
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_keyword_last_time' AND object_id = OBJECT_ID('Keyword'))
+    CREATE INDEX idx_keyword_last_time ON Keyword(news_first_time, last_time, news_item_id);
+
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_entity_news' AND object_id = OBJECT_ID('Entity'))
     CREATE INDEX idx_entity_news ON Entity(news_first_time, news_item_id);
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_entity_name' AND object_id = OBJECT_ID('Entity'))
     CREATE INDEX idx_entity_name ON Entity(name, news_first_time, news_item_id);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_entity_last_time' AND object_id = OBJECT_ID('Entity'))
+    CREATE INDEX idx_entity_last_time ON Entity(news_first_time, last_time, news_item_id);
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_timeline_news' AND object_id = OBJECT_ID('rank_timeline'))
     CREATE INDEX idx_timeline_news ON rank_timeline(news_first_time, news_item_id, timeline_time);

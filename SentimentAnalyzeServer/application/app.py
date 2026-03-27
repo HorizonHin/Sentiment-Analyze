@@ -78,6 +78,7 @@ def create_app() -> Flask:
             username=mssql_username,
             password=mssql_password,
             driver=mssql_driver,
+            first_time_lookback_days=first_time_lookback_days,
         )
     except RuntimeError as e:
         print(f"[错误] {e}", file=sys.stderr)
@@ -144,13 +145,17 @@ def create_app() -> Flask:
 
     atexit.register(_shutdown_scheduler)
 
+    @app.get("/topic/recomend")
+    def topic_recommend():
+        return topic_app_service.recommend_and_cache_topics()
+
     @app.get("/health")
     def health() -> Any:
         return jsonify(Result.success_result({"status": "ok"}).to_dict())
     return app
 
+    
+
 app = create_app()
 
 
-# if __name__ == "__main__":
-#     app.run(host="0.0.0.0", port=5000, debug=False)

@@ -13,7 +13,7 @@ from SentimentAnalyzeServer.system.infra import (
 	EventManager,
 	MyRedis,
 )
-from SentimentAnalyzeServer.application.tools.llmExecutorService import LLMExecutorService
+from SentimentAnalyzeServer.domain.llmAnalyzer.llmExecutorService import LLMExecutorService
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsItem, NewsDomainService
 

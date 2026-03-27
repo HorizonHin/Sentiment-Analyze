@@ -44,11 +44,14 @@ class TopicPlatformStats:
 
 @dataclass(slots=True)
 class Topic: 
+	# 主键
 	created_at: Optional[int] = None #不是now，而是第一次构建Topic的时间戳
 	id: int = field(default=-1)  
+	# 需要保持的字段
 	topic: str = ""
 	llm_title: Optional[str] = None
 	topic_type: Optional[str] = None
+	# 新状态会有的字段
 	rank_data: Dict[str, List[NewsItem]] = field(default_factory=dict)
 	platform_distribution: List[TopicPlatformStats] = field(default_factory=list)
 	start_time: Optional[int] = None #时间窗口的开始时间戳
@@ -57,9 +60,9 @@ class Topic:
 	sentiment: str = ""
 	news_count: int = 0
 	updated_at: Optional[int] = None
+	total_weight: float = 0.0
+	# 需要计算的字段
 	version: int = 0
-
-	total_weight: float = 0.0 #等同于热度
 	heat_change_percent: float = 0.0
 	stage: str = ""
 
@@ -189,10 +192,8 @@ class TopicDomainService:
 		prev_heat = float(history[0].total_weight or 0.0) if history else 0.0
 		if prev_heat > 0:
 			topic.heat_change_percent = ((current_heat - prev_heat) / prev_heat) * 100.0
-		elif current_heat > 0:
-			topic.heat_change_percent = 100.0
 		else:
-			topic.heat_change_percent = 0.0
+			topic.heat_change_percent = 0.0 #没有历史数据或历史热度为0时，变化百分比定义为0，表示没有变化或无法计算变化
 
 		heat_series = [float(s.total_weight or 0.0) for s in history]
 		heat_series.append(current_heat)
@@ -219,70 +220,40 @@ class TopicDomainService:
 		if topic.stage not in STAGE_SET:
 			topic.stage = "Inception"
 		return topic
+	
+	def applyNewStatus(self, new_status: Topic, old_status: Topic) -> Topic:
+		"""
+		应用新状态，但不计算热度变化百分比和阶段
+		"""
+		# 主键
+		new_status.created_at = old_status.created_at
+		new_status.id = old_status.id
 
-	def enrich_topic_with_history(self, topic: Topic, history_limit: int = 12) -> Topic:
-		if self.topic_repository is None:
-			if not topic.stage:
-				topic.stage = "Inception"
-			topic.heat_change_percent = float(topic.heat_change_percent or 0.0)
-			return topic
+		new_status.topic = old_status.topic
+		new_status.llm_title = old_status.llm_title
+		new_status.topic_type = old_status.topic_type
 
-		history = self.topic_repository.list_topic_history(
-			topic_name=topic.topic,
+		new_status.version = old_status.version + 1
+
+		return new_status
+
+	def get_topic_history(self, topic: Topic, history_limit: int = 1000) -> List[Topic]:
+		history = self.topic_repository.list_topic_metrics_history_by_composite_key(
+			topic_created_at=topic.created_at,
+			topic_id=topic.id,
 			limit=max(1, int(history_limit)),
-			end_time=topic.updated_at,
 		)
-		return self.calculate_heat_change_and_stage(topic, history)
+		return history
 
-	def save_topic_snapshot(self, topic: Topic) -> Topic:
+	def add_topic(self, topic: Topic) -> Topic:
+		"""添加新Topic。同时添加第一条记录"""
 		if self.topic_repository is None:
 			return topic
-		return self.topic_repository.save_topic_snapshot(topic)
+		pesisted_topic = self.topic_repository.add_topic(topic)
+		self.append_topic_metrics_history(pesisted_topic)
+		return pesisted_topic
 
-	def save_or_update_topic_snapshot(
-		self,
-		topic: Topic,
-		days_lookback: int = 7,
-	) -> Topic:
-		"""
-		保存或更新Topic快照。
-		
-		- 如果存在相同topic名称且updated_at在最近days_lookback天内的记录，
-		  则执行UPDATE操作（保持主键不变）并将旧数据加入历史。
-		- 否则执行INSERT操作创建新记录。
-		
-		Args:
-			topic: 新的Topic数据
-			days_lookback: 向后查看的天数（默认7天）
-		
-		Returns:
-			保存或更新后的Topic对象
-		"""
-		if self.topic_repository is None:
-			return topic
-		
-		topic_name = str(topic.topic or "").strip()
-		if not topic_name:
-			return self.topic_repository.save_topic_snapshot(topic)
-		
-		# 查找最近7天内相同topic的最新记录
-		recent_topic = self.topic_repository.find_recent_topic_by_name(
-			topic_name=topic_name,
-			days_lookback=days_lookback,
-		)
-		
-		if recent_topic is not None and int(recent_topic.id or -1) > 0:
-			# 存在最近的相同topic记录，执行UPDATE操作
-			return self.topic_repository.update_topic_snapshot(
-				topic=topic,
-				existing_created_at=int(recent_topic.created_at or int(time.time())),
-				existing_id=int(recent_topic.id),
-			)
-		else:
-			# 不存在相同的最近记录，执行INSERT操作
-			return self.topic_repository.save_topic_snapshot(topic)
-
-	def append_topic_metrics_history_async_safe(self, topic: Topic, snapshot_time: Optional[int] = None) -> None:
+	def append_topic_metrics_history(self, topic: Topic, snapshot_time: Optional[int] = None) -> None:
 		if self.topic_repository is None:
 			return
 		self.topic_repository.append_topic_metrics_history(topic, snapshot_time=snapshot_time)
@@ -291,6 +262,30 @@ class TopicDomainService:
 		if self.topic_repository is None:
 			return []
 		return self.topic_repository.list_topics_missing_llm_title(limit=max(1, int(limit)))
+
+	def should_summarize_llm_title(self, topic: Topic) -> bool:
+		"""判断 Topic 是否需要进行 llm_title 总结。"""
+		if not isinstance(topic, Topic):
+			return False
+		
+		has_enough_news = topic.news_count >= 5
+		has_high_weight = topic.total_weight >= 150.0
+		must = has_enough_news or has_high_weight	
+
+		return must
+
+	def update_topic(self, topic: Topic) -> Optional[Topic]:
+		if self.topic_repository is None:
+			return None
+		if topic.created_at is None or topic.id is None:
+			raise ValueError("Topic must have created_at and id for update.")
+		updated = self.topic_repository.update_topic(
+			topic=topic,
+			existing_created_at=int(topic.created_at),
+			existing_id=int(topic.id),
+		)
+		self.append_topic_metrics_history(updated)
+		return updated
 
 	def update_topic_llm_title_only(
 		self,
@@ -315,8 +310,8 @@ class TopicDomainService:
 		if self.topic_repository is None:
 			return []
 
-		base_topic = self.topic_repository.get_topic_by_composite_key(topic_created_at, topic_id)
-		if base_topic is None:
+		latest_topic = self.topic_repository.get_topic_by_composite_key(topic_created_at, topic_id)
+		if latest_topic is None:
 			return []
 
 		history = self.topic_repository.list_topic_metrics_history_by_composite_key(
@@ -324,13 +319,10 @@ class TopicDomainService:
 			topic_id=topic_id,
 			limit=max(1, int(history_limit)),
 		)
-
-		latest_topic = self.topic_repository.get_latest_topic_snapshot(base_topic.topic)
-
 		combined: List[Topic] = []
 		seen_keys: set[tuple[str, int, str]] = set()
-
-		for item in [base_topic, latest_topic, *history]:
+		combined.append(latest_topic)
+		for item in [*history]:
 			if item is None:
 				continue
 			updated_at_key = str(int(item.updated_at or 0))
@@ -468,22 +460,16 @@ class TopicDomainService:
 		topic.updated_at = now
 		return self.aggregate_topic_metrics(topic)
 
+	def find_recent_topic_by_name(self, topic_name: str, days_lookback: int = 7) -> Optional[Topic]:
+		if self.topic_repository is None:
+			return None
+		return self.topic_repository.find_recent_topic_by_name(
+			topic_name=str(topic_name),
+			days_lookback=max(1, int(days_lookback)),
+		)
 class TopicRepository(ABC):
 	@abstractmethod
-	def save_topic_snapshot(self, topic: Topic) -> Topic:
-		pass
-
-	@abstractmethod
-	def get_latest_topic_snapshot(self, topic_name: str) -> Optional[Topic]:
-		pass
-
-	@abstractmethod
-	def list_topic_history(
-		self,
-		topic_name: str,
-		limit: int = 30,
-		end_time: Optional[int] = None,
-	) -> List[Topic]:
+	def add_topic(self, topic: Topic) -> Topic:
 		pass
 
 	@abstractmethod
@@ -513,13 +499,13 @@ class TopicRepository(ABC):
 		pass
 
 	@abstractmethod
-	def update_topic_snapshot(
+	def update_topic(
 		self,
 		topic: Topic,
 		existing_created_at: int,
 		existing_id: int,
 	) -> Topic:
-		"""更新现有Topic快照，保持主键不变，并将旧数据加入历史."""
+		"""不更新llm_title字段，保持原有值不变，由单独的接口 update_topic_llm_title_only 来更新。"""
 		pass
 
 	@abstractmethod
@@ -537,3 +523,4 @@ class TopicRepository(ABC):
 		"""仅更新 llm_title 字段，不修改其他字段（包括 updated_at/version）。"""
 		pass
     
+

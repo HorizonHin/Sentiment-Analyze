@@ -260,7 +260,7 @@ class SqlServerTopicRepository(TopicRepository):
             version=int(row.version or 0),
         )
 
-    def save_topic_snapshot(self, topic: Topic) -> Topic:
+    def add_topic(self, topic: Topic) -> Topic:
         now = int(time.time())
         created_at = topic.created_at or now
         updated_at = topic.updated_at or now
@@ -270,6 +270,7 @@ class SqlServerTopicRepository(TopicRepository):
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
+            # 插入Topic主表
             cursor.execute(
                 """
                 INSERT INTO Topic (
@@ -420,83 +421,6 @@ class SqlServerTopicRepository(TopicRepository):
         finally:
             conn.close()
 
-    def get_latest_topic_snapshot(self, topic_name: str) -> Optional[Topic]:
-        topic_name = str(topic_name or "").strip()
-        if not topic_name:
-            return None
-
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                """
-                SELECT TOP 1
-                    created_at, id, topic, llm_title, topic_type, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
-                    sentiment, news_count, total_weight, heat_change_percent,
-                    stage, updated_at, version
-                FROM Topic
-                WHERE topic = ?
-                ORDER BY updated_at DESC, created_at DESC, id DESC
-                """,
-                topic_name,
-            )
-            row = cursor.fetchone()
-            if row is None:
-                return None
-            return self._from_topic_row(row)
-        finally:
-            conn.close()
-
-    def list_topic_history(
-        self,
-        topic_name: str,
-        limit: int = 30,
-        end_time: Optional[int] = None,
-    ) -> List[Topic]:
-        topic_name = str(topic_name or "").strip()
-        if not topic_name:
-            return []
-
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        try:
-            capped_limit = max(1, int(limit))
-            if end_time is not None:
-                end_time_ts = self._to_ts(end_time)
-                cursor.execute(
-                    """
-                    SELECT TOP (?)
-                        created_at, id, topic, llm_title, topic_type, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
-                        sentiment, news_count, total_weight, heat_change_percent,
-                        stage, updated_at, version
-                    FROM Topic
-                    WHERE topic = ? AND updated_at < ?
-                    ORDER BY updated_at DESC, created_at DESC, id DESC
-                    """,
-                    capped_limit,
-                    topic_name,
-                    end_time_ts,
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT TOP (?)
-                        created_at, id, topic, llm_title, topic_type, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
-                        sentiment, news_count, total_weight, heat_change_percent,
-                        stage, updated_at, version
-                    FROM Topic
-                    WHERE topic = ?
-                    ORDER BY updated_at DESC, created_at DESC, id DESC
-                    """,
-                    capped_limit,
-                    topic_name,
-                )
-
-            rows = cursor.fetchall()
-            return [self._from_topic_row(row) for row in rows]
-        finally:
-            conn.close()
-
     def find_recent_topic_by_name(
         self,
         topic_name: str,
@@ -547,15 +471,15 @@ class SqlServerTopicRepository(TopicRepository):
         finally:
             conn.close()
 
-    def update_topic_snapshot(
+    def update_topic(
         self,
         topic: Topic,
         existing_created_at: int,
         existing_id: int,
     ) -> Topic:
         """
-        更新现有Topic快照，保持主键(created_at, id)不变。
-        同时增加历史记录条目（保存旧数据快照）。
+        更新现有Topic，保持主键(created_at, id)不变。
+        不更新llm_title字段，保持原有值不变，由单独的接口 update_topic_llm_title_only 来更新。
         
         Args:
             topic: 新的Topic数据
@@ -592,7 +516,6 @@ class SqlServerTopicRepository(TopicRepository):
                 """
                 UPDATE Topic
                 SET
-                    llm_title = ?,
                     topic_type = ?,
                     platform_distribution_json = ?,
                     rank_data_json = ?,
@@ -608,7 +531,6 @@ class SqlServerTopicRepository(TopicRepository):
                     version = version + 1
                 WHERE created_at = ? AND id = ?
                 """,
-                (None if topic.llm_title is None else str(topic.llm_title)),
                 (None if topic.topic_type is None else str(topic.topic_type)),
                 self._serialize_platform_distribution(topic),
                 self._serialize_rank_data(topic),
@@ -625,42 +547,6 @@ class SqlServerTopicRepository(TopicRepository):
                 int(existing_id),
             )
             conn.commit()
-
-            # 如果存在旧数据，将其保存到历史表
-            if old_row is not None:
-                cursor.execute(
-                    """
-                    INSERT INTO topic_metrics_history (
-                        created_at, id, topic, start_time, end_time, window_size,
-                        sentiment, news_count, total_weight, heat_change_percent,
-                        stage, updated_at, version
-                    )
-                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                    WHERE NOT EXISTS (
-                        SELECT 1
-                        FROM topic_metrics_history
-                        WHERE created_at = ? AND id = ? AND updated_at = ?
-                    )
-                    """,
-                    created_at_ts,
-                    int(existing_id),
-                    str(old_row.topic or ""),
-                    self._value_to_ts(old_row.start_time),
-                    self._value_to_ts(old_row.end_time),
-                    int(old_row.window_size or 0),
-                    str(old_row.sentiment or ""),
-                    int(old_row.news_count or 0),
-                    float(old_row.total_weight or 0.0),
-                    float(old_row.heat_change_percent or 0.0),
-                    str(old_row.stage or ""),
-                    self._value_to_ts(old_row.updated_at),
-                    int(old_row.version or 0),
-                    created_at_ts,
-                    int(existing_id),
-                    self._value_to_ts(old_row.updated_at),
-                )
-                conn.commit()
-
             # 返回更新后的Topic对象
             topic.id = int(existing_id)
             topic.created_at = int(existing_created_at)

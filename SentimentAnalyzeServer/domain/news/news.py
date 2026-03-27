@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
+import time
 from typing import Dict, List, Optional, Any, Set, Tuple
 
 FIRST_TIME_MIN = 0
@@ -12,11 +13,6 @@ def parse_timestamp(value: Any) -> Optional[int]:
     if isinstance(value, int):
         return int(value)
     raise TypeError(f"timestamp must be int, got {type(value).__name__}")
-
-
-def format_timestamp(value: Any) -> Optional[int]:
-    return parse_timestamp(value)
-
 
 def parse_analyzed_datetime(value: Any) -> Optional[datetime]:
     if value is None:
@@ -36,18 +32,12 @@ def parse_analyzed_datetime(value: Any) -> Optional[datetime]:
         return parsed
     raise TypeError(f"analyzed_time must be datetime or ISO datetime string, got {type(value).__name__}")
 
-
-def format_analyzed_datetime(value: Any) -> Optional[str]:
-    dt = parse_analyzed_datetime(value)
-    if dt is None:
-        return None
-    return dt.isoformat()
-
 @dataclass
 class Entity:
     id: int = field(default=-1)
     news_item_id: int = field(default=-1)
     news_first_time: Optional[int] = None
+    last_time: Optional[int] = None
     name: str = ""
     type: str = ""
     weigh: float = 0.0
@@ -58,6 +48,7 @@ class Keyword:
     id: int = field(default=-1)
     news_item_id: int = field(default=-1)
     news_first_time: Optional[int] = None
+    last_time: Optional[int] = None
     term: str = ""
     importance: float = 0.0
     weigh: float = 0.0
@@ -162,7 +153,8 @@ class NewsItem:
                 {
                     "id": entity.id,
                     "news_item_id": entity.news_item_id,
-                    "news_first_time": format_timestamp(entity.news_first_time),
+                    "news_first_time": parse_timestamp(entity.news_first_time),
+                    "last_time": parse_timestamp(entity.last_time),
                     "name": entity.name,
                     "type": entity.type,
                     "weigh": entity.weigh,
@@ -173,7 +165,8 @@ class NewsItem:
                 {
                     "id": keyword.id,
                     "news_item_id": keyword.news_item_id,
-                    "news_first_time": format_timestamp(keyword.news_first_time),
+                    "news_first_time": parse_timestamp(keyword.news_first_time),
+                    "last_time": parse_timestamp(keyword.last_time),
                     "term": keyword.term,
                     "importance": keyword.importance,
                     "weigh": keyword.weigh,
@@ -191,18 +184,18 @@ class NewsItem:
             "trust_score": self.trust_score,
             "controversy_score": self.controversy_score,
             "attention_score": self.attention_score,
-            "first_time": format_timestamp(self.first_time),
-            "last_time": format_timestamp(self.last_time),
-            "analyzed_time": format_analyzed_datetime(self.analyzed_time),
+            "first_time": parse_timestamp(self.first_time),
+            "last_time": parse_timestamp(self.last_time),
+            "analyzed_time": self.analyzed_time.isoformat() if self.analyzed_time is not None else None,
             "count": self.count,
             "total_weigh": self.total_weigh,
             "rank_timeline": [
                 {
                     "id": point.id,
                     "news_item_id": point.news_item_id,
-                    "news_first_time": format_timestamp(point.news_first_time),
-                    "time": format_timestamp(point.time),
-                    "timeline_time": format_timestamp(point.timeline_time),
+                    "news_first_time": parse_timestamp(point.news_first_time),
+                    "time": parse_timestamp(point.time),
+                    "timeline_time": parse_timestamp(point.timeline_time),
                     "rank": point.rank if point.rank > 0 else None,
                     "rank_value": point.rank_value if point.rank_value > 0 else None,
                 }
@@ -276,6 +269,7 @@ class NewsItem:
                     id=int(item.get("id", -1) or -1),
                     news_item_id=int(item.get("news_item_id", -1) or -1),
                     news_first_time=parse_timestamp(item.get("news_first_time")),
+                    last_time=parse_timestamp(item.get("last_time")),
                     name=item.get("name", ""),
                     weigh=float(item.get("weigh", data.get("total_weigh", 0.0)) or 0.0),
                 )
@@ -286,6 +280,7 @@ class NewsItem:
                     id=int(item.get("id", -1) or -1),
                     news_item_id=int(item.get("news_item_id", -1) or -1),
                     news_first_time=parse_timestamp(item.get("news_first_time")),
+                    last_time=parse_timestamp(item.get("last_time")),
                     term=item.get("term", ""),
                     importance=float(item.get("importance", 0.0)),
                     weigh=float(item.get("weigh", data.get("total_weigh", 0.0)) or 0.0),
@@ -336,8 +331,8 @@ class NewsData:
             items_dict[source_id] = [item.to_dict() for item in news_list]
 
         return {
-            "date": format_timestamp(self.date),
-            "last_time": format_timestamp(self.last_time),
+            "date": parse_timestamp(self.date),
+            "last_time": parse_timestamp(self.last_time),
             "items": items_dict,
             "id_to_name": self.id_to_name,
             "failed_ids": self.failed_ids,
@@ -541,25 +536,28 @@ class NewsItemRepository(ABC):
     @abstractmethod
     def get_keywords_by_last_time_range(
         self,
+        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[Keyword]:
-        """根据 first_time 范围查询关键词表。"""
+        """根据 last_time 范围查询关键词表，并按 news_first_time 过滤分区。"""
         pass
 
     @abstractmethod
     def get_entities_by_last_time_range(
         self,
+        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[Entity]:
-        """根据 first_time 范围查询实体表。"""
+        """根据 last_time 范围查询实体表，并按 news_first_time 过滤分区。"""
         pass
 
     @abstractmethod
     def get_news_list_by_keywords(
         self,
         keywords: List[Keyword],
+        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
@@ -570,6 +568,7 @@ class NewsItemRepository(ABC):
     def get_news_list_by_entities(
         self,
         entities: List[Entity],
+        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
@@ -635,92 +634,203 @@ class NewsDomainService:
         self,
         start_time: int,
         end_time: int,
+        news_first_time: Optional[int] = None,
         top_n: int = 50,
-    ) -> Tuple[List[Keyword], List[Entity]]:
+    ) -> Tuple[Dict[str, List[Keyword]], Dict[str, List[Entity]]]:
         """
         - 通过 keyword 和 entity 推荐热点 topic 候选
-        - 返回 (keyword_list, entity_list)
+        - start_time/end_time: keyword/entity 的 last_time 查询区间
+        - news_first_time: NewsItem 分区下界
+        - 返回 (term_to_keywords, name_to_entities)
+        - top_n 表示按 term/name 聚合后的最热门数量
         """
-        keywords = self.get_keywords_by_time_range(start_time, end_time)
-        entities = self.get_entities_by_time_range(start_time, end_time)
+        keywords = self.get_keywords_by_time_range(
+            start_time=start_time,
+            end_time=end_time,
+            news_first_time=news_first_time,
+        )
+        entities = self.get_entities_by_time_range(
+            start_time=start_time,
+            end_time=end_time,
+            news_first_time=news_first_time,
+        )
 
-        keyword_agg: Dict[str, Keyword] = {}
+        keyword_groups: Dict[str, List[Keyword]] = {}
+        keyword_weight_sum: Dict[str, float] = {}
         for keyword in keywords:
             key = keyword.term.strip()
             if not key:
                 continue
 
-            current_news_item_id = int(keyword.news_item_id) if keyword.news_item_id is not None else -1
-            current_news_first_time = int(keyword.news_first_time) if keyword.news_first_time is not None else None
+            if key not in keyword_groups:
+                keyword_groups[key] = []
+                keyword_weight_sum[key] = 0.0
 
-            if key not in keyword_agg:
-                keyword_agg[key] = Keyword(
-                    id=int(keyword.id) if int(keyword.id) > 0 else -1,
-                    news_item_id=current_news_item_id,
-                    news_first_time=current_news_first_time,
-                    term=key,
-                    importance=float(keyword.importance),
-                    weigh=0.0,
-                )
+            keyword_groups[key].append(keyword)
+            keyword_weight_sum[key] += float(keyword.weigh)
 
-            agg_keyword = keyword_agg[key]
-            agg_keyword.weigh += float(keyword.weigh)
-            if int(keyword.id) > 0 and int(agg_keyword.id) <= 0:
-                agg_keyword.id = int(keyword.id)
-            if int(agg_keyword.news_item_id or -1) <= 0 and current_news_item_id > 0:
-                agg_keyword.news_item_id = current_news_item_id
-            if agg_keyword.news_first_time is None and current_news_first_time is not None:
-                agg_keyword.news_first_time = current_news_first_time
-
-        entity_agg: Dict[str, Entity] = {}
+        entity_groups: Dict[str, List[Entity]] = {}
+        entity_weight_sum: Dict[str, float] = {}
         for entity in entities:
             key = entity.name.strip()
             if not key:
                 continue
 
-            current_news_item_id = int(entity.news_item_id) if entity.news_item_id is not None else -1
-            current_news_first_time = int(entity.news_first_time) if entity.news_first_time is not None else None
+            if key not in entity_groups:
+                entity_groups[key] = []
+                entity_weight_sum[key] = 0.0
 
-            if key not in entity_agg:
-                entity_agg[key] = Entity(
-                    id=int(entity.id) if int(entity.id) > 0 else -1,
-                    news_item_id=current_news_item_id,
-                    news_first_time=current_news_first_time,
-                    name=key,
-                    type=entity.type,
-                    weigh=0.0,
-                )
-
-            agg_entity = entity_agg[key]
-            agg_entity.weigh += float(entity.weigh)
-            if int(entity.id) > 0 and int(agg_entity.id) <= 0:
-                agg_entity.id = int(entity.id)
-            if int(agg_entity.news_item_id or -1) <= 0 and current_news_item_id > 0:
-                agg_entity.news_item_id = current_news_item_id
-            if agg_entity.news_first_time is None and current_news_first_time is not None:
-                agg_entity.news_first_time = current_news_first_time
+            entity_groups[key].append(entity)
+            entity_weight_sum[key] += float(entity.weigh)
 
         # 去重：name 与 term 相同，保留 weigh 总和更高的一侧
-        overlap_keys = set(keyword_agg.keys()) & set(entity_agg.keys())
+        overlap_keys = set(keyword_groups.keys()) & set(entity_groups.keys())
         for key in overlap_keys:
-            if float(keyword_agg[key].weigh) >= float(entity_agg[key].weigh):
-                del entity_agg[key]
+            if float(keyword_weight_sum[key]) >= float(entity_weight_sum[key]):
+                del entity_groups[key]
+                del entity_weight_sum[key]
             else:
-                del keyword_agg[key]
+                del keyword_groups[key]
+                del keyword_weight_sum[key]
 
-        sorted_keywords = [
-            v
-            for _, v in sorted(keyword_agg.items(), key=lambda x: float(x[1].weigh), reverse=True)
-            if int(v.id) > 0
+        sorted_keyword_terms = [
+            term
+            for term, _ in sorted(keyword_weight_sum.items(), key=lambda x: float(x[1]), reverse=True)
         ][: max(1, top_n)]
 
-        sorted_entities = [
-            v
-            for _, v in sorted(entity_agg.items(), key=lambda x: float(x[1].weigh), reverse=True)
-            if int(v.id) > 0
+        sorted_entity_names = [
+            name
+            for name, _ in sorted(entity_weight_sum.items(), key=lambda x: float(x[1]), reverse=True)
         ][: max(1, top_n)]
 
-        return sorted_keywords, sorted_entities
+        top_keyword_groups = {
+            term: keyword_groups[term]
+            for term in sorted_keyword_terms
+            if term in keyword_groups and keyword_groups[term]
+        }
+        top_entity_groups = {
+            name: entity_groups[name]
+            for name in sorted_entity_names
+            if name in entity_groups and entity_groups[name]
+        }
+
+        return top_keyword_groups, top_entity_groups
+
+    def recommend_hot_term_items_by_time_range(
+        self,
+        start_time: int,
+        end_time: int,
+        news_first_time: Optional[int] = None,
+        top_n: int = 50,
+    ) -> Tuple[List[Keyword], List[Entity]]:
+        """
+        - 功能类似 recommend_hot_terms_by_time_range
+        - 返回扁平化列表: (keyword_list, entity_list)
+        - top_n 表示按 term/name 聚合后的最热门数量
+        """
+        keyword_groups, entity_groups = self.recommend_hot_terms_by_time_range(
+            start_time=start_time,
+            end_time=end_time,
+            news_first_time=news_first_time,
+            top_n=top_n,
+        )
+
+        keyword_list = [
+            keyword
+            for keyword_group in keyword_groups.values()
+            for keyword in keyword_group
+        ]
+        entity_list = [
+            entity
+            for entity_group in entity_groups.values()
+            for entity in entity_group
+        ]
+
+        return keyword_list, entity_list
+
+    def get_news_list_by_keyword_terms(
+        self,
+        terms: List[str],
+        news_first_time: Optional[int] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> List[NewsItem]:
+        """
+        根据 term 列表匹配关键词记录，再查询对应 NewsItem。
+        """
+        normalized_terms = {
+            str(term or "").strip()
+            for term in terms
+            if str(term or "").strip()
+        }
+        if not normalized_terms:
+            return []
+
+        if start_time is None:
+            start_time = 0
+        if end_time is None:
+            end_time = int(time.time())
+
+        matched_keywords = [
+            keyword
+            for keyword in self.get_keywords_by_time_range(
+                start_time=int(start_time),
+                end_time=int(end_time),
+                news_first_time=news_first_time,
+            )
+            if str(keyword.term or "").strip() in normalized_terms
+        ]
+        if not matched_keywords:
+            return []
+
+        return self.get_news_list_by_keywords(
+            keywords=matched_keywords,
+            news_first_time=news_first_time,
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+    def get_news_list_by_entity_names(
+        self,
+        names: List[str],
+        news_first_time: Optional[int] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> List[NewsItem]:
+        """
+        根据实体名称列表匹配实体记录，再查询对应 NewsItem。
+        """
+        normalized_names = {
+            str(name or "").strip()
+            for name in names
+            if str(name or "").strip()
+        }
+        if not normalized_names:
+            return []
+
+        if start_time is None:
+            start_time = 0
+        if end_time is None:
+            end_time = int(time.time())
+
+        matched_entities = [
+            entity
+            for entity in self.get_entities_by_time_range(
+                start_time=int(start_time),
+                end_time=int(end_time),
+                news_first_time=news_first_time,
+            )
+            if str(entity.name or "").strip() in normalized_names
+        ]
+        if not matched_entities:
+            return []
+
+        return self.get_news_list_by_entities(
+            entities=matched_entities,
+            news_first_time=news_first_time,
+            start_time=start_time,
+            end_time=end_time,
+        )
 
     def applyNewsField(self, src: NewsItem, target: NewsItem) -> NewsItem:
         if src.title not in (None, ""):
@@ -734,9 +844,31 @@ class NewsDomainService:
         if src.summary not in (None, ""):
             target.summary = src.summary
         if src.entities:
-            target.entities = [Entity(id=entity.id, name=entity.name, type=entity.type, weigh=entity.weigh) for entity in src.entities]
+            target.entities = [
+                Entity(
+                    id=entity.id,
+                    news_item_id=entity.news_item_id,
+                    news_first_time=entity.news_first_time,
+                    last_time=entity.last_time,
+                    name=entity.name,
+                    type=entity.type,
+                    weigh=entity.weigh,
+                )
+                for entity in src.entities
+            ]
         if src.keywords:
-            target.keywords = [Keyword(id=keyword.id, term=keyword.term, importance=keyword.importance, weigh=keyword.weigh) for keyword in src.keywords]
+            target.keywords = [
+                Keyword(
+                    id=keyword.id,
+                    news_item_id=keyword.news_item_id,
+                    news_first_time=keyword.news_first_time,
+                    last_time=keyword.last_time,
+                    term=keyword.term,
+                    importance=keyword.importance,
+                    weigh=keyword.weigh,
+                )
+                for keyword in src.keywords
+            ]
         if src.latest_rank is not None:
             target.latest_rank = src.latest_rank
         if src.url not in (None, ""):
@@ -826,9 +958,11 @@ class NewsDomainService:
         self,
         start_time: int,
         end_time: int,
+        news_first_time: Optional[int] = None,
     ) -> List[Keyword]:
         """根据起止时间获取关键词列表（直接查询关键词表）。"""
         return self.storage.get_keywords_by_last_time_range(
+            news_first_time=news_first_time,
             start_time=start_time,
             end_time=end_time,
         )
@@ -837,9 +971,11 @@ class NewsDomainService:
         self,
         start_time: int,
         end_time: int,
+        news_first_time: Optional[int] = None,
     ) -> List[Entity]:
         """根据起止时间获取实体列表（直接查询实体表）。"""
         return self.storage.get_entities_by_last_time_range(
+            news_first_time=news_first_time,
             start_time=start_time,
             end_time=end_time,
         )
@@ -847,11 +983,13 @@ class NewsDomainService:
     def get_news_list_by_keywords(
         self,
         keywords: List[Keyword],
+        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
         return self.storage.get_news_list_by_keywords(
             keywords=keywords,
+            news_first_time=news_first_time,
             start_time=start_time,
             end_time=end_time,
         )
@@ -859,11 +997,13 @@ class NewsDomainService:
     def get_news_list_by_entities(
         self,
         entities: List[Entity],
+        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
         return self.storage.get_news_list_by_entities(
             entities=entities,
+            news_first_time=news_first_time,
             start_time=start_time,
             end_time=end_time,
         )
