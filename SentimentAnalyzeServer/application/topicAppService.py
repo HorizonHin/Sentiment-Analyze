@@ -2,17 +2,20 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from datetime import datetime
 import logging
-from typing import Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional
 
-from SentimentAnalyzeServer.application.common import CommonThreadPool
+from SentimentAnalyzeServer.system.infra import CommonThreadPool
 from SentimentAnalyzeServer.application.common import Result
 from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsDomainService, NewsItem
 from SentimentAnalyzeServer.domain.topic.topic import Topic, TopicDomainService
 
 
 logger = logging.getLogger(__name__)
+
+
+_TOPIC_LOOKBACK_MULTIPLIER = 12.2
 
 
 class TopicCacheManager(ABC):
@@ -24,6 +27,10 @@ class TopicCacheManager(ABC):
 
     @abstractmethod
     def get_topics(self) -> List[Topic]:
+        pass
+
+    @abstractmethod
+    def get_topic_by_composite_key(self, topic_created_at: int, topic_id: int) -> Optional[Topic]:
         pass
 
 class TopicCacheManager_Memory(TopicCacheManager):
@@ -45,25 +52,32 @@ class TopicCacheManager_Memory(TopicCacheManager):
         return float(getattr(topic, "total_weight", getattr(topic, "total_weigh", 0.0)) or 0.0)
 
     @staticmethod
-    def _topic_updated_at(topic: Topic) -> datetime:
-        updated_at = getattr(topic, "updated_at", None)
-        if isinstance(updated_at, datetime):
-            return updated_at
-        created_at = getattr(topic, "created_at", None)
-        if isinstance(created_at, datetime):
-            return created_at
-        return datetime.min
+    def _to_timestamp(value: Any) -> int:
+        if value is None:
+            return 0
+        if isinstance(value, int):
+            return int(value)
+        raise TypeError(f"timestamp must be int, got {type(value).__name__}")
 
     @classmethod
-    def _eviction_score(cls, topic: Topic, now: datetime) -> float:
+    def _topic_updated_at(cls, topic: Topic) -> int:
+        updated_at = getattr(topic, "updated_at", None)
+        if updated_at is not None:
+            return cls._to_timestamp(updated_at)
+        created_at = getattr(topic, "created_at", None)
+        return cls._to_timestamp(created_at)
+
+    @classmethod
+    def _eviction_score(cls, topic: Topic, now_ts: int) -> float:
         updated_at = cls._topic_updated_at(topic)
-        age_hours = max(0.0, (now - updated_at).total_seconds() / 3600.0) if updated_at != datetime.min else 10**9
+        age_seconds = max(0, now_ts - int(updated_at or 0)) if updated_at else 10**9
+        age_hours = age_seconds / 3600.0
         freshness = 1.0 / (1.0 + age_hours)
         return cls._topic_weight(topic) * freshness
 
     def save_topics(self, topics: List[Topic], limit: int = 30) -> None:
         capped_limit = max(1, limit)
-        now = datetime.now()
+        now_ts = int(time.time())
 
         merged: Dict[str, Topic] = {}
         for topic in self._topics + list(topics):
@@ -84,7 +98,7 @@ class TopicCacheManager_Memory(TopicCacheManager):
         sorted_topics = sorted(
             merged.values(),
             key=lambda t: (
-                self._eviction_score(t, now),
+                self._eviction_score(t, now_ts),
                 self._topic_updated_at(t),
                 self._topic_weight(t),
             ),
@@ -95,22 +109,49 @@ class TopicCacheManager_Memory(TopicCacheManager):
     def get_topics(self) -> List[Topic]:
         return list(self._topics)
 
+    def get_topic_by_composite_key(self, topic_created_at: int, topic_id: int) -> Optional[Topic]:
+        created_at = int(topic_created_at)
+        target_id = int(topic_id)
+        for topic in self._topics:
+            if int(getattr(topic, "created_at", 0) or 0) == created_at and int(getattr(topic, "id", -1) or -1) == target_id:
+                return topic
+        return None
+
 
 class TopicAppService:
     def __init__(
         self,
         topic_domain_service: TopicDomainService,
         news_domain_service: NewsDomainService,
+        crawl_interval_seconds: int,
+        topic_config: Optional[Dict[str, Any]] = None,
         topic_cache_manager: Optional[TopicCacheManager] = None,
     ) -> None:
         self.topic_domain_service = topic_domain_service
         self.news_domain_service = news_domain_service
+        self.crawl_interval_seconds = max(60, int(crawl_interval_seconds))
+        self.topic_config = topic_config or {}
+        self.topic_lookback = self._resolve_topic_lookback_window()
         self.topic_cache_manager = topic_cache_manager or TopicCacheManager_Memory()
         self.common_thread_pool = CommonThreadPool()
 
+    def _resolve_topic_lookback_window(self) -> int:
+        raw_hours = (self.topic_config or {}).get("lookback_hours")
+        if raw_hours is not None:
+            try:
+                hours = float(raw_hours)
+                if hours > 0:
+                    return int(hours * 3600)
+            except (TypeError, ValueError):
+                pass
+
+        fallback_seconds = self.crawl_interval_seconds * _TOPIC_LOOKBACK_MULTIPLIER
+        return int(fallback_seconds)
+
     @staticmethod
     def _is_persisted_topic(topic: Topic) -> bool:
-        return isinstance(topic.created_at, datetime) and int(getattr(topic, "id", -1) or -1) > 0
+        created_at = getattr(topic, "created_at", None)
+        return created_at is not None and int(created_at) > 0 and int(getattr(topic, "id", -1) or -1) > 0
 
     def _append_topic_history_async(self, topic: Topic) -> None:
         future = self.common_thread_pool.submit(
@@ -132,34 +173,57 @@ class TopicAppService:
 
         future.add_done_callback(_on_done)
 
-    def build_topics_by_keyword_entity_ids(
+    def _flush_cache_topics_to_db(self, topics: List[Topic]) -> List[Topic]:
+        synced: List[Topic] = []
+        for topic in topics:
+            if self._is_persisted_topic(topic):
+                synced.append(topic)
+                continue
+            persisted = self.topic_domain_service.save_or_update_topic_snapshot(topic, days_lookback=7)
+            if self._is_persisted_topic(persisted):
+                synced.append(persisted)
+                self._append_topic_history_async(persisted)
+            else:
+                logger.warning(
+                    "flush cache topic failed. created_at=%s, id=%s, topic=%s",
+                    persisted.created_at,
+                    persisted.id,
+                    persisted.topic,
+                )
+        return synced
+
+    def build_topics_by_keywords_entities(
         self,
-        keyword_ids: List[int],
-        entity_ids: List[int],
-        start_time: datetime,
-        end_time: datetime,
-        keyword_terms: Optional[List[str]] = None,
-        entity_names: Optional[List[str]] = None,
+        keywords: List[Keyword],
+        entities: List[Entity],
+        start_time: int,
+        end_time: int,
     ) -> List[Topic]:
         """
         - 输入 keyword id list、entity id list
         - 从 news domain 按 keyword/entity id 找到相关 news items
         - 调用 build_topic_from_news_items 返回 topic list
         """
-        keyword_id_set = {int(i) for i in keyword_ids if int(i) > 0}
-        entity_id_set = {int(i) for i in entity_ids if int(i) > 0}
-        keyword_term_set = {str(term).strip() for term in (keyword_terms or []) if str(term).strip()}
-        entity_name_set = {str(name).strip() for name in (entity_names or []) if str(name).strip()}
+        keyword_term_set = {
+            str(keyword.term).strip()
+            for keyword in (keywords or [])
+            if isinstance(keyword, Keyword) and str(keyword.term).strip()
+        }
+        entity_name_set = {
+            str(entity.name).strip()
+            for entity in (entities or [])
+            if isinstance(entity, Entity) and str(entity.name).strip()
+        }
 
-        if not keyword_id_set and not entity_id_set and not keyword_term_set and not entity_name_set:
+        if not keyword_term_set and not entity_name_set:
             return []
 
         topic_news_map: Dict[str, List[NewsItem]] = defaultdict(list)
         topic_item_ids_map: Dict[str, set[int]] = defaultdict(set)
 
-        if keyword_id_set:
-            keyword_news_items = self.news_domain_service.get_news_list_by_keyword_ids(
-                keyword_ids=list(keyword_id_set),
+        if keywords:
+            keyword_news_items = self.news_domain_service.get_news_list_by_keywords(
+                keywords=keywords,
                 start_time=start_time,
                 end_time=end_time,
             )
@@ -168,19 +232,16 @@ class TopicAppService:
                     topic_name = keyword.term.strip()
                     if not topic_name:
                         continue
-                    if keyword_term_set:
-                        if topic_name not in keyword_term_set:
-                            continue
-                    elif int(keyword.id) not in keyword_id_set:
+                    if topic_name not in keyword_term_set:
                         continue
                     if int(item.id) in topic_item_ids_map[topic_name]:
                         continue
                     topic_item_ids_map[topic_name].add(int(item.id))
                     topic_news_map[topic_name].append(item)
 
-        if entity_id_set:
-            entity_news_items = self.news_domain_service.get_news_list_by_entity_ids(
-                entity_ids=list(entity_id_set),
+        if entities:
+            entity_news_items = self.news_domain_service.get_news_list_by_entities(
+                entities=entities,
                 start_time=start_time,
                 end_time=end_time,
             )
@@ -189,10 +250,7 @@ class TopicAppService:
                     topic_name = entity.name.strip()
                     if not topic_name:
                         continue
-                    if entity_name_set:
-                        if topic_name not in entity_name_set:
-                            continue
-                    elif int(entity.id) not in entity_id_set:
+                    if topic_name not in entity_name_set:
                         continue
                     if int(item.id) in topic_item_ids_map[topic_name]:
                         continue
@@ -212,40 +270,43 @@ class TopicAppService:
 
     def recommend_and_cache_topics(
         self,
-        start_time: datetime,
-        end_time: datetime,
-        top_n: int = 10,
-        cache_limit: int = 15,
+        start_time: Optional[int],
+        end_time: Optional[int],
+        top_n: int = 30,
+        cache_limit: int = 35,
     ) -> List[Topic]:
         """
         - 调用方法二构建 topic 列表
         - 通过 TopicCacheManager 保存
         """
+        if start_time is not None and not isinstance(start_time, int):
+            raise TypeError(f"start_time must be int timestamp, got {type(start_time).__name__}")
+        if end_time is not None and not isinstance(end_time, int):
+            raise TypeError(f"end_time must be int timestamp, got {type(end_time).__name__}")
+
+        resolved_end_time = int(end_time) if end_time is not None else int(time.time())
+        resolved_start_time = int(start_time) if start_time is not None else (resolved_end_time - self.topic_lookback)
+        if resolved_start_time > resolved_end_time:
+            resolved_start_time = resolved_end_time - self.topic_lookback
+
         recommended_keywords, recommended_entities = self.news_domain_service.recommend_hot_terms_by_time_range(
-            start_time=start_time,
-            end_time=end_time,
+            start_time=resolved_start_time,
+            end_time=resolved_end_time,
             top_n=top_n,
         )
 
-        keyword_ids = [int(keyword.id) for keyword in recommended_keywords if int(keyword.id) > 0]
-        entity_ids = [int(entity.id) for entity in recommended_entities if int(entity.id) > 0]
-        keyword_terms = [keyword.term.strip() for keyword in recommended_keywords if keyword.term and keyword.term.strip()]
-        entity_names = [entity.name.strip() for entity in recommended_entities if entity.name and entity.name.strip()]
-
-        topics = self.build_topics_by_keyword_entity_ids(
-            keyword_ids=keyword_ids,
-            entity_ids=entity_ids,
-            keyword_terms=keyword_terms,
-            entity_names=entity_names,
-            start_time=start_time,
-            end_time=end_time,
+        topics = self.build_topics_by_keywords_entities(
+            keywords=recommended_keywords,
+            entities=recommended_entities,
+            start_time=resolved_start_time,
+            end_time=resolved_end_time,
         )
 
         enriched_topics: List[Topic] = []
         for topic in topics:
-            topic.updated_at = datetime.now()
+            topic.updated_at = int(time.time())
             enriched_topic = self.topic_domain_service.enrich_topic_with_history(topic)
-            persisted_topic = self.topic_domain_service.save_topic_snapshot(enriched_topic)
+            persisted_topic = self.topic_domain_service.save_or_update_topic_snapshot(enriched_topic, days_lookback=7)
             if self._is_persisted_topic(persisted_topic):
                 enriched_topics.append(persisted_topic)
                 self._append_topic_history_async(persisted_topic)
@@ -272,15 +333,32 @@ class TopicAppService:
 
     def get_topic_snapshot_detail(
         self,
-        topic_created_at: datetime,
+        topic_created_at: int,
         topic_id: int,
         history_limit: int = 100,
     ) -> Result:
+        cached_topic = self.topic_cache_manager.get_topic_by_composite_key(
+            topic_created_at=topic_created_at,
+            topic_id=topic_id,
+        )
+
         timeline = self.topic_domain_service.get_topic_timeline_and_latest(
             topic_created_at=topic_created_at,
             topic_id=int(topic_id),
             history_limit=max(1, int(history_limit)),
         )
+
+        if cached_topic is not None:
+            cache_key = (int(cached_topic.created_at or 0), int(cached_topic.id or -1))
+            replaced = False
+            for idx, item in enumerate(timeline):
+                item_key = (int(item.created_at or 0), int(item.id or -1))
+                if item_key == cache_key:
+                    timeline[idx] = cached_topic
+                    replaced = True
+                    break
+            if not replaced:
+                timeline.insert(0, cached_topic)
 
         if not timeline:
             return Result.failure_result("未找到对应的Topic快照")
@@ -294,11 +372,14 @@ class TopicAppService:
     def get_trending_topics(self) -> Result:
         cache_topics = self.topic_cache_manager.get_topics()
         if cache_topics:
+            synced_topics = self._flush_cache_topics_to_db(cache_topics)
+            if synced_topics:
+                self.topic_cache_manager.save_topics(synced_topics, limit=max(1, len(cache_topics)))
+                return Result.success_result(synced_topics)
             return Result.success_result(cache_topics)
         else:
-            now = datetime.now()
-            start_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            end_time = now
+            end_time = int(time.time())
+            start_time = end_time - (end_time % 86400)
             self.recommend_and_cache_topics(
                 start_time=start_time,
                 end_time=end_time,

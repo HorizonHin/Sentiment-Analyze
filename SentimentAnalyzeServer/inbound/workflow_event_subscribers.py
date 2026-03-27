@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+import time
 from typing import Any, Dict, List
 
-from SentimentAnalyzeServer.application.common import (
+from SentimentAnalyzeServer.system.infra import (
     EVENT_CRAWL_SAVED,
     EVENT_SENTIMENT_ANALYZED,
     EventManager,
@@ -53,8 +53,8 @@ class WorkflowEventSubscribers:
     def _on_sentiment_analyzed(self, payload: Dict[str, Any]) -> None:
         # 在情感分析完成后，尝试推荐和缓存一个动态窗口内的热点话题
         lookback_seconds = self.crawl_interval_seconds * _TOPIC_LOOKBACK_MULTIPLIER
-        start_time = datetime.now() - timedelta(seconds=lookback_seconds)
-        end_time = datetime.now()
+        end_time = int(time.time())
+        start_time = end_time - int(lookback_seconds)
 
         try:
             self.topic_app_service.recommend_and_cache_topics(

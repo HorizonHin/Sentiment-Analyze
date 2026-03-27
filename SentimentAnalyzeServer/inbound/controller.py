@@ -1,20 +1,22 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-from typing import Optional
+import math
+from decimal import Decimal
+import time
+from typing import Any, Optional
+
+import logging
 
 from flask import Blueprint, jsonify, request
 
-from SentimentAnalyzeServer.application.common import Result, parse_datetime_value
+from SentimentAnalyzeServer.application.common import Result
 from SentimentAnalyzeServer.application.sentimentAnalyzeAppsService import SentimentAnalyzeAppService
 from SentimentAnalyzeServer.application.topicAppService import TopicAppService
+from SentimentAnalyzeServer.system.datetime_utils import parse_int_timestamp
 
 
 _LATEST_RANKED_LOOKBACK_MULTIPLIER = 2.2
-
-
-def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
-	return parse_datetime_value(value)
+logger = logging.getLogger(__name__)
 
 
 def create_external_controller(
@@ -28,10 +30,10 @@ def create_external_controller(
 	def get_latest_ranked_news() -> object:
 		try:
 			lookback_seconds = max(60, int(crawl_interval_seconds)) * _LATEST_RANKED_LOOKBACK_MULTIPLIER
-			default_start_time = datetime.now() - timedelta(seconds=lookback_seconds)
-			default_end_time = datetime.now()
-			start_time = _parse_datetime(request.args.get("start_time")) or default_start_time
-			end_time = _parse_datetime(request.args.get("end_time")) or default_end_time
+			default_end_time = int(time.time())
+			default_start_time = default_end_time - int(lookback_seconds)
+			start_time = parse_int_timestamp(request.args.get("start_time")) or default_start_time
+			end_time = parse_int_timestamp(request.args.get("end_time")) or default_end_time
 
 			grouped = sentiment_app_service.get_analyzed_news_grouped_by_latest_time(
 				start_time=start_time,
@@ -42,7 +44,11 @@ def create_external_controller(
 				for source_id, items in grouped.items()
 			}
 			return jsonify(Result.success_result(data).to_dict())
+		
+		except ValueError as exc:
+			return jsonify(Result.failure_result(str(exc)).to_dict()), 400
 		except Exception as exc:
+			logger.exception("Failed to build response for /news/latest-ranked")
 			return jsonify(Result.failure_result(str(exc)).to_dict()), 500
 
 	@bp.get("/topics/trending")
@@ -52,9 +58,10 @@ def create_external_controller(
 			if result.success:
 				return jsonify(result.to_dict())
 			else:
-				return jsonify(result.to_dict()), 404
+				return jsonify(result.to_dict())
 		except Exception as exc:
-			return jsonify(Result.failure_result(str(exc)).to_dict()), 500
+			print(exc)
+			return jsonify(Result.failure_result(str(exc)).to_dict())
 
 	@bp.get("/topics/snapshot-detail")
 	def get_topic_snapshot_detail() -> object:
@@ -63,14 +70,14 @@ def create_external_controller(
 			topic_id_raw = request.args.get("id")
 			history_limit_raw = request.args.get("history_limit", "100")
 
-			topic_created_at = _parse_datetime(created_at_raw)
+			topic_created_at = parse_int_timestamp(created_at_raw)
 			if topic_created_at is None:
-				return jsonify(Result.failure_result("参数 created_at 无效，支持秒级 timestamp 或日期时间字符串").to_dict()), 400
+				return jsonify(Result.failure_result("参数 created_at 无效，必须是秒级 int timestamp").to_dict())
 
 			try:
 				topic_id = int(topic_id_raw)
 			except (TypeError, ValueError):
-				return jsonify(Result.failure_result("参数 id 无效，必须是整数").to_dict()), 400
+				return jsonify(Result.failure_result("参数 id 无效，必须是整数").to_dict())
 
 			try:
 				history_limit = max(1, int(history_limit_raw))
@@ -89,7 +96,9 @@ def create_external_controller(
 			if result.success:
 				return jsonify(result.to_dict())
 			return jsonify(result.to_dict())
+		except ValueError as exc:
+			return jsonify(Result.failure_result(str(exc)).to_dict())
 		except Exception as exc:
-			return jsonify(Result.failure_result(str(exc)).to_dict()), 500
+			return jsonify(Result.failure_result(str(exc)).to_dict())
 
 	return bp

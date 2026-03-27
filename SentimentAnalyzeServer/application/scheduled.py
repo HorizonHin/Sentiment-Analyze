@@ -3,21 +3,27 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import logging
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from SentimentAnalyzeServer.application.common import CommonThreadPool
+from SentimentAnalyzeServer.system.infra import CommonThreadPool
 from SentimentAnalyzeServer.application.dataFetcherAppService import DataFetcherAppService
 from SentimentAnalyzeServer.application.sentimentAnalyzeAppsService import SentimentAnalyzeAppService
 from SentimentAnalyzeServer.application.topicAppService import TopicAppService
+from SentimentAnalyzeServer.system.datetime_utils import (
+    datetime_to_int_timestamp,
+    format_datetime_value,
+    int_timestamp_to_datetime,
+    parse_datetime_value,
+)
 
 
 _DEFAULT_INTERVAL_SECONDS = 30 * 60
 _TOPIC_LOOKBACK_MULTIPLIER = 12.4
-
+logger = logging.getLogger(__name__)
 
 class Scheduled:
     def __init__(
@@ -84,31 +90,35 @@ class Scheduled:
         return result
 
     def run_analyze_pending_once(self) -> dict[str, Any]:
+        logger.info("[scheduler] 开始执行补分析任务")
         if self.sentiment_app_service is None:
+            logger.error("[scheduler] sentiment_app_service 未配置")
             return {"success": False, "reason": "sentiment_service_not_configured"}
 
-        end_time = datetime.now() - timedelta(seconds=self.interval_seconds)
+        end_time = int(time.time()) - int(self.interval_seconds)
         return self.sentiment_app_service.analyze_pending_items_by_latest_time(
             start_time=None,
             end_time=end_time,
         )
 
     def run_refresh_topics_once(self) -> dict[str, Any]:
+        logger.info("[scheduler] 开始执行刷新话题任务")
         if self.topic_app_service is None:
+            logger.error("[scheduler] topic_app_service 未配置")
             return {"success": False, "reason": "topic_service_not_configured"}
 
         lookback_seconds = self.interval_seconds * _TOPIC_LOOKBACK_MULTIPLIER
-        now = datetime.now() - timedelta(seconds=lookback_seconds)
-        start_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_time = int(time.time())
+        start_time = end_time - int(lookback_seconds)
         topics = self.topic_app_service.recommend_and_cache_topics(
             start_time=start_time,
-            end_time=now,
+            end_time=end_time,
             top_n=10,
             cache_limit=15,
         )
         return {"success": True, "topic_count": len(topics)}
 
-    def _read_last_completed_time(self) -> datetime | None:
+    def _read_last_completed_time(self) -> int | None:
         if not self.last_run_file.exists():
             return None
 
@@ -120,24 +130,37 @@ class Scheduled:
         if not raw:
             return None
 
-        try:
-            return datetime.fromisoformat(raw)
-        except ValueError:
+        if raw.isdigit() or (raw.startswith("-") and raw[1:].isdigit()):
+            try:
+                return int(raw)
+            except ValueError:
+                return None
+
+        dt_value = parse_datetime_value(raw)
+        if dt_value is None:
             return None
 
-    def _write_last_completed_time(self, completed_at: datetime) -> None:
-        # Keep a single value in the file: the latest completed time.
-        self.last_run_file.write_text(completed_at.isoformat(timespec="seconds"), encoding="utf-8")
+        try:
+            return datetime_to_int_timestamp(dt_value)
+        except (TypeError, ValueError):
+            return None
+
+    def _write_last_completed_time(self, completed_at: int) -> None:
+        if not isinstance(completed_at, int):
+            raise TypeError(f"completed_at must be int timestamp, got {type(completed_at).__name__}")
+        completed_dt = int_timestamp_to_datetime(completed_at)
+        text = format_datetime_value(completed_dt, "%Y-%m-%d %H:%M:%S")
+        self.last_run_file.write_text(text, encoding="utf-8")
 
     def _wait_until_next_run(self) -> bool:
         """Return True when caller should stop loop, False when cycle can proceed."""
-        now = datetime.now()
+        now_ts = int(time.time())
         last_completed = self._read_last_completed_time()
 
         if last_completed is None:
             return False
 
-        elapsed = (now - last_completed).total_seconds()
+        elapsed = float(now_ts - int(last_completed))
         if elapsed >= self.interval_seconds:
             return False
 
@@ -173,7 +196,7 @@ class Scheduled:
                 print(f"[dataFetcher] 任务执行失败: {exc}")
 
             try:
-                self._write_last_completed_time(datetime.now())
+                self._write_last_completed_time(int(time.time()))
             except OSError as exc:
                 print(f"[scheduler] 写入上次完成时间失败: {exc}")
 

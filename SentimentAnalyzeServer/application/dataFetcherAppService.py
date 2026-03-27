@@ -1,12 +1,11 @@
-
-from datetime import datetime
 import logging
 from pathlib import Path
+import time
 from typing import Any, Dict, List
 
 import yaml
 
-from SentimentAnalyzeServer.application.common import (
+from SentimentAnalyzeServer.system.infra import (
     EVENT_CRAWL_SAVED,
     REDIS_KEY_LATEST_UPDATED_ANALYZED_NEWS,
     CommonThreadPool,
@@ -65,9 +64,8 @@ class DataFetcherAppService:
             return {"success": False, "reason": "no_platforms"}, []
 
         results, id_to_name, failed_ids = self.fetcher.crawl_websites(ids)
-        now = datetime.now()
-        crawl_date = datetime(now.year, now.month, now.day)
-        last_time = now
+        last_time = int(time.time())
+        crawl_date = last_time - (last_time % 86400)
         try:
             saved_items = self.convert_crawl_results_and_save(
                 results=results,
@@ -108,8 +106,8 @@ class DataFetcherAppService:
         results: Dict[str, Dict],
         id_to_name: Dict[str, str],
         failed_ids: List[str],
-        last_time: datetime,
-        crawl_date: datetime,
+        last_time: int,
+        crawl_date: int,
     ) -> NewsData:
         items: Dict[str, List[NewsItem]] = {}
 
@@ -162,8 +160,8 @@ class DataFetcherAppService:
         results: Dict[str, Dict],
         id_to_name: Dict[str, str],
         failed_ids: List[str],
-        last_time: datetime,
-        crawl_date: datetime,
+        last_time: int,
+        crawl_date: int,
     ) -> List[NewsItem]:
         current_data = self.convert_crawl_results_to_news_data(
             results=results,
@@ -182,7 +180,10 @@ class DataFetcherAppService:
             return self.news_domain_service.add_news_items(incoming_items)
 
         key_list = list({(item.source_id, item.title) for item in incoming_items if item.source_id and item.title})
-        existing_items = self.news_domain_service.get_news_list_by_source_title_list(key_list)
+        existing_items = self.news_domain_service.get_news_list_by_source_title_list(
+            key_list,
+            0,
+        )
         existing_item_map = {(item.source_id, item.title): item for item in existing_items}
 
         new_items_by_source: Dict[str, List[NewsItem]] = {}

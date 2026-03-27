@@ -44,6 +44,7 @@ llm:
   api_key: ""                      # 必填：请填写通义千问 API Key #不填则默认使用环境变量中的 API Key
 
 topic:
+  lookback_hours: 6                 # 热点回看窗口（小时）。不配置时默认按 12.2 个抓取周期
   heat_stage:
     decline_threshold_percent: -15.0
     climax_peak_ratio: 0.9

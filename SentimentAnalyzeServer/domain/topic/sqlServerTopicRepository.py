@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+import json
+import time
 from typing import List, Optional
 
 try:
@@ -8,8 +9,8 @@ try:
 except ImportError:
     raise ImportError("pyodbc is required for MSSQL backend. Install with: pip install pyodbc")
 
-from SentimentAnalyzeServer.domain.topic.topic import Topic, TopicRepository
-from SentimentAnalyzeServer.system.datetime_utils import datetime_to_timestamp, parse_datetime_value
+from SentimentAnalyzeServer.domain.news.news import NewsItem
+from SentimentAnalyzeServer.domain.topic.topic import Topic, TopicPlatformStats, TopicRepository
 
 
 class SqlServerTopicRepository(TopicRepository):
@@ -50,21 +51,26 @@ class SqlServerTopicRepository(TopicRepository):
         return pyodbc.connect(self.connection_string, timeout=10)
 
     @staticmethod
-    def _dt_to_ts(value: Optional[datetime]) -> int:
-        ts = datetime_to_timestamp(value)
-        if ts is not None:
-            return int(ts)
-        now_ts = datetime_to_timestamp(datetime.utcnow())
-        return int(now_ts or 0)
+    def _to_ts(value: Optional[object]) -> int:
+        if value is None:
+            return int(time.time())
+        if isinstance(value, int):
+            return int(value)
+        raise TypeError(f"timestamp must be int, got {type(value).__name__}")
 
     @staticmethod
-    def _to_optional_ts(value: Optional[datetime]) -> Optional[int]:
-        ts = datetime_to_timestamp(value)
-        return int(ts) if ts is not None else None
+    def _to_optional_ts(value: Optional[object]) -> Optional[int]:
+        if value is None:
+            return None
+        return SqlServerTopicRepository._to_ts(value)
 
     @staticmethod
-    def _value_to_dt(value) -> Optional[datetime]:
-        return parse_datetime_value(value)
+    def _value_to_ts(value) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return int(value)
+        raise TypeError(f"timestamp must be int, got {type(value).__name__}")
 
     def _ensure_schema(self) -> None:
         conn = self._get_connection()
@@ -77,6 +83,8 @@ class SqlServerTopicRepository(TopicRepository):
                     created_at BIGINT NOT NULL DEFAULT DATEDIFF_BIG(SECOND, '1970-01-01', SYSUTCDATETIME()),
                     id BIGINT IDENTITY(1,1) NOT NULL,
                     topic NVARCHAR(300) NOT NULL,
+                    platform_distribution_json NVARCHAR(MAX) NOT NULL DEFAULT '[]',
+                    rank_data_json NVARCHAR(MAX) NOT NULL DEFAULT '{}',
                     start_time BIGINT NULL,
                     end_time BIGINT NULL,
                     window_size INT NOT NULL DEFAULT 0,
@@ -89,6 +97,19 @@ class SqlServerTopicRepository(TopicRepository):
                     version INT NOT NULL DEFAULT 0,
                     CONSTRAINT PK_Topic PRIMARY KEY (created_at, id)
                 )
+                """
+            )
+
+            cursor.execute(
+                """
+                IF COL_LENGTH('Topic', 'platform_distribution_json') IS NULL
+                    ALTER TABLE Topic ADD platform_distribution_json NVARCHAR(MAX) NOT NULL DEFAULT '[]'
+                """
+            )
+            cursor.execute(
+                """
+                IF COL_LENGTH('Topic', 'rank_data_json') IS NULL
+                    ALTER TABLE Topic ADD rank_data_json NVARCHAR(MAX) NOT NULL DEFAULT '{}'
                 """
             )
 
@@ -155,29 +176,80 @@ class SqlServerTopicRepository(TopicRepository):
             conn.close()
 
     @staticmethod
+    def _safe_json_load(text: Optional[str], default):
+        if not text:
+            return default
+        try:
+            return json.loads(text)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _serialize_platform_distribution(topic: Topic) -> str:
+        payload = [item.to_dict() for item in (topic.platform_distribution or [])]
+        return json.dumps(payload, ensure_ascii=False)
+
+    @staticmethod
+    def _serialize_rank_data(topic: Topic) -> str:
+        payload = {
+            key: [item.to_dict() for item in items]
+            for key, items in (topic.rank_data or {}).items()
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    @staticmethod
+    def _row_get(row: pyodbc.Row, name: str, default=None):
+        try:
+            return getattr(row, name)
+        except AttributeError:
+            return default
+
+    @staticmethod
     def _from_topic_row(row: pyodbc.Row) -> Topic:
+        raw_platform_distribution = SqlServerTopicRepository._safe_json_load(
+            SqlServerTopicRepository._row_get(row, "platform_distribution_json", "[]"),
+            [],
+        )
+        platform_distribution = [
+            TopicPlatformStats.from_dict(item)
+            for item in raw_platform_distribution
+            if isinstance(item, dict)
+        ]
+
+        raw_rank_data = SqlServerTopicRepository._safe_json_load(
+            SqlServerTopicRepository._row_get(row, "rank_data_json", "{}"),
+            {},
+        )
+        rank_data = {
+            str(key): [NewsItem.from_dict(item) for item in items if isinstance(item, dict)]
+            for key, items in raw_rank_data.items()
+            if isinstance(items, list)
+        }
+
         return Topic(
-            created_at=SqlServerTopicRepository._value_to_dt(row.created_at),
+            created_at=SqlServerTopicRepository._value_to_ts(row.created_at),
             id=int(row.id),
             topic=str(row.topic or ""),
-            start_time=SqlServerTopicRepository._value_to_dt(row.start_time),
-            end_time=SqlServerTopicRepository._value_to_dt(row.end_time),
+            platform_distribution=platform_distribution,
+            rank_data=rank_data,
+            start_time=SqlServerTopicRepository._value_to_ts(row.start_time),
+            end_time=SqlServerTopicRepository._value_to_ts(row.end_time),
             window_size=int(row.window_size or 0),
             sentiment=str(row.sentiment or ""),
             news_count=int(row.news_count or 0),
             total_weight=float(row.total_weight or 0.0),
             heat_change_percent=float(row.heat_change_percent or 0.0),
             stage=str(row.stage or ""),
-            updated_at=SqlServerTopicRepository._value_to_dt(row.updated_at),
+            updated_at=SqlServerTopicRepository._value_to_ts(row.updated_at),
             version=int(row.version or 0),
         )
 
     def save_topic_snapshot(self, topic: Topic) -> Topic:
-        now = datetime.utcnow()
+        now = int(time.time())
         created_at = topic.created_at or now
         updated_at = topic.updated_at or now
-        created_at_ts = self._dt_to_ts(created_at)
-        updated_at_ts = self._dt_to_ts(updated_at)
+        created_at_ts = self._to_ts(created_at)
+        updated_at_ts = self._to_ts(updated_at)
 
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -185,15 +257,17 @@ class SqlServerTopicRepository(TopicRepository):
             cursor.execute(
                 """
                 INSERT INTO Topic (
-                    created_at, topic, start_time, end_time, window_size,
+                    created_at, topic, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
                     sentiment, news_count, total_weight, heat_change_percent, stage,
                     updated_at, version
                 )
                 OUTPUT INSERTED.id
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 created_at_ts,
                 topic.topic,
+                self._serialize_platform_distribution(topic),
+                self._serialize_rank_data(topic),
                 self._to_optional_ts(topic.start_time),
                 self._to_optional_ts(topic.end_time),
                 int(topic.window_size or 0),
@@ -216,13 +290,13 @@ class SqlServerTopicRepository(TopicRepository):
         finally:
             conn.close()
 
-    def append_topic_metrics_history(self, topic: Topic, snapshot_time: Optional[datetime] = None) -> None:
+    def append_topic_metrics_history(self, topic: Topic, snapshot_time: Optional[int] = None) -> None:
         if topic.created_at is None or int(topic.id or -1) <= 0:
             return
 
-        write_time = snapshot_time or topic.updated_at or datetime.utcnow()
-        created_at_ts = self._dt_to_ts(topic.created_at)
-        write_time_ts = self._dt_to_ts(write_time)
+        write_time = snapshot_time or topic.updated_at or int(time.time())
+        created_at_ts = self._to_ts(topic.created_at)
+        write_time_ts = self._to_ts(write_time)
 
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -254,15 +328,15 @@ class SqlServerTopicRepository(TopicRepository):
         finally:
             conn.close()
 
-    def get_topic_by_composite_key(self, topic_created_at: datetime, topic_id: int) -> Optional[Topic]:
-        created_at_ts = self._dt_to_ts(topic_created_at)
+    def get_topic_by_composite_key(self, topic_created_at: int, topic_id: int) -> Optional[Topic]:
+        created_at_ts = self._to_ts(topic_created_at)
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
             cursor.execute(
                 """
                 SELECT TOP 1
-                    created_at, id, topic, start_time, end_time, window_size,
+                    created_at, id, topic, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
                     sentiment, news_count, total_weight, heat_change_percent,
                     stage, updated_at, version
                 FROM Topic
@@ -280,11 +354,11 @@ class SqlServerTopicRepository(TopicRepository):
 
     def list_topic_metrics_history_by_composite_key(
         self,
-        topic_created_at: datetime,
+        topic_created_at: int,
         topic_id: int,
         limit: int = 100,
     ) -> List[Topic]:
-        created_at_ts = self._dt_to_ts(topic_created_at)
+        created_at_ts = self._to_ts(topic_created_at)
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
@@ -294,6 +368,8 @@ class SqlServerTopicRepository(TopicRepository):
                     created_at,
                     id,
                     topic,
+                    CAST(NULL AS NVARCHAR(MAX)) AS platform_distribution_json,
+                    CAST(NULL AS NVARCHAR(MAX)) AS rank_data_json,
                     start_time,
                     end_time,
                     window_size,
@@ -329,7 +405,7 @@ class SqlServerTopicRepository(TopicRepository):
             cursor.execute(
                 """
                 SELECT TOP 1
-                    created_at, id, topic, start_time, end_time, window_size,
+                    created_at, id, topic, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
                     sentiment, news_count, total_weight, heat_change_percent,
                     stage, updated_at, version
                 FROM Topic
@@ -349,7 +425,7 @@ class SqlServerTopicRepository(TopicRepository):
         self,
         topic_name: str,
         limit: int = 30,
-        end_time: Optional[datetime] = None,
+        end_time: Optional[int] = None,
     ) -> List[Topic]:
         topic_name = str(topic_name or "").strip()
         if not topic_name:
@@ -360,11 +436,11 @@ class SqlServerTopicRepository(TopicRepository):
         try:
             capped_limit = max(1, int(limit))
             if end_time is not None:
-                end_time_ts = self._dt_to_ts(end_time)
+                end_time_ts = self._to_ts(end_time)
                 cursor.execute(
                     """
                     SELECT TOP (?)
-                        created_at, id, topic, start_time, end_time, window_size,
+                        created_at, id, topic, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
                         sentiment, news_count, total_weight, heat_change_percent,
                         stage, updated_at, version
                     FROM Topic
@@ -379,7 +455,7 @@ class SqlServerTopicRepository(TopicRepository):
                 cursor.execute(
                     """
                     SELECT TOP (?)
-                        created_at, id, topic, start_time, end_time, window_size,
+                        created_at, id, topic, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
                         sentiment, news_count, total_weight, heat_change_percent,
                         stage, updated_at, version
                     FROM Topic
@@ -392,5 +468,166 @@ class SqlServerTopicRepository(TopicRepository):
 
             rows = cursor.fetchall()
             return [self._from_topic_row(row) for row in rows]
+        finally:
+            conn.close()
+
+    def find_recent_topic_by_name(
+        self,
+        topic_name: str,
+        days_lookback: int = 7,
+    ) -> Optional[Topic]:
+        """
+        查找相同topic名称、且updated_at在最近N天内的最新Topic记录。
+        
+        如果存在这样的记录，返回其信息（包括created_at和id），
+        以便后续update操作能够使用正确的主键。
+        
+        Args:
+            topic_name: Topic名称
+            days_lookback: 向后查看的天数（默认7天）
+        
+        Returns:
+            Topic对象（如果存在）或None
+        """
+        topic_name = str(topic_name or "").strip()
+        if not topic_name:
+            return None
+
+        now = int(time.time())
+        lookback_seconds = days_lookback * 86400
+        cutoff_time_ts = now - lookback_seconds
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT TOP 1
+                    created_at, id, topic, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
+                    sentiment, news_count, total_weight, heat_change_percent,
+                    stage, updated_at, version
+                FROM Topic
+                WHERE topic = ? AND created_at >= ? AND updated_at >= ?
+                ORDER BY updated_at DESC, created_at DESC, id DESC
+                """,
+                topic_name,
+                cutoff_time_ts,
+                cutoff_time_ts,
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return self._from_topic_row(row)
+        finally:
+            conn.close()
+
+    def update_topic_snapshot(
+        self,
+        topic: Topic,
+        existing_created_at: int,
+        existing_id: int,
+    ) -> Topic:
+        """
+        更新现有Topic快照，保持主键(created_at, id)不变。
+        同时增加历史记录条目（保存旧数据快照）。
+        
+        Args:
+            topic: 新的Topic数据
+            existing_created_at: 要更新的Topic的created_at（主键）
+            existing_id: 要更新的Topic的id（主键）
+        
+        Returns:
+            更新后的Topic对象
+        """
+        now = int(time.time())
+        created_at_ts = self._to_ts(existing_created_at)
+        updated_at_ts = self._to_ts(now)
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            # 先获取旧数据用于历史记录
+            cursor.execute(
+                """
+                SELECT TOP 1
+                    created_at, id, topic, start_time, end_time, window_size,
+                    sentiment, news_count, total_weight, heat_change_percent,
+                    stage, updated_at, version
+                FROM Topic
+                WHERE created_at = ? AND id = ?
+                """,
+                created_at_ts,
+                int(existing_id),
+            )
+            old_row = cursor.fetchone()
+
+            # 执行UPDATE操作
+            cursor.execute(
+                """
+                UPDATE Topic
+                SET
+                    platform_distribution_json = ?,
+                    rank_data_json = ?,
+                    start_time = ?,
+                    end_time = ?,
+                    window_size = ?,
+                    sentiment = ?,
+                    news_count = ?,
+                    total_weight = ?,
+                    heat_change_percent = ?,
+                    stage = ?,
+                    updated_at = ?,
+                    version = version + 1
+                WHERE created_at = ? AND id = ?
+                """,
+                self._serialize_platform_distribution(topic),
+                self._serialize_rank_data(topic),
+                self._to_optional_ts(topic.start_time),
+                self._to_optional_ts(topic.end_time),
+                int(topic.window_size or 0),
+                topic.sentiment,
+                int(topic.news_count or 0),
+                float(topic.total_weight or 0.0),
+                float(topic.heat_change_percent or 0.0),
+                topic.stage,
+                updated_at_ts,
+                created_at_ts,
+                int(existing_id),
+            )
+            conn.commit()
+
+            # 如果存在旧数据，将其保存到历史表
+            if old_row is not None:
+                cursor.execute(
+                    """
+                    INSERT INTO topic_metrics_history (
+                        created_at, id, topic, start_time, end_time, window_size,
+                        sentiment, news_count, total_weight, heat_change_percent,
+                        stage, updated_at, version
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    created_at_ts,
+                    int(existing_id),
+                    str(old_row.topic or ""),
+                    self._value_to_ts(old_row.start_time),
+                    self._value_to_ts(old_row.end_time),
+                    int(old_row.window_size or 0),
+                    str(old_row.sentiment or ""),
+                    int(old_row.news_count or 0),
+                    float(old_row.total_weight or 0.0),
+                    float(old_row.heat_change_percent or 0.0),
+                    str(old_row.stage or ""),
+                    self._value_to_ts(old_row.updated_at),
+                    int(old_row.version or 0),
+                )
+                conn.commit()
+
+            # 返回更新后的Topic对象
+            topic.id = int(existing_id)
+            topic.created_at = int(existing_created_at)
+            topic.updated_at = updated_at_ts
+            topic.version = (int(old_row.version or 0) + 1) if old_row else (int(topic.version or 0) + 1)
+            return topic
         finally:
             conn.close()

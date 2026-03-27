@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 import logging
 import time
+from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
 
-from SentimentAnalyzeServer.application.common import (
+from SentimentAnalyzeServer.system.infra import (
 	EVENT_SENTIMENT_ANALYZED,
 	REDIS_KEY_LATEST_UPDATED_ANALYZED_NEWS,
 	REDIS_KEY_RECENT_30M_ANALYZED_NEWS,
@@ -40,6 +40,14 @@ class SentimentAnalyzeAppService:
 		self.batch_save_size = 20
 		self.executor_service = LLMExecutorService(max_workers=max_workers)
 
+	@staticmethod
+	def _to_timestamp(value: Optional[Any]) -> Optional[int]:
+		if value is None:
+			return None
+		if isinstance(value, int):
+			return int(value)
+		raise TypeError(f"timestamp must be int, got {type(value).__name__}")
+
 	def _serialize_news_items(self, items: List[NewsItem]) -> List[Dict[str, Any]]:
 		return [item.to_dict() for item in items]
 
@@ -62,6 +70,11 @@ class SentimentAnalyzeAppService:
 		self.redis.set(REDIS_KEY_RECENT_30M_ANALYZED_NEWS, payload)
 
 	def _deduplicate_news_items(self, items: List[NewsItem]) -> List[NewsItem]:
+		def _score(news_item: NewsItem) -> int:
+			if news_item.analyzed_time is not None:
+				return int(news_item.analyzed_time.timestamp())
+			return int(news_item.last_time or 0)
+
 		key_to_item: Dict[tuple[str, str], NewsItem] = {}
 		for item in items:
 			key = (item.source_id or "", item.title or "")
@@ -72,8 +85,8 @@ class SentimentAnalyzeAppService:
 				key_to_item[key] = item
 				continue
 
-			existing_ts = existing.analyzed_time or existing.last_time or datetime.min
-			incoming_ts = item.analyzed_time or item.last_time or datetime.min
+			existing_ts = _score(existing)
+			incoming_ts = _score(item)
 			if incoming_ts >= existing_ts:
 				key_to_item[key] = item
 
@@ -82,28 +95,30 @@ class SentimentAnalyzeAppService:
 	def _filter_items_by_last_time_range(
 		self,
 		items: List[NewsItem],
-		start_time: Optional[datetime],
-		end_time: Optional[datetime],
+		start_time: Optional[int],
+		end_time: Optional[int],
 	) -> List[NewsItem]:
-		if start_time is None and end_time is None:
+		start_ts = self._to_timestamp(start_time)
+		end_ts = self._to_timestamp(end_time)
+		if start_ts is None and end_ts is None:
 			return items
 
 		filtered: List[NewsItem] = []
 		for item in items:
 			if item.last_time is None:
 				continue
-			if start_time and end_time:
-				if start_time <= end_time:
-					if start_time <= item.last_time <= end_time:
+			if start_ts is not None and end_ts is not None:
+				if start_ts <= end_ts:
+					if start_ts <= item.last_time <= end_ts:
 						filtered.append(item)
 				else:
-					if item.last_time >= start_time or item.last_time <= end_time:
+					if item.last_time >= start_ts or item.last_time <= end_ts:
 						filtered.append(item)
-			elif start_time:
-				if item.last_time >= start_time:
+			elif start_ts is not None:
+				if item.last_time >= start_ts:
 					filtered.append(item)
-			elif end_time:
-				if item.last_time <= end_time:
+			elif end_ts is not None:
+				if item.last_time <= end_ts:
 					filtered.append(item)
 
 		return filtered
@@ -162,8 +177,8 @@ class SentimentAnalyzeAppService:
 			len(pending_items),
 			len(updated_items),
 		)
-		now = datetime.now()
-		recent_threshold = now - timedelta(seconds=self.recent_window_seconds)
+		now_ts = int(time.time())
+		recent_threshold = now_ts - self.recent_window_seconds
 		recent_items = [
 			item for item in updated_items
 			if item.last_time is not None and item.last_time >= recent_threshold
@@ -255,7 +270,7 @@ class SentimentAnalyzeAppService:
 				item.attention_score = float(dimensions.get("attention", 0.0))
 				item.controversy_score = float(dimensions.get("controversy", 0.0))
 
-		item.analyzed_time = datetime.now()
+		item.analyzed_time = datetime.now(UTC)
 		item.deduplicate_entities_and_keywords()
 
 	def filter_news_items_not_analyzed(self, items: List[NewsItem]) -> List[NewsItem]:
@@ -267,13 +282,15 @@ class SentimentAnalyzeAppService:
 
 	def analyze_pending_items_by_first_time(
 		self,
-		start_time: Optional[datetime] = None,
-		end_time: Optional[datetime] = None,
+		start_time: Optional[int] = None,
+		end_time: Optional[int] = None,
 	) -> bool:
+		start_ts = self._to_timestamp(start_time)
+		end_ts = self._to_timestamp(end_time)
 		all_items = self.news_domain_service.get_news_list_by_firt_time_range(
 			isAnalyzed=False,
-			start_time=start_time,
-			end_time=end_time,
+			start_time=start_ts,
+			end_time=end_ts,
 		)
 		if all_items is None:
 			logger.info("[ScheduledCrawler] 无可分析的数据")
@@ -287,13 +304,15 @@ class SentimentAnalyzeAppService:
 
 	def analyze_pending_items_by_latest_time(
 		self,
-		start_time: Optional[datetime] = None,
-		end_time: Optional[datetime] = None,
+		start_time: Optional[int] = None,
+		end_time: Optional[int] = None,
 	) -> dict[str, Any]:
+		start_ts = self._to_timestamp(start_time)
+		end_ts = self._to_timestamp(end_time)
 		latest_items = self.news_domain_service.get_news_list_by_latest_crawl_range(
 			isAnalyzed=False,
-			start_time=start_time,
-			end_time=end_time,
+			start_time=start_ts,
+			end_time=end_ts,
 		)
 		if not latest_items:
 			logger.info("[ScheduledCrawler] 无可分析的数据")
@@ -309,9 +328,11 @@ class SentimentAnalyzeAppService:
 
 	def get_analyzed_news_grouped_by_latest_time(
 		self,
-		start_time: Optional[datetime] = None,
-		end_time: Optional[datetime] = None,
+		start_time: Optional[int] = None,
+		end_time: Optional[int] = None,
 	) -> Dict[str, List[NewsItem]]:
+		start_ts = self._to_timestamp(start_time)
+		end_ts = self._to_timestamp(end_time)
 		"""按 last_time 范围获取已分析新闻，并按 source_id 分组。"""
 		cached_payload_map = self.redis.get_many(
 			[
@@ -326,14 +347,14 @@ class SentimentAnalyzeAppService:
 
 			if cached_items:
 				cached_items = self._deduplicate_news_items(cached_items)
-				cached_items = self._filter_items_by_last_time_range(cached_items, start_time, end_time)
+				cached_items = self._filter_items_by_last_time_range(cached_items, start_ts, end_ts)
 				if cached_items:
 					return self.news_domain_service.group_news_items_by_platform(cached_items)
 
 		grouped = self.news_domain_service.get_group_news_by_latest_crawl_range(
 			isAnalyzed=True,
-			start_time=start_time,
-			end_time=end_time,
+			start_time=start_ts,
+			end_time=end_ts,
 		)
 		return grouped or {}
 	

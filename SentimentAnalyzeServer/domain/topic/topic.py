@@ -2,18 +2,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from SentimentAnalyzeServer.domain.news.news import NewsItem
-from SentimentAnalyzeServer.system.datetime_utils import datetime_to_timestamp, parse_datetime_value
-
-DATETIME_FORMATS = (
-	"%Y-%m-%d %H:%M:%S",
-	"%Y-%m-%d %H:%M",
-	"%Y-%m-%dT%H:%M:%S",
-	"%Y-%m-%dT%H:%M:%S.%f",
-)
 
 STAGE_SET = {
 	"Inception",
@@ -22,17 +14,8 @@ STAGE_SET = {
 	"Decline",
 }
 
-
-def parse_datetime(value: Any) -> Optional[datetime]:
-	return parse_datetime_value(value, formats=DATETIME_FORMATS)
-
-
-def format_datetime(value: Optional[datetime], fmt: str = "%Y-%m-%d %H:%M") -> str:
-	return value.strftime(fmt) if value else ""
-
-
-def format_timestamp(value: Optional[datetime]) -> Optional[int]:
-	return datetime_to_timestamp(value)
+def now_timestamp() -> int:
+	return int(time.time())
 
 @dataclass(slots=True)
 class TopicPlatformStats:
@@ -60,18 +43,20 @@ class TopicPlatformStats:
 		)
 
 @dataclass(slots=True)
-class Topic: #后续会持久化Topic快照
-	created_at: Optional[datetime] = None #不是now，而是第一次构建Topic的时间
+class Topic: 
+	created_at: Optional[int] = None #不是now，而是第一次构建Topic的时间戳
 	id: int = field(default=-1)  
 	topic: str = ""
+	llm_title: Optional[str] = None
+	topic_type: Optional[str] = None
 	rank_data: Dict[str, List[NewsItem]] = field(default_factory=dict)
 	platform_distribution: List[TopicPlatformStats] = field(default_factory=list)
-	start_time: Optional[datetime] = None #时间窗口的开始时间，等同于rank_data中最早的first_time
-	end_time: Optional[datetime] = None #时间窗口的结束时间，等同于rank_data中最新的last_time
+	start_time: Optional[int] = None #时间窗口的开始时间戳
+	end_time: Optional[int] = None #时间窗口的结束时间戳
 	window_size: int = 0  #单位分钟
 	sentiment: str = ""
 	news_count: int = 0
-	updated_at: Optional[datetime] = None #等同于timestamp
+	updated_at: Optional[int] = None
 	version: int = 0
 
 	total_weight: float = 0.0 #等同于热度
@@ -80,7 +65,7 @@ class Topic: #后续会持久化Topic快照
 
 	@property
 	def source_diversity(self) -> int:
-		return len(self.platform_distribution)*10
+		return len(self.platform_distribution)*3
 	
 	@staticmethod
 	def build_rank_key(item: NewsItem) -> str:
@@ -95,19 +80,26 @@ class Topic: #后续会持久化Topic快照
 				for key, items in self.rank_data.items()
 			},
 			"platform_distribution": [item.to_dict() for item in self.platform_distribution],
-			"start_time": format_timestamp(self.start_time),
-			"end_time": format_timestamp(self.end_time),
+			"start_time": self.start_time,
+			"end_time": self.end_time,
 			"window_size": self.window_size,
 			"sentiment": self.sentiment,
 			"news_count": self.news_count,
 			"total_weight": self.total_weight,
-			"created_at": format_timestamp(self.created_at),
-			"updated_at": format_timestamp(self.updated_at),
+			"created_at": self.created_at,
+			"updated_at": self.updated_at,
 			"version": self.version,
 		}
 
 	@classmethod
 	def from_dict(cls, data: Dict[str, Any]) -> "Topic":
+		def _to_optional_int_timestamp(value: Any) -> Optional[int]:
+			if value is None:
+				return None
+			if isinstance(value, int):
+				return int(value)
+			raise TypeError(f"timestamp must be int, got {type(value).__name__}")
+
 		raw_rank_data = data.get("rank_data", {})
 		rank_data: Dict[str, List[NewsItem]] = {}
 
@@ -142,14 +134,14 @@ class Topic: #后续会持久化Topic快照
 			topic=str(data.get("topic", "")),
 			rank_data=rank_data,
 			platform_distribution=platform_distribution,
-			start_time=parse_datetime(data.get("start_time")),
-			end_time=parse_datetime(data.get("end_time")),
+			start_time=_to_optional_int_timestamp(data.get("start_time")),
+			end_time=_to_optional_int_timestamp(data.get("end_time")),
 			window_size=int(data.get("window_size", 0) or 0),
 			sentiment=str(data.get("sentiment", "") or ""),
 			news_count=int(data.get("news_count", 0) or 0),
 			total_weight=float(data.get("total_weight", 0.0) or 0.0),
-			created_at=parse_datetime(data.get("created_at")),
-			updated_at=parse_datetime(data.get("updated_at")),
+			created_at=_to_optional_int_timestamp(data.get("created_at")),
+			updated_at=_to_optional_int_timestamp(data.get("updated_at")),
 			version=int(data.get("version", 0) or 0),
 		)
 
@@ -181,7 +173,7 @@ class TopicDomainService:
 			if isinstance(s, Topic)
 		]
 		history.sort(
-			key=lambda s: (s.updated_at or datetime.min, s.created_at or datetime.min, int(s.id or -1)),
+			key=lambda s: (int(s.updated_at or 0), int(s.created_at or 0), int(s.id or -1)),
 			reverse=True,
 		)
 
@@ -238,14 +230,57 @@ class TopicDomainService:
 			return topic
 		return self.topic_repository.save_topic_snapshot(topic)
 
-	def append_topic_metrics_history_async_safe(self, topic: Topic, snapshot_time: Optional[datetime] = None) -> None:
+	def save_or_update_topic_snapshot(
+		self,
+		topic: Topic,
+		days_lookback: int = 7,
+	) -> Topic:
+		"""
+		保存或更新Topic快照。
+		
+		- 如果存在相同topic名称且updated_at在最近days_lookback天内的记录，
+		  则执行UPDATE操作（保持主键不变）并将旧数据加入历史。
+		- 否则执行INSERT操作创建新记录。
+		
+		Args:
+			topic: 新的Topic数据
+			days_lookback: 向后查看的天数（默认7天）
+		
+		Returns:
+			保存或更新后的Topic对象
+		"""
+		if self.topic_repository is None:
+			return topic
+		
+		topic_name = str(topic.topic or "").strip()
+		if not topic_name:
+			return self.topic_repository.save_topic_snapshot(topic)
+		
+		# 查找最近7天内相同topic的最新记录
+		recent_topic = self.topic_repository.find_recent_topic_by_name(
+			topic_name=topic_name,
+			days_lookback=days_lookback,
+		)
+		
+		if recent_topic is not None and int(recent_topic.id or -1) > 0:
+			# 存在最近的相同topic记录，执行UPDATE操作
+			return self.topic_repository.update_topic_snapshot(
+				topic=topic,
+				existing_created_at=int(recent_topic.created_at or int(time.time())),
+				existing_id=int(recent_topic.id),
+			)
+		else:
+			# 不存在相同的最近记录，执行INSERT操作
+			return self.topic_repository.save_topic_snapshot(topic)
+
+	def append_topic_metrics_history_async_safe(self, topic: Topic, snapshot_time: Optional[int] = None) -> None:
 		if self.topic_repository is None:
 			return
 		self.topic_repository.append_topic_metrics_history(topic, snapshot_time=snapshot_time)
 
 	def get_topic_timeline_and_latest(
 		self,
-		topic_created_at: datetime,
+		topic_created_at: int,
 		topic_id: int,
 		history_limit: int = 100,
 	) -> List[Topic]:
@@ -270,15 +305,15 @@ class TopicDomainService:
 		for item in [base_topic, latest_topic, *history]:
 			if item is None:
 				continue
-			updated_at_key = format_datetime(item.updated_at) or ""
-			key = (format_datetime(item.created_at) or "", int(item.id or -1), updated_at_key)
+			updated_at_key = str(int(item.updated_at or 0))
+			key = (str(int(item.created_at or 0)), int(item.id or -1), updated_at_key)
 			if key in seen_keys:
 				continue
 			seen_keys.add(key)
 			combined.append(item)
 
 		combined.sort(
-			key=lambda x: (x.updated_at or datetime.min, x.created_at or datetime.min, int(x.id or -1)),
+			key=lambda x: (int(x.updated_at or 0), int(x.created_at or 0), int(x.id or -1)),
 			reverse=True,
 		)
 		return combined
@@ -296,8 +331,8 @@ class TopicDomainService:
 		sentiment_totals: Dict[str, float] = {}
 		news_count = 0
 		total_weight = 0.0
-		start_time: Optional[datetime] = None
-		end_time: Optional[datetime] = None
+		start_time: Optional[int] = None
+		end_time: Optional[int] = None
 		
 		# 单次遍历所有 NewsItem，完成 topic 层和平台层所需的基础统计。
 		for _, news_items in topic.rank_data.items():
@@ -362,7 +397,7 @@ class TopicDomainService:
 		topic.start_time = start_time
 		topic.end_time = end_time
 		if start_time and end_time:
-			topic.window_size = max(0, int((end_time - start_time).total_seconds() // 60)) # 单位分钟
+			topic.window_size = max(0, int((int(end_time) - int(start_time)) // 60)) # 单位分钟
 		else:
 			topic.window_size = 0
 
@@ -376,7 +411,7 @@ class TopicDomainService:
 		topic.news_count = news_count
 		topic.total_weight = total_weight
 		topic.total_weight+=topic.source_diversity #考虑增加平台多样性对热度的贡献
-		now = datetime.now()
+		now = now_timestamp()
 		if not topic.created_at:
 			topic.created_at = now
 		topic.updated_at = now
@@ -398,8 +433,8 @@ class TopicDomainService:
 				topic.end_time = item.last_time
 
 		if topic.start_time and topic.end_time:
-			topic.window_size = max(0, int((topic.end_time - topic.start_time).total_seconds() // 60))
-		now = datetime.now()
+			topic.window_size = max(0, int((int(topic.end_time) - int(topic.start_time)) // 60))
+		now = now_timestamp()
 		if not topic.created_at:
 			topic.created_at = now
 		topic.updated_at = now
@@ -419,24 +454,43 @@ class TopicRepository(ABC):
 		self,
 		topic_name: str,
 		limit: int = 30,
-		end_time: Optional[datetime] = None,
+		end_time: Optional[int] = None,
 	) -> List[Topic]:
 		pass
 
 	@abstractmethod
-	def get_topic_by_composite_key(self, topic_created_at: datetime, topic_id: int) -> Optional[Topic]:
+	def get_topic_by_composite_key(self, topic_created_at: int, topic_id: int) -> Optional[Topic]:
 		pass
 
 	@abstractmethod
-	def append_topic_metrics_history(self, topic: Topic, snapshot_time: Optional[datetime] = None) -> None:
+	def append_topic_metrics_history(self, topic: Topic, snapshot_time: Optional[int] = None) -> None:
 		pass
 
 	@abstractmethod
 	def list_topic_metrics_history_by_composite_key(
 		self,
-		topic_created_at: datetime,
+		topic_created_at: int,
 		topic_id: int,
 		limit: int = 100,
 	) -> List[Topic]:
+		pass
+
+	@abstractmethod
+	def find_recent_topic_by_name(
+		self,
+		topic_name: str,
+		days_lookback: int = 7,
+	) -> Optional[Topic]:
+		"""查找最近N天内相同topic名称的最新记录."""
+		pass
+
+	@abstractmethod
+	def update_topic_snapshot(
+		self,
+		topic: Topic,
+		existing_created_at: int,
+		existing_id: int,
+	) -> Topic:
+		"""更新现有Topic快照，保持主键不变，并将旧数据加入历史."""
 		pass
     

@@ -14,7 +14,7 @@ from SentimentAnalyzeServer.application.scheduled import (
     Scheduled,
     get_interval_seconds_from_config,
 )
-from SentimentAnalyzeServer.application.common import CommonThreadPool, Result
+from SentimentAnalyzeServer.application.common import Result
 from SentimentAnalyzeServer.application.dataFetcherAppService import DataFetcherAppService
 from SentimentAnalyzeServer.application.sentimentAnalyzeAppsService import SentimentAnalyzeAppService
 from SentimentAnalyzeServer.application.topicAppService import TopicAppService
@@ -25,6 +25,7 @@ from SentimentAnalyzeServer.domain.topic.topic import TopicDomainService
 from SentimentAnalyzeServer.domain.topic.sqlServerTopicRepository import SqlServerTopicRepository
 from SentimentAnalyzeServer.inbound.controller import create_external_controller
 from SentimentAnalyzeServer.inbound.workflow_event_subscribers import WorkflowEventSubscribers
+from SentimentAnalyzeServer.system.infra import CommonThreadPool
 
 
 def create_app() -> Flask:
@@ -95,6 +96,8 @@ def create_app() -> Flask:
             heat_stage_config=topic_heat_stage_config,
         ),
         news_domain_service=NewsDomainService(storage),
+        crawl_interval_seconds=interval_seconds,
+        topic_config=config.get("topic") or {},
     )
     workflow_subscribers = WorkflowEventSubscribers(
         sentiment_app_service=sentiment_app_service,

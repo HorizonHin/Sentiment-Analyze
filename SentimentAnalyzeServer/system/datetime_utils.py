@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from typing import Any, Optional
 
 DEFAULT_DATETIME_FORMATS = (
@@ -11,7 +10,25 @@ DEFAULT_DATETIME_FORMATS = (
 )
 
 
+def parse_int_timestamp(value: Any, *, allow_none: bool = True) -> Optional[int]:
+    """Parse second-level int timestamp from request/input values."""
+    if value is None or value == "":
+        if allow_none:
+            return None
+        raise ValueError("timestamp must be int")
+
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("timestamp must be int") from exc
+
+
 def datetime_to_timestamp(value: Optional[datetime]) -> Optional[int]:
+    return datetime_to_int_timestamp(value)
+
+
+def datetime_to_int_timestamp(value: Optional[datetime]) -> Optional[int]:
+    """Convert datetime to second-level int timestamp in UTC."""
     if value is None:
         return None
     dt = value
@@ -23,25 +40,26 @@ def datetime_to_timestamp(value: Optional[datetime]) -> Optional[int]:
 
 
 def timestamp_to_datetime(value: Any) -> Optional[datetime]:
-    if value is None or value == "":
+    return int_timestamp_to_datetime(value)
+
+
+def int_timestamp_to_datetime(value: Optional[int]) -> Optional[datetime]:
+    """Convert second-level int timestamp to naive UTC datetime."""
+    if value is None:
         return None
-
-    try:
-        ts = float(value)
-    except (TypeError, ValueError):
+    if isinstance(value, bool):
         return None
-
-    # Heuristic: treat values >= 1e12 as milliseconds.
-    if abs(ts) >= 1_000_000_000_000:
-        ts = ts / 1000.0
-
-    return datetime.fromtimestamp(ts, UTC).replace(tzinfo=None)
+    if not isinstance(value, int):
+        return None
+    return datetime.fromtimestamp(value, UTC).replace(tzinfo=None)
 
 
 def parse_datetime_value(
     value: Any,
     formats: tuple[str, ...] = DEFAULT_DATETIME_FORMATS,
 ) -> Optional[datetime]:
+    # Keep this API for external input parsing, but internal code should use
+    # int_timestamp_to_datetime / datetime_to_int_timestamp directly.
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -58,15 +76,6 @@ def parse_datetime_value(
         ts_dt = timestamp_to_datetime(text)
         if ts_dt is not None:
             return ts_dt
-
-    try:
-        rfc_dt = parsedate_to_datetime(text)
-        if rfc_dt is not None:
-            if rfc_dt.tzinfo is not None:
-                return rfc_dt.astimezone(UTC).replace(tzinfo=None)
-            return rfc_dt
-    except (TypeError, ValueError, IndexError):
-        pass
 
     for fmt in formats:
         try:

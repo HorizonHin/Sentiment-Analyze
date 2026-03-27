@@ -1,39 +1,63 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Dict, List, Optional, Any, Set, Tuple
 
-from SentimentAnalyzeServer.system.datetime_utils import datetime_to_timestamp, parse_datetime_value
-
-DATETIME_FORMATS = (
-    "%Y-%m-%d %H:%M:%S",
-    "%Y-%m-%d %H:%M",
-    "%Y-%m-%dT%H:%M:%S",
-    "%Y-%m-%dT%H:%M:%S.%f",
-)
+FIRST_TIME_MIN = 0
 
 
-def parse_datetime(value: Any) -> Optional[datetime]:
-    return parse_datetime_value(value, formats=DATETIME_FORMATS)
+def parse_timestamp(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return int(value)
+    raise TypeError(f"timestamp must be int, got {type(value).__name__}")
 
 
-def format_datetime(value: Optional[datetime], fmt: str = "%Y-%m-%d %H:%M") -> str:
-    return value.strftime(fmt) if value else ""
+def format_timestamp(value: Any) -> Optional[int]:
+    return parse_timestamp(value)
 
 
-def format_timestamp(value: Optional[datetime]) -> Optional[int]:
-    return datetime_to_timestamp(value)
+def parse_analyzed_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            raise TypeError("analyzed_time must be timezone-aware UTC datetime")
+        return value.astimezone(UTC)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        iso_text = text[:-1] + "+00:00" if text.endswith("Z") else text
+        parsed = datetime.fromisoformat(iso_text)
+        if parsed.tzinfo is None:
+            raise TypeError("analyzed_time string must include timezone")
+        return parsed.astimezone(UTC)
+    raise TypeError(f"analyzed_time must be datetime or ISO datetime string, got {type(value).__name__}")
+
+
+def format_analyzed_datetime(value: Any) -> Optional[str]:
+    dt = parse_analyzed_datetime(value)
+    if dt is None:
+        return None
+    return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 @dataclass
 class Entity:
     id: int = field(default=-1)
+    news_item_id: int = field(default=-1)
+    news_first_time: Optional[int] = None
     name: str = ""
     type: str = ""
     weigh: float = 0.0
 
+
 @dataclass
 class Keyword:
     id: int = field(default=-1)
+    news_item_id: int = field(default=-1)
+    news_first_time: Optional[int] = None
     term: str = ""
     importance: float = 0.0
     weigh: float = 0.0
@@ -42,8 +66,26 @@ class Keyword:
 @dataclass
 class RankTimelineEntry:
     id: int = field(default=-1)
-    time: Optional[datetime] = None
+    news_item_id: int = field(default=-1)
+    news_first_time: Optional[int] = None
+    time: Optional[int] = None
     rank: int = 0
+
+    @property
+    def timeline_time(self) -> Optional[int]:
+        return self.time
+
+    @timeline_time.setter
+    def timeline_time(self, value: Optional[int]) -> None:
+        self.time = value
+
+    @property
+    def rank_value(self) -> int:
+        return self.rank
+
+    @rank_value.setter
+    def rank_value(self, value: int) -> None:
+        self.rank = value
 
 @dataclass
 class NewsItem:
@@ -71,16 +113,16 @@ class NewsItem:
     controversy_score: float = 0.0
     attention_score: float = 0.0
     # 统计信息（用于分析）
-    first_time: Optional[datetime] = None                # 首次出现时间
-    last_time: Optional[datetime] = None                 # 最后出现时间
-    analyzed_time: Optional[datetime] = None         # 分析时间
+    first_time: Optional[int] = None                # 首次出现时间戳（秒）
+    last_time: Optional[int] = None                 # 最后出现时间戳（秒）
+    analyzed_time: Optional[datetime] = None         # 分析时间（UTC+0 datetime）
     total_weigh: float = 0.0            # 综合权重
     rank_timeline_obj: List[RankTimelineEntry] = field(default_factory=list)  # 完整排名时间线对象
                                         # 格式: [("09:30", 1), ("10:00", 2), ...]
                                         # rank <= 0 表示脱榜
 
     @property
-    def rank_timeline(self) -> List[Tuple[datetime, int]]:
+    def rank_timeline(self) -> List[Tuple[int, int]]:
         """对外兼容旧结构，返回 (time, rank) 列表。"""
         return [(point.time, point.rank) for point in self.rank_timeline_obj if point.time is not None]
 
@@ -116,8 +158,28 @@ class NewsItem:
             "source_name": self.source_name,
             "event_type": self.event_type,
             "summary": self.summary,
-            "entities": [{"id": entity.id, "name": entity.name, "type": entity.type, "weigh": entity.weigh} for entity in self.entities],
-            "keywords": [{"id": keyword.id, "term": keyword.term, "importance": keyword.importance, "weigh": keyword.weigh} for keyword in self.keywords],
+            "entities": [
+                {
+                    "id": entity.id,
+                    "news_item_id": entity.news_item_id,
+                    "news_first_time": format_timestamp(entity.news_first_time),
+                    "name": entity.name,
+                    "type": entity.type,
+                    "weigh": entity.weigh,
+                }
+                for entity in self.entities
+            ],
+            "keywords": [
+                {
+                    "id": keyword.id,
+                    "news_item_id": keyword.news_item_id,
+                    "news_first_time": format_timestamp(keyword.news_first_time),
+                    "term": keyword.term,
+                    "importance": keyword.importance,
+                    "weigh": keyword.weigh,
+                }
+                for keyword in self.keywords
+            ],
             "latest_rank": self.latest_rank,
             "url": self.url,
             "mobile_url": self.mobile_url,
@@ -131,14 +193,18 @@ class NewsItem:
             "attention_score": self.attention_score,
             "first_time": format_timestamp(self.first_time),
             "last_time": format_timestamp(self.last_time),
-            "analyzed_time": format_timestamp(self.analyzed_time),
+            "analyzed_time": format_analyzed_datetime(self.analyzed_time),
             "count": self.count,
             "total_weigh": self.total_weigh,
             "rank_timeline": [
                 {
                     "id": point.id,
+                    "news_item_id": point.news_item_id,
+                    "news_first_time": format_timestamp(point.news_first_time),
                     "time": format_timestamp(point.time),
+                    "timeline_time": format_timestamp(point.timeline_time),
                     "rank": point.rank if point.rank > 0 else None,
+                    "rank_value": point.rank_value if point.rank_value > 0 else None,
                 }
                 for point in self.rank_timeline_obj
             ],
@@ -155,16 +221,26 @@ class NewsItem:
             if isinstance(item, dict):
                 try:
                     entry_id = int(item.get("id", -1) or -1)
-                    entry_time = parse_datetime(item.get("time"))
-                    entry_rank = int(item.get("rank") or 0)
+                    entry_news_item_id = int(item.get("news_item_id", -1) or -1)
+                    entry_news_first_time = parse_timestamp(item.get("news_first_time"))
+                    entry_time = parse_timestamp(item.get("time")) or parse_timestamp(item.get("timeline_time"))
+                    entry_rank = int(item.get("rank") if item.get("rank") is not None else (item.get("rank_value") or 0))
                     if entry_time is None:
                         continue
-                    result.append(RankTimelineEntry(id=entry_id, time=entry_time, rank=entry_rank))
+                    result.append(
+                        RankTimelineEntry(
+                            id=entry_id,
+                            news_item_id=entry_news_item_id,
+                            news_first_time=entry_news_first_time,
+                            time=entry_time,
+                            rank=entry_rank,
+                        )
+                    )
                 except (TypeError, ValueError):
                     continue
             elif isinstance(item, (list, tuple)) and len(item) >= 2:
                 try:
-                    entry_time = parse_datetime(item[0])
+                    entry_time = parse_timestamp(item[0])
                     entry_rank = int(item[1])
                     if entry_time is None:
                         continue
@@ -186,7 +262,7 @@ class NewsItem:
         if not latest_rank and legacy_ranks:
             latest_rank = legacy_ranks[0]
         legacy_time = data.get("crawl_time", "")
-        last_time = parse_datetime(data.get("last_time")) or parse_datetime(legacy_time)
+        last_time = parse_timestamp(data.get("last_time")) or parse_timestamp(legacy_time)
 
         return cls(
             id=int(data.get("id", -1) or -1),
@@ -198,8 +274,9 @@ class NewsItem:
             entities=[
                 Entity(
                     id=int(item.get("id", -1) or -1),
+                    news_item_id=int(item.get("news_item_id", -1) or -1),
+                    news_first_time=parse_timestamp(item.get("news_first_time")),
                     name=item.get("name", ""),
-                    type=item.get("type", ""),
                     weigh=float(item.get("weigh", data.get("total_weigh", 0.0)) or 0.0),
                 )
                 for item in raw_entities
@@ -207,6 +284,8 @@ class NewsItem:
             keywords=[
                 Keyword(
                     id=int(item.get("id", -1) or -1),
+                    news_item_id=int(item.get("news_item_id", -1) or -1),
+                    news_first_time=parse_timestamp(item.get("news_first_time")),
                     term=item.get("term", ""),
                     importance=float(item.get("importance", 0.0)),
                     weigh=float(item.get("weigh", data.get("total_weigh", 0.0)) or 0.0),
@@ -224,9 +303,9 @@ class NewsItem:
             trust_score=float(data.get("trust_score", 0.0)),
             controversy_score=float(data.get("controversy_score", 0.0)),
             attention_score=float(data.get("attention_score", 0.0)),
-            first_time=parse_datetime(data.get("first_time")),
+            first_time=parse_timestamp(data.get("first_time")),
             last_time=last_time,
-            analyzed_time=parse_datetime(data.get("analyzed_time")),
+            analyzed_time=parse_analyzed_datetime(data.get("analyzed_time")),
             total_weigh=float(data.get("total_weigh", 0.0)),
             rank_timeline_obj=cls._parse_rank_timeline(data.get("rank_timeline", [])),
         )
@@ -244,8 +323,8 @@ class NewsData:
     - failed_ids: 失败的来源ID列表
     """
 
-    date: Optional[datetime]                              # 日期
-    last_time: Optional[datetime]                         # 最新抓取时间
+    date: Optional[int]                              # 日期时间戳（秒）
+    last_time: Optional[int]                         # 最新抓取时间戳（秒）
     items: Dict[str, List[NewsItem]]            # 按来源分组的新闻
     id_to_name: Dict[str, str] = field(default_factory=dict)   # ID到名称映射
     failed_ids: List[str] = field(default_factory=list)        # 失败的ID
@@ -273,8 +352,8 @@ class NewsData:
             items[source_id] = [NewsItem.from_dict(item) for item in news_list]
 
         return cls(
-            date=parse_datetime(data.get("date")),
-            last_time=parse_datetime(data.get("last_time")) or parse_datetime(data.get("crawl_time")),
+            date=parse_timestamp(data.get("date")),
+            last_time=parse_timestamp(data.get("last_time")) or parse_timestamp(data.get("crawl_time")),
             items=items,
             id_to_name=data.get("id_to_name", {}),
             failed_ids=data.get("failed_ids", []),
@@ -292,7 +371,7 @@ class NewsData:
         """合并并去重 rank timeline，去重键为 (time, rank)。"""
         combined_timeline = (base_timeline or []) + (incoming_timeline or [])
         dedup_timeline: List[RankTimelineEntry] = []
-        seen: Set[Tuple[datetime, int]] = set()
+        seen: Set[Tuple[int, int]] = set()
 
         for point in combined_timeline:
             if point.time is None:
@@ -382,13 +461,17 @@ class NewsItemRepository(ABC):
         return []
 
     @abstractmethod
-    def get_news_list_by_source_title_list(self, source_title_list: List[tuple[str, str]]) -> List[NewsItem]:
+    def get_news_list_by_source_title_list(
+        self,
+        source_title_list: List[tuple[str, str]],
+        first_time: int,
+    ) -> List[NewsItem]:
         """根据 (source_id, title) 列表查询新闻数据。"""
         pass
 
 
     @abstractmethod
-    def get_latest_crawl_data(self, date: Optional[datetime] = None) -> Optional[NewsData]:
+    def get_latest_crawl_data(self, date: Optional[int] = None) -> Optional[NewsData]:
         """
         获取最新一次抓取的数据
 
@@ -401,7 +484,7 @@ class NewsItemRepository(ABC):
         pass
 
     @abstractmethod
-    def is_first_crawl_today(self, date: Optional[datetime] = None) -> bool:
+    def is_first_crawl_today(self, date: Optional[int] = None) -> bool:
         """
         检查是否是当天第一次抓取
 
@@ -413,26 +496,6 @@ class NewsItemRepository(ABC):
         """
         pass
 
-    @abstractmethod
-    def cleanup(self) -> None:
-        """
-        清理资源（如临时文件、数据库连接等）
-        """
-        pass
-
-    @abstractmethod
-    def cleanup_old_data(self, retention_days: int) -> int:
-        """
-        清理过期数据
-
-        Args:
-            retention_days: 保留天数（0 表示不清理）
-
-        Returns:
-            删除的日期目录数量
-        """
-        pass
-
     @property
     @abstractmethod
     def backend_name(self) -> str:
@@ -441,7 +504,7 @@ class NewsItemRepository(ABC):
         """
         pass
 
-    def record_period_execution(self, date_str: datetime, period_key: str, action: str) -> bool:
+    def record_period_execution(self, date_str: int, period_key: str, action: str) -> bool:
         """
         记录时间段的 action 执行
 
@@ -455,27 +518,27 @@ class NewsItemRepository(ABC):
         """
         return False
 
-    def save_analyzed_news(self, news_ids: List[str], source_type: str, interests_file: str, prompt_hash: str, matched_ids: Set[str], date: Optional[datetime] = None) -> int:
+    def save_analyzed_news(self, news_ids: List[str], source_type: str, interests_file: str, prompt_hash: str, matched_ids: Set[str], date: Optional[int] = None) -> int:
         return 0
 
-    def get_analyzed_news_ids(self, source_type: str = "hotlist", date: Optional[datetime] = None, interests_file: str = "ai_interests.txt") -> Set[str]:
+    def get_analyzed_news_ids(self, source_type: str = "hotlist", date: Optional[int] = None, interests_file: str = "ai_interests.txt") -> Set[str]:
         return set()
 
-    def clear_analyzed_news(self, date: Optional[datetime] = None, interests_file: str = "ai_interests.txt") -> int:
+    def clear_analyzed_news(self, date: Optional[int] = None, interests_file: str = "ai_interests.txt") -> int:
         return 0
 
-    def clear_unmatched_analyzed_news(self, date: Optional[datetime] = None, interests_file: str = "ai_interests.txt") -> int:
+    def clear_unmatched_analyzed_news(self, date: Optional[int] = None, interests_file: str = "ai_interests.txt") -> int:
         return 0
 
-    def get_all_news_ids(self, date: Optional[datetime] = None) -> List[Dict]:
+    def get_all_news_ids(self, date: Optional[int] = None) -> List[Dict]:
         return []
 
     @abstractmethod
     def get_news_list_by_latest_crawl_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> Optional[List[NewsItem]]:
         pass
 
@@ -483,16 +546,16 @@ class NewsItemRepository(ABC):
     def get_news_list_by_first_time_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> Optional[List[NewsItem]]:
         pass
 
     @abstractmethod
     def get_keywords_by_last_time_range(
         self,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> List[Keyword]:
         """根据 first_time 范围查询关键词表。"""
         pass
@@ -500,30 +563,30 @@ class NewsItemRepository(ABC):
     @abstractmethod
     def get_entities_by_last_time_range(
         self,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> List[Entity]:
         """根据 first_time 范围查询实体表。"""
         pass
 
     @abstractmethod
-    def get_news_list_by_keyword_ids(
+    def get_news_list_by_keywords(
         self,
-        keyword_ids: List[int],
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        keywords: List[Keyword],
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> List[NewsItem]:
-        """根据 keyword id 列表查询 NewsItem。"""
+        """根据 keyword 列表查询 NewsItem（优先使用 news_item_id+news_first_time 联合键）。"""
         pass
 
     @abstractmethod
-    def get_news_list_by_entity_ids(
+    def get_news_list_by_entities(
         self,
-        entity_ids: List[int],
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        entities: List[Entity],
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> List[NewsItem]:
-        """根据 entity id 列表查询 NewsItem。"""
+        """根据 entity 列表查询 NewsItem（优先使用 news_item_id+news_first_time 联合键）。"""
         pass
 
 
@@ -583,8 +646,8 @@ class NewsDomainService:
 
     def recommend_hot_terms_by_time_range(
         self,
-        start_time: datetime,
-        end_time: datetime,
+        start_time: int,
+        end_time: int,
         top_n: int = 10,
     ) -> Tuple[List[Keyword], List[Entity]]:
         """
@@ -600,9 +663,14 @@ class NewsDomainService:
             if not key:
                 continue
 
+            current_news_item_id = int(keyword.news_item_id) if keyword.news_item_id is not None else -1
+            current_news_first_time = int(keyword.news_first_time) if keyword.news_first_time is not None else None
+
             if key not in keyword_agg:
                 keyword_agg[key] = Keyword(
                     id=int(keyword.id) if int(keyword.id) > 0 else -1,
+                    news_item_id=current_news_item_id,
+                    news_first_time=current_news_first_time,
                     term=key,
                     importance=float(keyword.importance),
                     weigh=0.0,
@@ -612,6 +680,10 @@ class NewsDomainService:
             agg_keyword.weigh += float(keyword.weigh)
             if int(keyword.id) > 0 and int(agg_keyword.id) <= 0:
                 agg_keyword.id = int(keyword.id)
+            if int(agg_keyword.news_item_id or -1) <= 0 and current_news_item_id > 0:
+                agg_keyword.news_item_id = current_news_item_id
+            if agg_keyword.news_first_time is None and current_news_first_time is not None:
+                agg_keyword.news_first_time = current_news_first_time
 
         entity_agg: Dict[str, Entity] = {}
         for entity in entities:
@@ -619,9 +691,14 @@ class NewsDomainService:
             if not key:
                 continue
 
+            current_news_item_id = int(entity.news_item_id) if entity.news_item_id is not None else -1
+            current_news_first_time = int(entity.news_first_time) if entity.news_first_time is not None else None
+
             if key not in entity_agg:
                 entity_agg[key] = Entity(
                     id=int(entity.id) if int(entity.id) > 0 else -1,
+                    news_item_id=current_news_item_id,
+                    news_first_time=current_news_first_time,
                     name=key,
                     type=entity.type,
                     weigh=0.0,
@@ -631,6 +708,10 @@ class NewsDomainService:
             agg_entity.weigh += float(entity.weigh)
             if int(entity.id) > 0 and int(agg_entity.id) <= 0:
                 agg_entity.id = int(entity.id)
+            if int(agg_entity.news_item_id or -1) <= 0 and current_news_item_id > 0:
+                agg_entity.news_item_id = current_news_item_id
+            if agg_entity.news_first_time is None and current_news_first_time is not None:
+                agg_entity.news_first_time = current_news_first_time
 
         # 去重：name 与 term 相同，保留 weigh 总和更高的一侧
         overlap_keys = set(keyword_agg.keys()) & set(entity_agg.keys())
@@ -698,7 +779,7 @@ class NewsDomainService:
         if src.rank_timeline_obj:
             combined_timeline = target.rank_timeline_obj + src.rank_timeline_obj
             dedup_timeline: List[RankTimelineEntry] = []
-            seen: Set[Tuple[datetime, int]] = set()
+            seen: Set[Tuple[int, int]] = set()
             for point in combined_timeline:
                 if point.time is None:
                     continue
@@ -756,8 +837,8 @@ class NewsDomainService:
 
     def get_keywords_by_time_range(
         self,
-        start_time: datetime,
-        end_time: datetime,
+        start_time: int,
+        end_time: int,
     ) -> List[Keyword]:
         """根据起止时间获取关键词列表（直接查询关键词表）。"""
         return self.storage.get_keywords_by_last_time_range(
@@ -767,8 +848,8 @@ class NewsDomainService:
 
     def get_entities_by_time_range(
         self,
-        start_time: datetime,
-        end_time: datetime,
+        start_time: int,
+        end_time: int,
     ) -> List[Entity]:
         """根据起止时间获取实体列表（直接查询实体表）。"""
         return self.storage.get_entities_by_last_time_range(
@@ -776,26 +857,26 @@ class NewsDomainService:
             end_time=end_time,
         )
 
-    def get_news_list_by_keyword_ids(
+    def get_news_list_by_keywords(
         self,
-        keyword_ids: List[int],
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        keywords: List[Keyword],
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> List[NewsItem]:
-        return self.storage.get_news_list_by_keyword_ids(
-            keyword_ids=keyword_ids,
+        return self.storage.get_news_list_by_keywords(
+            keywords=keywords,
             start_time=start_time,
             end_time=end_time,
         )
 
-    def get_news_list_by_entity_ids(
+    def get_news_list_by_entities(
         self,
-        entity_ids: List[int],
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        entities: List[Entity],
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> List[NewsItem]:
-        return self.storage.get_news_list_by_entity_ids(
-            entity_ids=entity_ids,
+        return self.storage.get_news_list_by_entities(
+            entities=entities,
             start_time=start_time,
             end_time=end_time,
         )
@@ -814,8 +895,12 @@ class NewsDomainService:
         ok = self.storage.update_crawled_news_list(news_list)
         return ok
     
-    def get_news_list_by_source_title_list(self, source_title_list: List[tuple[str, str]]) -> List[NewsItem]:
-        return self.storage.get_news_list_by_source_title_list(source_title_list)
+    def get_news_list_by_source_title_list(
+        self,
+        source_title_list: List[tuple[str, str]],
+        first_time: int,
+    ) -> List[NewsItem]:
+        return self.storage.get_news_list_by_source_title_list(source_title_list, first_time)
 
     def update_news_list(self, news_list: List[NewsItem]) -> bool:
         if not news_list:
@@ -825,7 +910,7 @@ class NewsDomainService:
         if not key_list:
             return False
 
-        existing_items = self.get_news_list_by_source_title_list(key_list)
+        existing_items = self.get_news_list_by_source_title_list(key_list, FIRST_TIME_MIN)
         existing_map: Dict[Tuple[str, str], NewsItem] = {
             (item.source_id, item.title): item
             for item in existing_items
@@ -852,22 +937,22 @@ class NewsDomainService:
             return False
         return self.storage.update_news_list([item])
 
-    def get_latest_crawl_data(self, date: Optional[datetime] = None) -> Optional[NewsData]:
+    def get_latest_crawl_data(self, date: Optional[int] = None) -> Optional[NewsData]:
         return self.storage.get_latest_crawl_data(date)
 
     def get_news_list_by_firt_time_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> Optional[List[NewsItem]]:
         return self.storage.get_news_list_by_first_time_range(isAnalyzed=isAnalyzed, start_time=start_time, end_time=end_time)
 
     def get_group_news_by_first_time_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> Dict[str, List[NewsItem]]:
         news_items = self.get_news_list_by_firt_time_range(isAnalyzed=isAnalyzed, start_time=start_time, end_time=end_time)
         result = self._group_items_by_source(news_items) if news_items else {}
@@ -876,8 +961,8 @@ class NewsDomainService:
     def get_group_news_by_latest_crawl_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> Optional[Dict[str, List[NewsItem]]]:
         news_items = self.get_news_list_by_latest_crawl_range(isAnalyzed=isAnalyzed, start_time=start_time, end_time=end_time)
         if news_items is None:
@@ -888,8 +973,8 @@ class NewsDomainService:
     def get_news_list_by_latest_crawl_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> Optional[List[NewsItem]]:
         return self.storage.get_news_list_by_latest_crawl_range(isAnalyzed=isAnalyzed, start_time=start_time, end_time=end_time)
 

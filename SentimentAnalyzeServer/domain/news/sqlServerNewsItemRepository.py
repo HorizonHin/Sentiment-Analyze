@@ -1,5 +1,5 @@
 import time
-from datetime import date, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Dict, List, Optional, Tuple
 
 try:
@@ -15,7 +15,6 @@ from SentimentAnalyzeServer.domain.news.news import (
     NewsItemRepository,
     RankTimelineEntry,
 )
-from SentimentAnalyzeServer.system.datetime_utils import datetime_to_timestamp, parse_datetime_value
 
 
 class SqlServerNewsItemRepository(NewsItemRepository):
@@ -61,81 +60,63 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         # conn.setencoding(encoding='utf-8')
         return conn
 
-    def _parse_date_value(self, value: Optional[object]) -> Optional[date]:
-        if value is None or value == "":
-            return None
-        if isinstance(value, datetime):
-            return value.date()
-        if isinstance(value, date):
-            return value
-
-        text = str(value).strip()
-        for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
-            try:
-                return datetime.strptime(text, fmt).date()
-            except ValueError:
-                continue
-
-        try:
-            return datetime.fromisoformat(text.replace("T", " ")).date()
-        except ValueError:
-            return None
-
-    def _parse_datetime_value(self, value: Optional[object]) -> Optional[datetime]:
-        if value is None or value == "":
-            return None
-        if isinstance(value, date) and not isinstance(value, datetime):
-            return datetime(value.year, value.month, value.day)
-
-        parsed = parse_datetime_value(value)
-        if parsed is not None:
-            return parsed
-
-        text = str(value).strip().replace("T", " ").rstrip(".")
-        if len(text) == 10:
-            date_part = self._parse_date_value(text)
-            if date_part is not None:
-                return datetime(date_part.year, date_part.month, date_part.day)
-        return None
-
     def _to_timestamp(self, value: Optional[object], fallback_now: bool = False) -> Optional[int]:
-        dt = self._parse_datetime_value(value)
-        if dt is None:
+        if value is None:
             if not fallback_now:
                 return None
-            dt = datetime.utcnow()
-        ts = datetime_to_timestamp(dt)
-        return int(ts) if ts is not None else None
+            return int(time.time())
+        if isinstance(value, int):
+            return int(value)
+        raise TypeError(f"timestamp must be int, got {type(value).__name__}")
 
     def _to_day_timestamp(self, value: Optional[object], fallback_today: bool = False) -> Optional[int]:
-        day = self._parse_date_value(value)
-        if day is None:
-            dt = self._parse_datetime_value(value)
-            if dt is not None:
-                day = dt.date()
-        if day is None:
+        if value is None:
             if not fallback_today:
                 return None
-            day = datetime.utcnow().date()
+            now_ts = int(time.time())
+            return now_ts - (now_ts % 86400)
+        if isinstance(value, int):
+            ts = int(value)
+            return ts - (ts % 86400)
+        raise TypeError(f"timestamp must be int, got {type(value).__name__}")
 
-        day_start = datetime(day.year, day.month, day.day)
-        ts = datetime_to_timestamp(day_start)
-        return int(ts) if ts is not None else None
+    def _to_utc_datetime(self, value: Optional[object], fallback_now: bool = False) -> Optional[datetime]:
+        if value is None:
+            if not fallback_now:
+                return None
+            return datetime.now(UTC)
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                raise TypeError("analyzed_time must be timezone-aware UTC datetime")
+            return value.astimezone(UTC)
+        raise TypeError(f"analyzed_time must be datetime, got {type(value).__name__}")
+
+    def _to_db_utc_datetime(self, value: Optional[object], fallback_now: bool = False) -> Optional[datetime]:
+        dt = self._to_utc_datetime(value, fallback_now=fallback_now)
+        if dt is None:
+            return None
+        return dt.replace(tzinfo=None)
+
+    def _from_db_utc_datetime(self, value: object) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=UTC)
+            return value.astimezone(UTC)
+        raise TypeError(f"analyzed_time must be datetime from DB, got {type(value).__name__}")
 
     def _to_date_str(self, value: Optional[object]) -> str:
-        parsed = self._parse_date_value(value)
-        if parsed is None:
-            parsed_dt = self._parse_datetime_value(value)
-            parsed = parsed_dt.date() if parsed_dt is not None else None
-        if parsed is not None:
-            return parsed.strftime("%Y-%m-%d")
-        return "" if value is None else str(value)
+        if value is None:
+            return ""
+        ts = self._to_timestamp(value)
+        return time.strftime("%Y-%m-%d", time.gmtime(int(ts)))
 
     def _to_datetime_str(self, value: Optional[object]) -> str:
-        parsed = self._parse_datetime_value(value)
-        if parsed is not None:
-            return parsed.strftime("%Y-%m-%d %H:%M:%S")
-        return "" if value is None else str(value)
+        if value is None:
+            return ""
+        ts = self._to_timestamp(value)
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(ts)))
 
     def _normalize_timeline_point(self, point: object) -> Optional[Tuple[str, int]]:
         """兼容 tuple/list/dict 的 timeline 点，统一返回 (time, rank)。"""
@@ -179,6 +160,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         news_item_id = int(item.id)
         if news_item_id <= 0:
             return
+        news_first_time = self._to_timestamp(item.first_time) or self._to_timestamp(item.last_time, fallback_now=True)
 
         for point in item.rank_timeline_obj:
             # 只插入新数据（id <= 0）
@@ -192,8 +174,9 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             rank_value = point.rank if point.rank > 0 else None
 
             cursor.execute(
-                "INSERT INTO rank_timeline(news_item_id, timeline_time, rank_value) OUTPUT INSERTED.id VALUES (?, ?, ?)",
+                "INSERT INTO rank_timeline(news_item_id, news_first_time, timeline_time, rank_value) OUTPUT INSERTED.id VALUES (?, ?, ?, ?)",
                 news_item_id,
+                news_first_time,
                 timeline_time,
                 rank_value,
             )
@@ -208,7 +191,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         for item in valid_news:
             if item.id is None or int(item.id) <= 0:
                 continue
-            first_time = self._to_timestamp(item.first_time) or self._to_timestamp(item.last_time, fallback_now=True)
+            news_first_time = self._to_timestamp(item.first_time) or self._to_timestamp(item.last_time, fallback_now=True)
             for keyword in item.keywords:
                 term = str(keyword.term or "").strip()
                 if not term:
@@ -216,18 +199,20 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 keyword_weigh = float(keyword.weigh if keyword.weigh is not None else item.total_weigh)
                 if keyword.id and int(keyword.id) > 0:
                     cursor.execute(
-                        "UPDATE Keyword SET weigh = ? WHERE id = ? AND news_item_id = ?",
+                        "UPDATE Keyword SET weigh = ? WHERE id = ? AND news_item_id = ? AND news_first_time = ?",
                         keyword_weigh,
                         int(keyword.id),
                         int(item.id),
+                        news_first_time,
                     )
                     continue
 
                 cursor.execute(
-                    "UPDATE Keyword SET importance = ?, weigh = ? WHERE news_item_id = ? AND term = ?",
+                    "UPDATE Keyword SET importance = ?, weigh = ? WHERE news_item_id = ? AND news_first_time = ? AND term = ?",
                     keyword.importance,
                     keyword_weigh,
                     int(item.id),
+                    news_first_time,
                     term,
                 )
                 if cursor.rowcount and int(cursor.rowcount) > 0:
@@ -235,10 +220,10 @@ class SqlServerNewsItemRepository(NewsItemRepository):
 
                 try:
                     cursor.execute(
-                        "INSERT INTO Keyword(news_item_id, term, first_time, importance, weigh) VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO Keyword(news_item_id, news_first_time, term, importance, weigh) VALUES (?, ?, ?, ?, ?)",
                         int(item.id),
+                        news_first_time,
                         term,
-                        first_time,
                         keyword.importance,
                         keyword_weigh,
                     )
@@ -246,17 +231,18 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                     if not self._is_unique_violation(keyword_error):
                         raise
                     cursor.execute(
-                        "UPDATE Keyword SET importance = ?, weigh = ? WHERE news_item_id = ? AND term = ?",
+                        "UPDATE Keyword SET importance = ?, weigh = ? WHERE news_item_id = ? AND news_first_time = ? AND term = ?",
                         keyword.importance,
                         keyword_weigh,
                         int(item.id),
+                        news_first_time,
                         term,
                     )
 
         for item in valid_news:
             if item.id is None or int(item.id) <= 0:
                 continue
-            first_time = self._to_timestamp(item.first_time) or self._to_timestamp(item.last_time, fallback_now=True)
+            news_first_time = self._to_timestamp(item.first_time) or self._to_timestamp(item.last_time, fallback_now=True)
             for entity in item.entities:
                 entity_name = str(entity.name or "").strip()
                 entity_type = str(entity.type or "").strip()
@@ -265,17 +251,19 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 entity_weigh = float(entity.weigh if entity.weigh is not None else item.total_weigh)
                 if entity.id and int(entity.id) > 0:
                     cursor.execute(
-                        "UPDATE Entity SET weigh = ? WHERE id = ? AND news_item_id = ?",
+                        "UPDATE Entity SET weigh = ? WHERE id = ? AND news_item_id = ? AND news_first_time = ?",
                         entity_weigh,
                         int(entity.id),
                         int(item.id),
+                        news_first_time,
                     )
                     continue
 
                 cursor.execute(
-                    "UPDATE Entity SET weigh = ? WHERE news_item_id = ? AND name = ? AND entity_type = ?",
+                    "UPDATE Entity SET weigh = ? WHERE news_item_id = ? AND news_first_time = ? AND name = ? AND entity_type = ?",
                     entity_weigh,
                     int(item.id),
+                    news_first_time,
                     entity_name,
                     entity_type,
                 )
@@ -284,20 +272,21 @@ class SqlServerNewsItemRepository(NewsItemRepository):
 
                 try:
                     cursor.execute(
-                        "INSERT INTO Entity(news_item_id, name, entity_type, first_time, weigh) VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO Entity(news_item_id, news_first_time, name, entity_type, weigh) VALUES (?, ?, ?, ?, ?)",
                         int(item.id),
+                        news_first_time,
                         entity_name,
                         entity_type,
-                        first_time,
                         entity_weigh,
                     )
                 except pyodbc.Error as entity_error:
                     if not self._is_unique_violation(entity_error):
                         raise
                     cursor.execute(
-                        "UPDATE Entity SET weigh = ? WHERE news_item_id = ? AND name = ? AND entity_type = ?",
+                        "UPDATE Entity SET weigh = ? WHERE news_item_id = ? AND news_first_time = ? AND name = ? AND entity_type = ?",
                         entity_weigh,
                         int(item.id),
+                        news_first_time,
                         entity_name,
                         entity_type,
                     )
@@ -305,27 +294,21 @@ class SqlServerNewsItemRepository(NewsItemRepository):
     def _build_datetime_range_clause(
         self,
         column_name: str,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> Tuple[str, List]:
         where_clauses: List[str] = []
         params: List = []
-        trimmed = f"LTRIM(RTRIM(CONVERT(NVARCHAR(64), {column_name})))"
-        normalized_column = (
-            f"CASE WHEN RIGHT({trimmed}, 1) = '.' "
-            f"THEN LEFT({trimmed}, LEN({trimmed}) - 1) ELSE {trimmed} END"
-        )
-        converted_column = (
-            f"COALESCE("
-            f"TRY_CONVERT(BIGINT, {normalized_column}), "
-            f"DATEDIFF_BIG(SECOND, '1970-01-01', TRY_CONVERT(DATETIME2, {normalized_column}))"
-            f")"
-        )
+        converted_column = column_name
+        lower_bound_prefilter_column = "first_time" if column_name == "last_time" else None
 
         start_ts = self._to_timestamp(start_time)
         end_ts = self._to_timestamp(end_time)
 
         if start_ts is not None and end_ts is not None:
+            if lower_bound_prefilter_column is not None:
+                where_clauses.append(f"{lower_bound_prefilter_column} >= ?")
+                params.append(start_ts)
             if start_ts <= end_ts:
                 where_clauses.append(f"{converted_column} >= ? AND {converted_column} <= ?")
                 params.extend([start_ts, end_ts])
@@ -333,6 +316,9 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 where_clauses.append(f"({converted_column} >= ? OR {converted_column} <= ?)")
                 params.extend([start_ts, end_ts])
         elif start_ts is not None:
+            if lower_bound_prefilter_column is not None:
+                where_clauses.append(f"{lower_bound_prefilter_column} >= ?")
+                params.append(start_ts)
             where_clauses.append(f"{converted_column} >= ?")
             params.append(start_ts)
         elif end_ts is not None:
@@ -346,52 +332,127 @@ class SqlServerNewsItemRepository(NewsItemRepository):
     def _build_normalized_datetime_text_range_clause(
         self,
         column_name: str,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> Tuple[str, List, str]:
-        """Build a timestamp range clause compatible with BIGINT and legacy datetime text."""
-        trimmed = f"LTRIM(RTRIM(CONVERT(NVARCHAR(64), {column_name})))"
-        normalized_column = (
-            f"CASE WHEN RIGHT({trimmed}, 1) = '.' "
-            f"THEN LEFT({trimmed}, LEN({trimmed}) - 1) ELSE {trimmed} END"
+        where_sql, params = self._build_datetime_range_clause(
+            column_name=column_name,
+            start_time=start_time,
+            end_time=end_time,
         )
-        epoch_column = (
-            f"COALESCE("
-            f"TRY_CONVERT(BIGINT, {normalized_column}), "
-            f"DATEDIFF_BIG(SECOND, '1970-01-01', TRY_CONVERT(DATETIME2, {normalized_column}))"
-            f")"
+        return where_sql, params, column_name
+
+    @staticmethod
+    def _build_key_pairs_values_clause(row_key_pairs: List[tuple[int, int]]) -> Tuple[str, List[int]]:
+        values_sql = " UNION ALL ".join(["SELECT ? AS news_item_id, ? AS news_first_time"] * len(row_key_pairs))
+        params: List[int] = []
+        for news_item_id, news_first_time in row_key_pairs:
+            params.extend([int(news_item_id), int(news_first_time)])
+        return values_sql, params
+
+    def _load_related_by_composite_keys(
+        self,
+        cursor: pyodbc.Cursor,
+        row_key_pairs: List[tuple[int, int]],
+    ) -> tuple[Dict[int, List[Keyword]], Dict[int, List[Entity]], Dict[int, List[RankTimelineEntry]]]:
+        keywords_by_news: Dict[int, List[Keyword]] = {}
+        entities_by_news: Dict[int, List[Entity]] = {}
+        timeline_by_news: Dict[int, List[RankTimelineEntry]] = {}
+
+        if not row_key_pairs:
+            return keywords_by_news, entities_by_news, timeline_by_news
+
+        values_sql, pair_params = self._build_key_pairs_values_clause(row_key_pairs)
+
+        cursor.execute(
+            f"""
+            WITH kpair(news_item_id, news_first_time) AS ({values_sql})
+            SELECT k.id, k.news_item_id, k.news_first_time, k.term, k.importance, k.weigh
+            FROM Keyword k
+            INNER JOIN kpair p
+                ON k.news_item_id = p.news_item_id
+               AND k.news_first_time = p.news_first_time
+            ORDER BY k.id
+            """,
+            *pair_params,
         )
+        for keyword_row in cursor.fetchall():
+            news_item_id = int(keyword_row[1])
+            keywords_by_news.setdefault(news_item_id, []).append(
+                Keyword(
+                    id=int(keyword_row[0]),
+                    news_item_id=int(keyword_row[1]),
+                    news_first_time=self._to_timestamp(keyword_row[2]),
+                    term=str(keyword_row[3]),
+                    importance=float(keyword_row[4]),
+                    weigh=float(keyword_row[5] if keyword_row[5] is not None else 0.0),
+                )
+            )
 
-        start_ts = self._to_timestamp(start_time)
-        end_ts = self._to_timestamp(end_time)
+        cursor.execute(
+            f"""
+            WITH epair(news_item_id, news_first_time) AS ({values_sql})
+            SELECT e.id, e.news_item_id, e.news_first_time, e.name, e.entity_type, e.weigh
+            FROM Entity e
+            INNER JOIN epair p
+                ON e.news_item_id = p.news_item_id
+               AND e.news_first_time = p.news_first_time
+            ORDER BY e.id
+            """,
+            *pair_params,
+        )
+        for entity_row in cursor.fetchall():
+            news_item_id = int(entity_row[1])
+            entities_by_news.setdefault(news_item_id, []).append(
+                Entity(
+                    id=int(entity_row[0]),
+                    news_item_id=int(entity_row[1]),
+                    news_first_time=self._to_timestamp(entity_row[2]),
+                    name=str(entity_row[3]),
+                    type=str(entity_row[4]),
+                    weigh=float(entity_row[5] if entity_row[5] is not None else 0.0),
+                )
+            )
 
-        where_clauses: List[str] = []
-        params: List = []
+        cursor.execute(
+            f"""
+            WITH tpair(news_item_id, news_first_time) AS ({values_sql})
+            SELECT t.id, t.news_item_id, t.news_first_time, t.timeline_time, t.rank_value
+            FROM rank_timeline t
+            INNER JOIN tpair p
+                ON t.news_item_id = p.news_item_id
+               AND t.news_first_time = p.news_first_time
+            ORDER BY t.id
+            """,
+            *pair_params,
+        )
+        for timeline_row in cursor.fetchall():
+            timeline_id = int(timeline_row[0])
+            news_item_id = int(timeline_row[1])
+            rank_value = timeline_row[4]
+            try:
+                rank_int = int(rank_value) if rank_value is not None else 0
+            except (TypeError, ValueError):
+                rank_int = 0
+            timeline_by_news.setdefault(news_item_id, []).append(
+                RankTimelineEntry(
+                    id=timeline_id,
+                    news_item_id=news_item_id,
+                    news_first_time=self._to_timestamp(timeline_row[2]),
+                    time=self._to_timestamp(timeline_row[3]),
+                    rank=rank_int,
+                )
+            )
 
-        if start_ts is not None and end_ts is not None:
-            if start_ts <= end_ts:
-                where_clauses.append(f"{epoch_column} >= ? AND {epoch_column} <= ?")
-                params.extend([start_ts, end_ts])
-            else:
-                where_clauses.append(f"({epoch_column} >= ? OR {epoch_column} <= ?)")
-                params.extend([start_ts, end_ts])
-        elif start_ts is not None:
-            where_clauses.append(f"{epoch_column} >= ?")
-            params.append(start_ts)
-        elif end_ts is not None:
-            where_clauses.append(f"{epoch_column} <= ?")
-            params.append(end_ts)
-
-        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-        return where_sql, params, epoch_column
+        return keywords_by_news, entities_by_news, timeline_by_news
 
     def get_keywords_by_last_time_range(
         self,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> List[Keyword]:
         where_sql, params, normalized_first_time = self._build_normalized_datetime_text_range_clause(
-            column_name="first_time",
+            column_name="news_first_time",
             start_time=start_time,
             end_time=end_time,
         )
@@ -400,7 +461,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         cursor = conn.cursor()
         try:
             cursor.execute(
-                f"SELECT id, term, importance, weigh FROM Keyword WHERE {where_sql} ORDER BY {normalized_first_time} ASC, id ASC",
+                f"SELECT id, news_item_id, news_first_time, term, importance, weigh FROM Keyword WHERE {where_sql} ORDER BY {normalized_first_time} ASC, id ASC",
                 *params,
             )
             result: List[Keyword] = []
@@ -408,9 +469,11 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 result.append(
                     Keyword(
                         id=int(row[0]),
-                        term=str(row[1]),
-                        importance=float(row[2] if row[2] is not None else 0.0),
-                        weigh=float(row[3] if row[3] is not None else 0.0),
+                        news_item_id=int(row[1]),
+                        news_first_time=self._to_timestamp(row[2]),
+                        term=str(row[3]),
+                        importance=float(row[4] if row[4] is not None else 0.0),
+                        weigh=float(row[5] if row[5] is not None else 0.0),
                     )
                 )
             return result
@@ -419,11 +482,11 @@ class SqlServerNewsItemRepository(NewsItemRepository):
 
     def get_entities_by_last_time_range(
         self,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> List[Entity]:
         where_sql, params, normalized_first_time = self._build_normalized_datetime_text_range_clause(
-            column_name="first_time",
+            column_name="news_first_time",
             start_time=start_time,
             end_time=end_time,
         )
@@ -432,7 +495,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         cursor = conn.cursor()
         try:
             cursor.execute(
-                f"SELECT id, name, entity_type, weigh FROM Entity WHERE {where_sql} ORDER BY {normalized_first_time} ASC, id ASC",
+                f"SELECT id, news_item_id, news_first_time, name, entity_type, weigh FROM Entity WHERE {where_sql} ORDER BY {normalized_first_time} ASC, id ASC",
                 *params,
             )
             result: List[Entity] = []
@@ -440,45 +503,60 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 result.append(
                     Entity(
                         id=int(row[0]),
-                        name=str(row[1]),
-                        type=str(row[2]),
-                        weigh=float(row[3] if row[3] is not None else 0.0),
+                        news_item_id=int(row[1]),
+                        news_first_time=self._to_timestamp(row[2]),
+                        name=str(row[3]),
+                        type=str(row[4]),
+                        weigh=float(row[5] if row[5] is not None else 0.0),
                     )
                 )
             return result
         finally:
             conn.close()
 
-    def get_news_list_by_keyword_ids(
+    def get_news_list_by_keywords(
         self,
-        keyword_ids: List[int],
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        keywords: List[Keyword],
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> List[NewsItem]:
-        valid_ids = [int(i) for i in keyword_ids if int(i) > 0]
-        if not valid_ids:
+        if not keywords:
             return []
 
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        try:
-            id_placeholders = ",".join("?" * len(valid_ids))
-            cursor.execute(
-                f"SELECT DISTINCT term FROM Keyword WHERE id IN ({id_placeholders})",
-                *valid_ids,
-            )
-            terms = [str(row[0]).strip() for row in cursor.fetchall() if row and row[0] and str(row[0]).strip()]
-        finally:
-            conn.close()
-
-        if not terms:
+        key_pairs = {
+            (int(keyword.news_item_id), int(keyword.news_first_time))
+            for keyword in keywords
+            if isinstance(keyword, Keyword)
+            and keyword.news_item_id is not None
+            and keyword.news_first_time is not None
+            and int(keyword.news_item_id) > 0
+        }
+        if not key_pairs:
             return []
 
-        term_placeholders = ",".join("?" * len(terms))
-        where_clauses = [
-            f"id IN (SELECT DISTINCT news_item_id FROM Keyword WHERE term IN ({term_placeholders}))"
-        ]
-        params: List = list(terms)
+        return self._load_news_list_by_composite_keys(
+            row_key_pairs=list(key_pairs),
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+    def _load_news_list_by_composite_keys(
+        self,
+        row_key_pairs: List[tuple[int, int]],
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> List[NewsItem]:
+        if not row_key_pairs:
+            return []
+
+        where_clauses: List[str] = []
+        params: List = []
+
+        composite_conditions = []
+        for news_item_id, news_first_time in row_key_pairs:
+            composite_conditions.append("(id = ? AND first_time = ?)")
+            params.extend([int(news_item_id), int(news_first_time)])
+        where_clauses.append(f"({' OR '.join(composite_conditions)})")
 
         time_where_sql, time_params = self._build_datetime_range_clause(
             column_name="first_time",
@@ -493,49 +571,31 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         items = self._load_filtered_data(where_sql=where_sql, params=params)
         return items if items is not None else []
 
-    def get_news_list_by_entity_ids(
+    def get_news_list_by_entities(
         self,
-        entity_ids: List[int],
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        entities: List[Entity],
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> List[NewsItem]:
-        valid_ids = [int(i) for i in entity_ids if int(i) > 0]
-        if not valid_ids:
+        if not entities:
             return []
 
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        try:
-            id_placeholders = ",".join("?" * len(valid_ids))
-            cursor.execute(
-                f"SELECT DISTINCT name FROM Entity WHERE id IN ({id_placeholders})",
-                *valid_ids,
-            )
-            names = [str(row[0]).strip() for row in cursor.fetchall() if row and row[0] and str(row[0]).strip()]
-        finally:
-            conn.close()
-
-        if not names:
+        key_pairs = {
+            (int(entity.news_item_id), int(entity.news_first_time))
+            for entity in entities
+            if isinstance(entity, Entity)
+            and entity.news_item_id is not None
+            and entity.news_first_time is not None
+            and int(entity.news_item_id) > 0
+        }
+        if not key_pairs:
             return []
 
-        name_placeholders = ",".join("?" * len(names))
-        where_clauses = [
-            f"id IN (SELECT DISTINCT news_item_id FROM Entity WHERE name IN ({name_placeholders}))"
-        ]
-        params: List = list(names)
-
-        time_where_sql, time_params = self._build_datetime_range_clause(
-            column_name="first_time",
+        return self._load_news_list_by_composite_keys(
+            row_key_pairs=list(key_pairs),
             start_time=start_time,
             end_time=end_time,
         )
-        if time_where_sql != "1=1":
-            where_clauses.append(time_where_sql)
-            params.extend(time_params)
-
-        where_sql = " AND ".join(where_clauses)
-        items = self._load_filtered_data(where_sql=where_sql, params=params)
-        return items if items is not None else []
 
     def add_news_items(self, news_list: List[NewsItem]) -> List[NewsItem]:
         unique_items_by_key: Dict[Tuple[str, str], NewsItem] = {}
@@ -554,7 +614,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         deduplicated_news_list = list(unique_items_by_key.values())
         key_list = list(unique_items_by_key.keys())
 
-        existing_items = self.get_news_list_by_source_title_list(key_list)
+        existing_items = self.get_news_list_by_source_title_list(key_list, 0)
         existing_keys = {
             self._normalize_source_title_key(item.source_id, item.title)
             for item in existing_items
@@ -576,7 +636,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 data_date = self._to_day_timestamp(item.first_time, fallback_today=True)
                 effective_last_time = self._to_timestamp(item.last_time, fallback_now=True)
                 first_time = self._to_timestamp(item.first_time) or effective_last_time
-                analyzed_time = self._to_timestamp(item.analyzed_time)
+                analyzed_time = self._to_db_utc_datetime(item.analyzed_time)
                 try:
                     cursor.execute("""
                         INSERT INTO NewsItem (
@@ -619,15 +679,18 @@ class SqlServerNewsItemRepository(NewsItemRepository):
 
             # 查询并更新 item.id 和 last_time
             for item in deduplicated_news_list:
+                item_first_time = self._to_timestamp(item.first_time) or self._to_timestamp(item.last_time, fallback_now=True)
                 cursor.execute(
-                    "SELECT id, last_time FROM NewsItem WHERE source_id = ? AND title = ?",
+                    "SELECT id, first_time, last_time FROM NewsItem WHERE source_id = ? AND title = ? AND first_time = ?",
                     item.source_id,
                     item.title,
+                    item_first_time,
                 )
                 row = cursor.fetchone()
                 if row:
                     item.id = row[0]
-                    item.last_time = self._parse_datetime_value(row[1])
+                    item.first_time = self._to_timestamp(row[1])
+                    item.last_time = self._to_timestamp(row[2])
 
             for item in deduplicated_news_list:
                 self._upsert_rank_timeline_for_item(cursor, item)
@@ -635,7 +698,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             self._replace_keyword_and_entity(conn, deduplicated_news_list)
 
             conn.commit()
-            return self.get_news_list_by_source_title_list(key_list)
+            return self.get_news_list_by_source_title_list(key_list, 0)
         except pyodbc.Error as e:
             conn.rollback()
             print(f"添加新闻数据失败: {e}")
@@ -658,16 +721,16 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 for item in valid_news:
                     first_time = self._to_timestamp(item.first_time, fallback_now=True)
                     last_time = self._to_timestamp(item.last_time, fallback_now=True)
-                    analyzed_time = self._to_timestamp(item.analyzed_time)
+                    analyzed_time = self._to_db_utc_datetime(item.analyzed_time)
                     cursor.execute("""
                         UPDATE NewsItem SET
                             title = ?, source_id = ?, source_name = ?, event_type = ?,
                             summary = ?, latest_rank = ?, url = ?, mobile_url = ?,
                             sentiment_polarity = ?, positive_ratio = ?, negative_ratio = ?,
                             neutral_ratio = ?, optimism_score = ?, trust_score = ?,
-                            controversy_score = ?, attention_score = ?, first_time = ?,
+                            controversy_score = ?, attention_score = ?,
                             last_time = ?, analyzed_time = ?, total_weigh = ?
-                        WHERE id = ?
+                        WHERE id = ? AND first_time = ?
                     """, (
                         item.title,
                         item.source_id,
@@ -685,11 +748,11 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                         item.trust_score,
                         item.controversy_score,
                         item.attention_score,
-                        first_time,
                         last_time,
                         analyzed_time,
                         item.total_weigh,
                         int(item.id),
+                        first_time,
                     ))
 
                 for item in valid_news:
@@ -741,13 +804,14 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             cursor = conn.cursor()
             try:
                 for item in valid_news:
+                    first_time = self._to_timestamp(item.first_time, fallback_now=True)
                     last_time = self._to_timestamp(item.last_time, fallback_now=True)
                     cursor.execute(
                         """
                         UPDATE NewsItem SET
                             source_name = ?, latest_rank = ?, url = ?, mobile_url = ?,
                             last_time = ?, total_weigh = ?
-                        WHERE id = ?
+                        WHERE id = ? AND first_time = ?
                         """,
                         (
                             item.source_name,
@@ -757,6 +821,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                             last_time,
                             item.total_weigh,
                             int(item.id),
+                            first_time,
                         ),
                     )
 
@@ -764,7 +829,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                     self._upsert_rank_timeline_for_item(cursor, item)
 
                 conn.commit()
-                return self.get_news_list_by_source_title_list(key_list)
+                return self.get_news_list_by_source_title_list(key_list, 0)
             except pyodbc.DatabaseError as e:
                 conn.rollback()
                 err = str(e).lower()
@@ -784,8 +849,16 @@ class SqlServerNewsItemRepository(NewsItemRepository):
 
         return []
 
-    def get_news_list_by_source_title_list(self, source_title_list: List[tuple[str, str]]) -> List[NewsItem]:
+    def get_news_list_by_source_title_list(
+        self,
+        source_title_list: List[tuple[str, str]],
+        first_time: int,
+    ) -> List[NewsItem]:
         if not source_title_list:
+            return []
+
+        first_time_ts = self._to_timestamp(first_time)
+        if first_time_ts is None:
             return []
 
         where_conditions = []
@@ -799,7 +872,8 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         if not where_conditions:
             return []
 
-        where_sql = " OR ".join(where_conditions)
+        where_sql = f"({' OR '.join(where_conditions)}) AND first_time >= ?"
+        params.append(first_time_ts)
         items = self._load_filtered_data(where_sql=where_sql, params=params)
         return items if items is not None else []
 
@@ -807,59 +881,33 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute(f"""
+            cursor.execute(
+                f"""
                 SELECT * FROM NewsItem
                 WHERE {where_sql}
                 ORDER BY news_date ASC, last_time ASC, source_id, latest_rank ASC
-            """, *params)
+                """,
+                *params,
+            )
 
             rows = cursor.fetchall()
             if not rows:
                 return None
 
-            row_ids = [int(row[0]) for row in rows]
+            row_key_pairs: List[tuple[int, int]] = []
+            for row in rows:
+                row_id = int(row[0])
+                row_first_time = self._to_timestamp(row[18])
+                if row_first_time is None:
+                    continue
+                row_key_pairs.append((row_id, int(row_first_time)))
 
-            # 获取 keywords
-            keywords_by_news: Dict[int, List[Keyword]] = {}
-            if row_ids:
-                placeholders = ",".join("?" * len(row_ids))
-                cursor.execute(f"SELECT id, news_item_id, term, importance, weigh FROM Keyword WHERE news_item_id IN ({placeholders}) ORDER BY id", *row_ids)
-                for keyword_row in cursor.fetchall():
-                    news_item_id = int(keyword_row[1])
-                    keywords_by_news.setdefault(news_item_id, []).append(
-                        Keyword(id=int(keyword_row[0]), term=str(keyword_row[2]), importance=float(keyword_row[3]), weigh=float(keyword_row[4] if keyword_row[4] is not None else 0.0))
-                    )
-
-            # 获取 entities
-            entities_by_news: Dict[int, List[Entity]] = {}
-            if row_ids:
-                placeholders = ",".join("?" * len(row_ids))
-                cursor.execute(f"SELECT id, news_item_id, name, entity_type, weigh FROM Entity WHERE news_item_id IN ({placeholders}) ORDER BY id", *row_ids)
-                for entity_row in cursor.fetchall():
-                    news_item_id = int(entity_row[1])
-                    entities_by_news.setdefault(news_item_id, []).append(
-                        Entity(id=int(entity_row[0]), name=str(entity_row[2]), type=str(entity_row[3]), weigh=float(entity_row[4] if entity_row[4] is not None else 0.0))
-                    )
-
-            # 获取 rank_timeline
-            timeline_by_news: Dict[int, List[RankTimelineEntry]] = {}
-            if row_ids:
-                placeholders = ",".join("?" * len(row_ids))
-                cursor.execute(f"SELECT id, news_item_id, timeline_time, rank_value FROM rank_timeline WHERE news_item_id IN ({placeholders}) ORDER BY id", *row_ids)
-                for timeline_row in cursor.fetchall():
-                    timeline_id = int(timeline_row[0])
-                    news_item_id = int(timeline_row[1])
-                    rank_value = timeline_row[3]
-                    try:
-                        rank_int = int(rank_value) if rank_value is not None else 0
-                    except (TypeError, ValueError):
-                        rank_int = 0
-                    timeline_by_news.setdefault(news_item_id, []).append(
-                        RankTimelineEntry(id=timeline_id, time=self._parse_datetime_value(timeline_row[2]), rank=rank_int)
-                    )
+            keywords_by_news, entities_by_news, timeline_by_news = self._load_related_by_composite_keys(
+                cursor=cursor,
+                row_key_pairs=row_key_pairs,
+            )
 
             items: List[NewsItem] = []
-
             for row in rows:
                 source_id = str(row[3])
                 source_name = str(row[4])
@@ -885,9 +933,9 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                     trust_score=float(row[15]),
                     controversy_score=float(row[16]),
                     attention_score=float(row[17]),
-                    first_time=self._parse_datetime_value(row[18]),
-                    last_time=self._parse_datetime_value(row[19]),
-                    analyzed_time=self._parse_datetime_value(row[20]) if row[20] is not None else None,
+                    first_time=self._to_timestamp(row[18]),
+                    last_time=self._to_timestamp(row[19]),
+                    analyzed_time=self._from_db_utc_datetime(row[20]) if row[20] is not None else None,
                     total_weigh=float(row[21]),
                     rank_timeline_obj=timeline_by_news.get(news_item_id, []),
                 )
@@ -897,12 +945,18 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         finally:
             conn.close()
 
-    def get_latest_crawl_data(self, date: Optional[datetime] = None) -> Optional[NewsData]:
+    def get_latest_crawl_data(self, date: Optional[int] = None) -> Optional[NewsData]:
         date_obj = self._to_day_timestamp(date, fallback_today=True)
+        next_day_obj = int(date_obj) + 24 * 60 * 60
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT MAX(last_time) FROM NewsItem WHERE news_date = ?", date_obj)
+            cursor.execute(
+                "SELECT MAX(last_time) FROM NewsItem WHERE news_date = ? AND first_time >= ? AND first_time < ?",
+                date_obj,
+                date_obj,
+                next_day_obj,
+            )
             row = cursor.fetchone()
             if row is None or row[0] is None:
                 return None
@@ -914,53 +968,29 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
+            next_day_value = int(date_value) + 24 * 60 * 60
             cursor.execute("""
                 SELECT * FROM NewsItem
-                WHERE news_date = ? AND last_time = ?
+                WHERE news_date = ? AND last_time = ? AND first_time >= ? AND first_time < ?
                 ORDER BY source_id, latest_rank ASC
-            """, date_value, last_time)
+            """, date_value, last_time, date_value, next_day_value)
 
             rows = cursor.fetchall()
             if not rows:
                 return None
 
-            row_ids = [int(row[0]) for row in rows]
+            row_key_pairs: List[tuple[int, int]] = []
+            for row in rows:
+                row_id = int(row[0])
+                row_first_time = self._to_timestamp(row[18])
+                if row_first_time is None:
+                    continue
+                row_key_pairs.append((row_id, int(row_first_time)))
 
-            keywords_by_news: Dict[int, List[Keyword]] = {}
-            if row_ids:
-                placeholders = ",".join("?" * len(row_ids))
-                cursor.execute(f"SELECT id, news_item_id, term, importance, weigh FROM Keyword WHERE news_item_id IN ({placeholders})", *row_ids)
-                for keyword_row in cursor.fetchall():
-                    news_item_id = int(keyword_row[1])
-                    keywords_by_news.setdefault(news_item_id, []).append(
-                        Keyword(id=int(keyword_row[0]), term=str(keyword_row[2]), importance=float(keyword_row[3]), weigh=float(keyword_row[4] if keyword_row[4] is not None else 0.0))
-                    )
-
-            entities_by_news: Dict[int, List[Entity]] = {}
-            if row_ids:
-                placeholders = ",".join("?" * len(row_ids))
-                cursor.execute(f"SELECT id, news_item_id, name, entity_type, weigh FROM Entity WHERE news_item_id IN ({placeholders})", *row_ids)
-                for entity_row in cursor.fetchall():
-                    news_item_id = int(entity_row[1])
-                    entities_by_news.setdefault(news_item_id, []).append(
-                        Entity(id=int(entity_row[0]), name=str(entity_row[2]), type=str(entity_row[3]), weigh=float(entity_row[4] if entity_row[4] is not None else 0.0))
-                    )
-
-            timeline_by_news: Dict[int, List[RankTimelineEntry]] = {}
-            if row_ids:
-                placeholders = ",".join("?" * len(row_ids))
-                cursor.execute(f"SELECT id, news_item_id, timeline_time, rank_value FROM rank_timeline WHERE news_item_id IN ({placeholders}) ORDER BY id", *row_ids)
-                for timeline_row in cursor.fetchall():
-                    timeline_id = int(timeline_row[0])
-                    news_item_id = int(timeline_row[1])
-                    rank_value = timeline_row[3]
-                    try:
-                        rank_int = int(rank_value) if rank_value is not None else 0
-                    except (TypeError, ValueError):
-                        rank_int = 0
-                    timeline_by_news.setdefault(news_item_id, []).append(
-                        RankTimelineEntry(id=timeline_id, time=self._parse_datetime_value(timeline_row[2]), rank=rank_int)
-                    )
+            keywords_by_news, entities_by_news, timeline_by_news = self._load_related_by_composite_keys(
+                cursor=cursor,
+                row_key_pairs=row_key_pairs,
+            )
 
             items: Dict[str, List[NewsItem]] = {}
             id_to_name: Dict[str, str] = {}
@@ -991,17 +1021,17 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                     trust_score=float(row[15]),
                     controversy_score=float(row[16]),
                     attention_score=float(row[17]),
-                    first_time=self._parse_datetime_value(row[18]),
-                    last_time=self._parse_datetime_value(row[19]),
-                    analyzed_time=self._parse_datetime_value(row[20]) if row[20] is not None else None,
+                    first_time=self._to_timestamp(row[18]),
+                    last_time=self._to_timestamp(row[19]),
+                    analyzed_time=self._from_db_utc_datetime(row[20]) if row[20] is not None else None,
                     total_weigh=float(row[21]),
                     rank_timeline_obj=timeline_by_news.get(news_item_id, []),
                 )
                 items.setdefault(source_id, []).append(item)
 
             return NewsData(
-                date=self._parse_datetime_value(date_value),
-                last_time=self._parse_datetime_value(last_time),
+                date=self._to_timestamp(date_value),
+                last_time=self._to_timestamp(last_time),
                 items=items,
                 id_to_name=id_to_name,
                 failed_ids=[],
@@ -1012,8 +1042,8 @@ class SqlServerNewsItemRepository(NewsItemRepository):
     def get_news_list_by_latest_crawl_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> Optional[List[NewsItem]]:
         time_where_sql, params = self._build_datetime_range_clause(
             column_name="last_time",
@@ -1033,8 +1063,8 @@ class SqlServerNewsItemRepository(NewsItemRepository):
     def get_news_list_by_first_time_range(
         self,
         isAnalyzed: bool,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> Optional[List[NewsItem]]:
         time_where_sql, params = self._build_datetime_range_clause(
             column_name="first_time",
@@ -1051,39 +1081,20 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         where_sql = " AND ".join(where_clauses)
         return self._load_filtered_data(where_sql, params)
 
-    def is_first_crawl_today(self, date: Optional[datetime] = None) -> bool:
+    def is_first_crawl_today(self, date: Optional[int] = None) -> bool:
         date_obj = self._to_day_timestamp(date, fallback_today=True)
+        next_day_obj = int(date_obj) + 24 * 60 * 60
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT COUNT(1) FROM NewsItem WHERE news_date = ?", date_obj)
+            cursor.execute(
+                "SELECT COUNT(1) FROM NewsItem WHERE news_date = ? AND first_time >= ? AND first_time < ?",
+                date_obj,
+                date_obj,
+                next_day_obj,
+            )
             row = cursor.fetchone()
             return bool(row and int(row[0]) == 0)
-        finally:
-            conn.close()
-
-    def cleanup(self) -> None:
-        pass
-
-    def cleanup_old_data(self, retention_days: int) -> int:
-        if retention_days <= 0:
-            return 0
-
-        threshold_day = date.today() - timedelta(days=retention_days)
-        threshold = self._to_day_timestamp(threshold_day)
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                SELECT DISTINCT news_date FROM NewsItem
-                WHERE news_date < ?
-            """, threshold)
-
-            old_dates = [self._to_date_str(row[0]) for row in cursor.fetchall()]
-            cursor.execute("DELETE FROM NewsItem WHERE news_date < ?", threshold)
-            conn.commit()
-
-            return len(old_dates)
         finally:
             conn.close()
 
