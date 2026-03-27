@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from concurrent.futures import as_completed
 import logging
 import time
 from typing import Any, Dict, List, Optional
 
 from SentimentAnalyzeServer.system.infra import CommonThreadPool
 from SentimentAnalyzeServer.application.common import Result
+from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsDomainService, NewsItem
 from SentimentAnalyzeServer.domain.topic.topic import Topic, TopicDomainService
-
+from SentimentAnalyzeServer.application.tools.llmExecutorService import LLMExecutorService
 
 logger = logging.getLogger(__name__)
 
@@ -46,34 +48,14 @@ class TopicCacheManager_Memory(TopicCacheManager):
             return f"id:{int(topic.id)}"
         return f"obj:{id(topic)}"
 
-    @staticmethod
-    def _topic_weight(topic: Topic) -> float:
-        # Compatible with both Topic.total_weight and legacy total_weigh naming.
-        return float(getattr(topic, "total_weight", getattr(topic, "total_weigh", 0.0)) or 0.0)
-
-    @staticmethod
-    def _to_timestamp(value: Any) -> int:
-        if value is None:
-            return 0
-        if isinstance(value, int):
-            return int(value)
-        raise TypeError(f"timestamp must be int, got {type(value).__name__}")
-
-    @classmethod
-    def _topic_updated_at(cls, topic: Topic) -> int:
-        updated_at = getattr(topic, "updated_at", None)
-        if updated_at is not None:
-            return cls._to_timestamp(updated_at)
-        created_at = getattr(topic, "created_at", None)
-        return cls._to_timestamp(created_at)
 
     @classmethod
     def _eviction_score(cls, topic: Topic, now_ts: int) -> float:
-        updated_at = cls._topic_updated_at(topic)
+        updated_at = topic.updated_at
         age_seconds = max(0, now_ts - int(updated_at or 0)) if updated_at else 10**9
         age_hours = age_seconds / 3600.0
         freshness = 1.0 / (1.0 + age_hours)
-        return cls._topic_weight(topic) * freshness
+        return topic.total_weight * freshness
 
     def save_topics(self, topics: List[Topic], limit: int = 30) -> None:
         capped_limit = max(1, limit)
@@ -87,20 +69,20 @@ class TopicCacheManager_Memory(TopicCacheManager):
                 merged[key] = topic
                 continue
 
-            current_updated = self._topic_updated_at(existing)
-            incoming_updated = self._topic_updated_at(topic)
+            current_updated = existing.updated_at
+            incoming_updated = topic.updated_at
             if incoming_updated > current_updated:
                 merged[key] = topic
                 continue
-            if incoming_updated == current_updated and self._topic_weight(topic) > self._topic_weight(existing):
+            if incoming_updated == current_updated and topic.total_weight > existing.total_weight:
                 merged[key] = topic
 
         sorted_topics = sorted(
             merged.values(),
             key=lambda t: (
                 self._eviction_score(t, now_ts),
-                self._topic_updated_at(t),
-                self._topic_weight(t),
+                t.updated_at,
+                t.total_weight,
             ),
             reverse=True,
         )
@@ -126,6 +108,7 @@ class TopicAppService:
         crawl_interval_seconds: int,
         topic_config: Optional[Dict[str, Any]] = None,
         topic_cache_manager: Optional[TopicCacheManager] = None,
+        llm_title_analyzer: Optional[LLMTitleAnalyzer] = None,
     ) -> None:
         self.topic_domain_service = topic_domain_service
         self.news_domain_service = news_domain_service
@@ -133,6 +116,7 @@ class TopicAppService:
         self.topic_config = topic_config or {}
         self.topic_lookback = self._resolve_topic_lookback_window()
         self.topic_cache_manager = topic_cache_manager or TopicCacheManager_Memory()
+        self.llm_title_analyzer = llm_title_analyzer
         self.common_thread_pool = CommonThreadPool()
 
     def _resolve_topic_lookback_window(self) -> int:
@@ -390,3 +374,116 @@ class TopicAppService:
             if refreshed_topics:
                 return Result.success_result(refreshed_topics)
             return Result.failure_result("没有找到热门话题，系统正在重新计算")
+
+    @staticmethod
+    def _is_blank_text(value: Optional[str]) -> bool:
+        return not str(value or "").strip()
+
+    @staticmethod
+    def _topic_composite_key(topic: Topic) -> tuple[int, int]:
+        return (int(getattr(topic, "created_at", 0) or 0), int(getattr(topic, "id", -1) or -1))
+
+    @staticmethod
+    def _extract_topic_titles(topic: Topic, max_titles: int = 50) -> List[str]:
+        title_set: set[str] = set()
+        for items in (topic.rank_data or {}).values():
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                title = str(getattr(item, "title", "") or "").strip()
+                if title:
+                    title_set.add(title)
+                if len(title_set) >= max_titles:
+                    return list(title_set)
+        return list(title_set)
+
+    def _summarize_llm_title_for_topic(self, topic: Topic) -> str:
+        if self.llm_title_analyzer is None:
+            return ""
+        titles = self._extract_topic_titles(topic)
+        if not titles:
+            return ""
+        return str(self.llm_title_analyzer.summarize_topic_title(topic.topic, titles) or "").strip()
+
+    def backfill_missing_llm_titles(self, limit: int = 50) -> Dict[str, Any]:
+        if self.llm_title_analyzer is None:
+            return {
+                "success": False,
+                "reason": "llm_title_analyzer_not_configured",
+                "updated_count": 0,
+                "candidate_count": 0,
+            }
+
+        db_candidates = self.topic_domain_service.list_topics_missing_llm_title(limit=max(1, int(limit)))
+        if not db_candidates:
+            return {
+                "success": True,
+                "updated_count": 0,
+                "candidate_count": 0,
+            }
+
+        cache_topics = self.topic_cache_manager.get_topics()
+        cache_map = {self._topic_composite_key(topic): topic for topic in cache_topics}
+
+        candidates: List[Topic] = cache_topics
+        # for db_topic in db_candidates:   # DB暂无关联NewsItem数据，先使用Cache数据，后续如有需要再改为DB数据
+        #     key = self._topic_composite_key(db_topic)
+        #     cached = cache_map.get(key)
+        #     # Prefer cache copy because it is more likely to contain fresh rank_data for LLM summarization.
+        #     candidates.append(cached if cached is not None else db_topic)
+
+        futures = {
+            self.common_thread_pool.submit(self._summarize_llm_title_for_topic, topic): topic
+            for topic in candidates
+        }
+
+        updated_count = 0
+        skipped_count = 0
+        cache_updated_count = 0
+
+        for future in as_completed(futures):
+            topic = futures[future]
+            try:
+                llm_title = str(future.result() or "").strip()
+            except Exception as exc:
+                skipped_count += 1
+                logger.warning(exc)
+                logger.exception(
+                    "build llm_title failed. created_at=%s, id=%s, topic=%s",
+                    topic.created_at,
+                    topic.id,
+                    topic.topic,
+                )
+                continue
+
+            if not llm_title:
+                skipped_count += 1
+                continue
+
+            updated = self.topic_domain_service.update_topic_llm_title_only(
+                topic_created_at=int(topic.created_at or 0),
+                topic_id=int(topic.id or -1),
+                llm_title=llm_title,
+            )
+            if not updated:
+                skipped_count += 1
+                continue
+
+            topic.llm_title = llm_title
+            cache_topic = cache_map.get(self._topic_composite_key(topic))
+            if cache_topic is not None:
+                cache_topic.llm_title = llm_title
+                cache_updated_count += 1
+
+            updated_count += 1
+
+        if cache_topics and cache_updated_count > 0:
+            self.topic_cache_manager.save_topics(cache_topics, limit=max(1, len(cache_topics)))
+
+        return {
+            "success": True,
+            "candidate_count": len(candidates),
+            "updated_count": updated_count,
+            "skipped_count": skipped_count,
+            "cache_updated_count": cache_updated_count,
+        }

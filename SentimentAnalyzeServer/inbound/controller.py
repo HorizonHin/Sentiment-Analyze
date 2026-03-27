@@ -46,10 +46,10 @@ def create_external_controller(
 			return jsonify(Result.success_result(data).to_dict())
 		
 		except ValueError as exc:
-			return jsonify(Result.failure_result(str(exc)).to_dict()), 400
+			return jsonify(Result.failure_result(str(exc)).to_dict())
 		except Exception as exc:
 			logger.exception("Failed to build response for /news/latest-ranked")
-			return jsonify(Result.failure_result(str(exc)).to_dict()), 500
+			return jsonify(Result.failure_result(str(exc)).to_dict())
 
 	@bp.get("/topics/trending")
 	def get_trending_topics() -> object:
@@ -99,6 +99,27 @@ def create_external_controller(
 		except ValueError as exc:
 			return jsonify(Result.failure_result(str(exc)).to_dict())
 		except Exception as exc:
+			return jsonify(Result.failure_result(str(exc)).to_dict())
+
+	@bp.route("/topic/backfill-llm-title", methods=["POST", "GET"])
+	def backfill_topic_llm_title() -> object:
+		try:
+			raw_limit = request.args.get("limit")
+			if raw_limit is None:
+				payload = request.get_json(silent=True) or {}
+				raw_limit = payload.get("limit") if isinstance(payload, dict) else None
+
+			try:
+				limit = max(1, min(200, int(raw_limit))) if raw_limit is not None else 50
+			except (TypeError, ValueError):
+				return jsonify(Result.failure_result("参数 limit 无效，必须是 1-200 的整数").to_dict())
+
+			result = topic_app_service.backfill_missing_llm_titles(limit=limit)
+			if bool(result.get("success", False)):
+				return jsonify(Result.success_result(result).to_dict())
+			return jsonify(Result.failure_result(str(result.get("reason", "backfill_failed"))).to_dict())
+		except Exception as exc:
+			logger.exception("Failed to execute /topic/backfill-llm-title")
 			return jsonify(Result.failure_result(str(exc)).to_dict())
 
 	return bp

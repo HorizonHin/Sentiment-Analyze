@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,17 +14,12 @@ from SentimentAnalyzeServer.system.infra import CommonThreadPool
 from SentimentAnalyzeServer.application.dataFetcherAppService import DataFetcherAppService
 from SentimentAnalyzeServer.application.sentimentAnalyzeAppsService import SentimentAnalyzeAppService
 from SentimentAnalyzeServer.application.topicAppService import TopicAppService
-from SentimentAnalyzeServer.system.datetime_utils import (
-    datetime_to_int_timestamp,
-    format_datetime_value,
-    int_timestamp_to_datetime,
-    parse_datetime_value,
-)
 
 
 _DEFAULT_INTERVAL_SECONDS = 30 * 60
 _TOPIC_LOOKBACK_MULTIPLIER = 12.4
 logger = logging.getLogger(__name__)
+_LOCAL_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 class Scheduled:
     def __init__(
@@ -113,10 +109,17 @@ class Scheduled:
         topics = self.topic_app_service.recommend_and_cache_topics(
             start_time=start_time,
             end_time=end_time,
-            top_n=10,
-            cache_limit=15,
+            top_n=50,
+            cache_limit=50,
         )
         return {"success": True, "topic_count": len(topics)}
+
+    def run_backfill_topic_titles_once(self) -> dict[str, Any]:
+        logger.info("[scheduler] 开始执行 llm_title 托底更新任务")
+        if self.topic_app_service is None:
+            logger.error("[scheduler] topic_app_service 未配置")
+            return {"success": False, "reason": "topic_service_not_configured"}
+        return self.topic_app_service.backfill_missing_llm_titles(limit=50)
 
     def _read_last_completed_time(self) -> int | None:
         if not self.last_run_file.exists():
@@ -136,20 +139,15 @@ class Scheduled:
             except ValueError:
                 return None
 
-        dt_value = parse_datetime_value(raw)
-        if dt_value is None:
-            return None
-
         try:
-            return datetime_to_int_timestamp(dt_value)
-        except (TypeError, ValueError):
+            return int(datetime.strptime(raw, _LOCAL_TIME_FORMAT).timestamp())
+        except ValueError:
             return None
 
     def _write_last_completed_time(self, completed_at: int) -> None:
         if not isinstance(completed_at, int):
             raise TypeError(f"completed_at must be int timestamp, got {type(completed_at).__name__}")
-        completed_dt = int_timestamp_to_datetime(completed_at)
-        text = format_datetime_value(completed_dt, "%Y-%m-%d %H:%M:%S")
+        text = time.strftime(_LOCAL_TIME_FORMAT, time.localtime(completed_at))
         self.last_run_file.write_text(text, encoding="utf-8")
 
     def _wait_until_next_run(self) -> bool:
@@ -189,6 +187,11 @@ class Scheduled:
                 self._run_in_common_pool(self.run_refresh_topics_once, "topicRefresher")
             except Exception as exc:
                 print(f"[topicRefresher] 热门话题刷新失败: {exc}")
+
+            try:
+                self._run_in_common_pool(self.run_backfill_topic_titles_once, "topicTitleBackfill")
+            except Exception as exc:
+                print(f"[topicTitleBackfill] llm_title托底更新失败: {exc}")
 
             try:
                 self._run_in_common_pool(self.fetch_and_store_news_data, "dataFetcher")

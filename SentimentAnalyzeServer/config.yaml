@@ -35,7 +35,7 @@ llm_executor:
   max_workers: 4
 
 scheduler:
-  crawl_interval_minutes: 30       # 系统周期（原 CRAWL_INTERVAL_MINUTES）
+  crawl_interval_minutes: 23       # 系统周期（原 CRAWL_INTERVAL_MINUTES）
 
 common_thread_pool:
   max_workers: 8

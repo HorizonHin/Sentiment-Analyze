@@ -1,5 +1,5 @@
 import time
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 try:
@@ -19,6 +19,12 @@ from SentimentAnalyzeServer.domain.news.news import (
 
 class SqlServerNewsItemRepository(NewsItemRepository):
     """基于 SQL Server 的新闻数据存储后端。"""
+
+    _NEWSITEM_SELECT_COLUMNS = (
+        "id, news_date, title, source_id, source_name, event_type, summary, "
+        "latest_rank, url, mobile_url, sentiment_polarity, positive_ratio, negative_ratio, neutral_ratio, "
+        "optimism_score, trust_score, controversy_score, attention_score, first_time, last_time, analyzed_time, total_weigh"
+    )
 
     def __init__(
         self,
@@ -84,26 +90,20 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         if value is None:
             if not fallback_now:
                 return None
-            return datetime.now(UTC)
+            return datetime.now()
         if isinstance(value, datetime):
-            if value.tzinfo is None:
-                raise TypeError("analyzed_time must be timezone-aware UTC datetime")
-            return value.astimezone(UTC)
+            if value.tzinfo is not None:
+                return value.astimezone().replace(tzinfo=None)
+            return value
         raise TypeError(f"analyzed_time must be datetime, got {type(value).__name__}")
 
-    def _to_db_utc_datetime(self, value: Optional[object], fallback_now: bool = False) -> Optional[datetime]:
-        dt = self._to_utc_datetime(value, fallback_now=fallback_now)
-        if dt is None:
-            return None
-        return dt.replace(tzinfo=None)
-
-    def _from_db_utc_datetime(self, value: object) -> Optional[datetime]:
+    def _expect_db_datetime_or_none(self, value: object) -> Optional[datetime]:
         if value is None:
             return None
         if isinstance(value, datetime):
-            if value.tzinfo is None:
-                return value.replace(tzinfo=UTC)
-            return value.astimezone(UTC)
+            if value.tzinfo is not None:
+                return value.astimezone().replace(tzinfo=None)
+            return value
         raise TypeError(f"analyzed_time must be datetime from DB, got {type(value).__name__}")
 
     def _to_date_str(self, value: Optional[object]) -> str:
@@ -636,7 +636,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 data_date = self._to_day_timestamp(item.first_time, fallback_today=True)
                 effective_last_time = self._to_timestamp(item.last_time, fallback_now=True)
                 first_time = self._to_timestamp(item.first_time) or effective_last_time
-                analyzed_time = self._to_db_utc_datetime(item.analyzed_time)
+                analyzed_time = item.analyzed_time
                 try:
                     cursor.execute("""
                         INSERT INTO NewsItem (
@@ -721,7 +721,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 for item in valid_news:
                     first_time = self._to_timestamp(item.first_time, fallback_now=True)
                     last_time = self._to_timestamp(item.last_time, fallback_now=True)
-                    analyzed_time = self._to_db_utc_datetime(item.analyzed_time)
+                    analyzed_time = item.analyzed_time
                     cursor.execute("""
                         UPDATE NewsItem SET
                             title = ?, source_id = ?, source_name = ?, event_type = ?,
@@ -883,7 +883,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         try:
             cursor.execute(
                 f"""
-                SELECT * FROM NewsItem
+                SELECT {self._NEWSITEM_SELECT_COLUMNS} FROM NewsItem
                 WHERE {where_sql}
                 ORDER BY news_date ASC, last_time ASC, source_id, latest_rank ASC
                 """,
@@ -935,7 +935,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                     attention_score=float(row[17]),
                     first_time=self._to_timestamp(row[18]),
                     last_time=self._to_timestamp(row[19]),
-                    analyzed_time=self._from_db_utc_datetime(row[20]) if row[20] is not None else None,
+                    analyzed_time=self._expect_db_datetime_or_none(row[20]),
                     total_weigh=float(row[21]),
                     rank_timeline_obj=timeline_by_news.get(news_item_id, []),
                 )
@@ -970,7 +970,10 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         try:
             next_day_value = int(date_value) + 24 * 60 * 60
             cursor.execute("""
-                SELECT * FROM NewsItem
+                SELECT id, news_date, title, source_id, source_name, event_type, summary,
+                       latest_rank, url, mobile_url, sentiment_polarity, positive_ratio, negative_ratio, neutral_ratio,
+                       optimism_score, trust_score, controversy_score, attention_score, first_time, last_time, analyzed_time, total_weigh
+                FROM NewsItem
                 WHERE news_date = ? AND last_time = ? AND first_time >= ? AND first_time < ?
                 ORDER BY source_id, latest_rank ASC
             """, date_value, last_time, date_value, next_day_value)
@@ -1023,7 +1026,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                     attention_score=float(row[17]),
                     first_time=self._to_timestamp(row[18]),
                     last_time=self._to_timestamp(row[19]),
-                    analyzed_time=self._from_db_utc_datetime(row[20]) if row[20] is not None else None,
+                    analyzed_time=self._expect_db_datetime_or_none(row[20]),
                     total_weigh=float(row[21]),
                     rank_timeline_obj=timeline_by_news.get(news_item_id, []),
                 )

@@ -75,6 +75,8 @@ class Topic:
 		return {
 			"id": self.id,
 			"topic": self.topic,
+			"llm_title": self.llm_title,
+			"topic_type": self.topic_type,
 			"rank_data": {
 				key: [item.to_dict() for item in items]
 				for key, items in self.rank_data.items()
@@ -86,6 +88,9 @@ class Topic:
 			"sentiment": self.sentiment,
 			"news_count": self.news_count,
 			"total_weight": self.total_weight,
+			"heat_change_percent": self.heat_change_percent,
+			"stage": self.stage,
+			"source_diversity": self.source_diversity,
 			"created_at": self.created_at,
 			"updated_at": self.updated_at,
 			"version": self.version,
@@ -132,6 +137,8 @@ class Topic:
 		return cls(
 			id=int(data.get("id", -1) or -1),
 			topic=str(data.get("topic", "")),
+			llm_title=(None if data.get("llm_title") is None else str(data.get("llm_title"))),
+			topic_type=(None if data.get("topic_type") is None else str(data.get("topic_type"))),
 			rank_data=rank_data,
 			platform_distribution=platform_distribution,
 			start_time=_to_optional_int_timestamp(data.get("start_time")),
@@ -140,6 +147,8 @@ class Topic:
 			sentiment=str(data.get("sentiment", "") or ""),
 			news_count=int(data.get("news_count", 0) or 0),
 			total_weight=float(data.get("total_weight", 0.0) or 0.0),
+			heat_change_percent=float(data.get("heat_change_percent", 0.0) or 0.0),
+			stage=str(data.get("stage", "") or ""),
 			created_at=_to_optional_int_timestamp(data.get("created_at")),
 			updated_at=_to_optional_int_timestamp(data.get("updated_at")),
 			version=int(data.get("version", 0) or 0),
@@ -277,6 +286,25 @@ class TopicDomainService:
 		if self.topic_repository is None:
 			return
 		self.topic_repository.append_topic_metrics_history(topic, snapshot_time=snapshot_time)
+
+	def list_topics_missing_llm_title(self, limit: int = 50) -> List[Topic]:
+		if self.topic_repository is None:
+			return []
+		return self.topic_repository.list_topics_missing_llm_title(limit=max(1, int(limit)))
+
+	def update_topic_llm_title_only(
+		self,
+		topic_created_at: int,
+		topic_id: int,
+		llm_title: str,
+	) -> bool:
+		if self.topic_repository is None:
+			return False
+		return self.topic_repository.update_topic_llm_title_only(
+			topic_created_at=int(topic_created_at),
+			topic_id=int(topic_id),
+			llm_title=str(llm_title or "").strip(),
+		)
 
 	def get_topic_timeline_and_latest(
 		self,
@@ -492,5 +520,20 @@ class TopicRepository(ABC):
 		existing_id: int,
 	) -> Topic:
 		"""更新现有Topic快照，保持主键不变，并将旧数据加入历史."""
+		pass
+
+	@abstractmethod
+	def list_topics_missing_llm_title(self, limit: int = 50) -> List[Topic]:
+		"""列出 llm_title 为空的Topic快照。"""
+		pass
+
+	@abstractmethod
+	def update_topic_llm_title_only(
+		self,
+		topic_created_at: int,
+		topic_id: int,
+		llm_title: str,
+	) -> bool:
+		"""仅更新 llm_title 字段，不修改其他字段（包括 updated_at/version）。"""
 		pass
     

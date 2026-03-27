@@ -46,11 +46,16 @@ class LLMTitleAnalyzer:
         self.client = OpenAI(api_key=api_key, base_url=base_url
                             )
         self.prompt_file = os.path.join(os.path.dirname(__file__), "analyze_title_prompt.txt")
+        self.topic_prompt_file = os.path.join(os.path.dirname(__file__), "analyze_topic_title.txt")
         self.max_retries = 5
         self.initial_retry_delay = 1.0
 
     def _get_analyze_title_prompt(self) -> str:
         with open(self.prompt_file, "r", encoding="utf-8") as f:
+            return f.read().strip()
+
+    def _get_analyze_topic_prompt(self) -> str:
+        with open(self.topic_prompt_file, "r", encoding="utf-8") as f:
             return f.read().strip()
 
     @staticmethod
@@ -256,4 +261,69 @@ class LLMTitleAnalyzer:
                 print(f"分析标题列表时遇到异常，跳过该标题。标题: {title}，异常: {e}")
                 continue
         return results
+
+    def summarize_topic_title(self, old_topic: str, titles: list[str]) -> str:
+        cleaned_titles = [str(title).strip() for title in (titles or []) if str(title).strip()]
+        if not str(old_topic or "").strip() or not cleaned_titles:
+            return ""
+
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                title_lines = "\n".join([f"- {title}" for title in cleaned_titles[:50]])
+                messages = [
+                    {"role": "system", "content": self._get_analyze_topic_prompt()},
+                    {
+                        "role": "user",
+                        "content": (
+                            "请判断以下新标题是否仍属于旧话题，仅输出 JSON。"
+                            f"\n旧话题：{old_topic}"
+                            f"\n新标题列表：\n{title_lines}"
+                        ),
+                    },
+                ]
+
+                completion = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=0.1,
+                    response_format={"type": "json_object"},
+                    extra_body={"enable_thinking": False},
+                )
+
+                raw_content = completion.choices[0].message.content or ""
+                payload = json.loads(self._strip_json_fence(raw_content))
+                if not isinstance(payload, dict):
+                    return ""
+
+                llm_title = payload.get("llm_title", "")
+                return str(llm_title == "" and old_topic or llm_title).strip()
+            except BadRequestError as e:
+                error_code = self._extract_error_code(e)
+                if error_code == "data_inspection_failed":
+                    logger.warning(
+                        "LLM 话题标题总结被内容审核拦截，返回空字符串。old_topic=%s",
+                        old_topic,
+                    )
+                    return ""
+
+                logger.exception(
+                    "LLM 话题标题总结 BadRequest，停止重试。old_topic=%s, code=%s",
+                    old_topic,
+                    error_code,
+                )
+                raise
+            except RateLimitError:
+                if attempt < self.max_retries:
+                    wait_seconds = self.initial_retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                    time.sleep(wait_seconds)
+                    continue
+                logger.exception("LLM 话题标题总结连续触发速率限制，已超过重试次数。old_topic=%s", old_topic)
+                raise
+            except Exception:
+                if attempt < self.max_retries:
+                    wait_seconds = self.initial_retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                    time.sleep(wait_seconds)
+                    continue
+                logger.exception("LLM 话题标题总结异常，已超过重试次数。old_topic=%s", old_topic)
+                raise
 

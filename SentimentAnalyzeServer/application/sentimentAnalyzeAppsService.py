@@ -40,14 +40,6 @@ class SentimentAnalyzeAppService:
 		self.batch_save_size = 20
 		self.executor_service = LLMExecutorService(max_workers=max_workers)
 
-	@staticmethod
-	def _to_timestamp(value: Optional[Any]) -> Optional[int]:
-		if value is None:
-			return None
-		if isinstance(value, int):
-			return int(value)
-		raise TypeError(f"timestamp must be int, got {type(value).__name__}")
-
 	def _serialize_news_items(self, items: List[NewsItem]) -> List[Dict[str, Any]]:
 		return [item.to_dict() for item in items]
 
@@ -98,27 +90,25 @@ class SentimentAnalyzeAppService:
 		start_time: Optional[int],
 		end_time: Optional[int],
 	) -> List[NewsItem]:
-		start_ts = self._to_timestamp(start_time)
-		end_ts = self._to_timestamp(end_time)
-		if start_ts is None and end_ts is None:
+		if start_time is None and end_time is None:
 			return items
 
 		filtered: List[NewsItem] = []
 		for item in items:
 			if item.last_time is None:
 				continue
-			if start_ts is not None and end_ts is not None:
-				if start_ts <= end_ts:
-					if start_ts <= item.last_time <= end_ts:
+			if start_time is not None and end_time is not None:
+				if start_time <= end_time:
+					if start_time <= item.last_time <= end_time:
 						filtered.append(item)
 				else:
-					if item.last_time >= start_ts or item.last_time <= end_ts:
+					if item.last_time >= start_time or item.last_time <= end_time:
 						filtered.append(item)
-			elif start_ts is not None:
-				if item.last_time >= start_ts:
+			elif start_time is not None:
+				if item.last_time >= start_time:
 					filtered.append(item)
-			elif end_ts is not None:
-				if item.last_time <= end_ts:
+			elif end_time is not None:
+				if item.last_time <= end_time:
 					filtered.append(item)
 
 		return filtered
@@ -270,7 +260,7 @@ class SentimentAnalyzeAppService:
 				item.attention_score = float(dimensions.get("attention", 0.0))
 				item.controversy_score = float(dimensions.get("controversy", 0.0))
 
-		item.analyzed_time = datetime.now(UTC)
+		item.analyzed_time = datetime.now()
 		item.deduplicate_entities_and_keywords()
 
 	def filter_news_items_not_analyzed(self, items: List[NewsItem]) -> List[NewsItem]:
@@ -285,12 +275,10 @@ class SentimentAnalyzeAppService:
 		start_time: Optional[int] = None,
 		end_time: Optional[int] = None,
 	) -> bool:
-		start_ts = self._to_timestamp(start_time)
-		end_ts = self._to_timestamp(end_time)
 		all_items = self.news_domain_service.get_news_list_by_firt_time_range(
 			isAnalyzed=False,
-			start_time=start_ts,
-			end_time=end_ts,
+			start_time=start_time,
+			end_time=end_time,
 		)
 		if all_items is None:
 			logger.info("[ScheduledCrawler] 无可分析的数据")
@@ -307,12 +295,10 @@ class SentimentAnalyzeAppService:
 		start_time: Optional[int] = None,
 		end_time: Optional[int] = None,
 	) -> dict[str, Any]:
-		start_ts = self._to_timestamp(start_time)
-		end_ts = self._to_timestamp(end_time)
 		latest_items = self.news_domain_service.get_news_list_by_latest_crawl_range(
 			isAnalyzed=False,
-			start_time=start_ts,
-			end_time=end_ts,
+			start_time=start_time,
+			end_time=end_time,
 		)
 		if not latest_items:
 			logger.info("[ScheduledCrawler] 无可分析的数据")
@@ -331,8 +317,6 @@ class SentimentAnalyzeAppService:
 		start_time: Optional[int] = None,
 		end_time: Optional[int] = None,
 	) -> Dict[str, List[NewsItem]]:
-		start_ts = self._to_timestamp(start_time)
-		end_ts = self._to_timestamp(end_time)
 		"""按 last_time 范围获取已分析新闻，并按 source_id 分组。"""
 		cached_payload_map = self.redis.get_many(
 			[
@@ -347,14 +331,14 @@ class SentimentAnalyzeAppService:
 
 			if cached_items:
 				cached_items = self._deduplicate_news_items(cached_items)
-				cached_items = self._filter_items_by_last_time_range(cached_items, start_ts, end_ts)
+				cached_items = self._filter_items_by_last_time_range(cached_items, start_time, end_time)
 				if cached_items:
 					return self.news_domain_service.group_news_items_by_platform(cached_items)
 
 		grouped = self.news_domain_service.get_group_news_by_latest_crawl_range(
 			isAnalyzed=True,
-			start_time=start_ts,
-			end_time=end_ts,
+			start_time=start_time,
+			end_time=end_time,
 		)
 		return grouped or {}
 	

@@ -84,9 +84,10 @@ def create_app() -> Flask:
         password=mssql_password,
         driver=mssql_driver,
     )
+    llm_title_analyzer = LLMTitleAnalyzer(api_key=llm_api_key)
     sentiment_app_service = SentimentAnalyzeAppService(
         storage=storage,
-        analyzer=LLMTitleAnalyzer(api_key=llm_api_key),
+        analyzer=llm_title_analyzer,
         max_workers=llm_max_workers,
         recent_window_seconds=interval_seconds,
     )
@@ -98,6 +99,7 @@ def create_app() -> Flask:
         news_domain_service=NewsDomainService(storage),
         crawl_interval_seconds=interval_seconds,
         topic_config=config.get("topic") or {},
+        llm_title_analyzer=llm_title_analyzer,
     )
     workflow_subscribers = WorkflowEventSubscribers(
         sentiment_app_service=sentiment_app_service,

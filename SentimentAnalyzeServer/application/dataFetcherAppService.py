@@ -148,12 +148,6 @@ class DataFetcherAppService:
             id_to_name=id_to_name,
             failed_ids=failed_ids,
         )
-    
-    def _group_items_by_source(self, items: List[NewsItem]) -> Dict[str, List[NewsItem]]:
-        grouped: Dict[str, List[NewsItem]] = {}
-        for item in items:
-            grouped.setdefault(item.source_id, []).append(item)
-        return grouped
 
     def convert_crawl_results_and_save(
         self,

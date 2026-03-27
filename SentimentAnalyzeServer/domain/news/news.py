@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Dict, List, Optional, Any, Set, Tuple
 
 FIRST_TIME_MIN = 0
@@ -22,18 +22,18 @@ def parse_analyzed_datetime(value: Any) -> Optional[datetime]:
     if value is None:
         return None
     if isinstance(value, datetime):
-        if value.tzinfo is None:
-            raise TypeError("analyzed_time must be timezone-aware UTC datetime")
-        return value.astimezone(UTC)
+        if value.tzinfo is not None:
+            return value.astimezone().replace(tzinfo=None)
+        return value
     if isinstance(value, str):
         text = value.strip()
         if not text:
             return None
         iso_text = text[:-1] + "+00:00" if text.endswith("Z") else text
         parsed = datetime.fromisoformat(iso_text)
-        if parsed.tzinfo is None:
-            raise TypeError("analyzed_time string must include timezone")
-        return parsed.astimezone(UTC)
+        if parsed.tzinfo is not None:
+            return parsed.astimezone().replace(tzinfo=None)
+        return parsed
     raise TypeError(f"analyzed_time must be datetime or ISO datetime string, got {type(value).__name__}")
 
 
@@ -41,7 +41,7 @@ def format_analyzed_datetime(value: Any) -> Optional[str]:
     dt = parse_analyzed_datetime(value)
     if dt is None:
         return None
-    return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return dt.isoformat()
 
 @dataclass
 class Entity:
@@ -115,7 +115,7 @@ class NewsItem:
     # 统计信息（用于分析）
     first_time: Optional[int] = None                # 首次出现时间戳（秒）
     last_time: Optional[int] = None                 # 最后出现时间戳（秒）
-    analyzed_time: Optional[datetime] = None         # 分析时间（UTC+0 datetime）
+    analyzed_time: Optional[datetime] = None         # 分析时间（本地/无时区 datetime）
     total_weigh: float = 0.0            # 综合权重
     rank_timeline_obj: List[RankTimelineEntry] = field(default_factory=list)  # 完整排名时间线对象
                                         # 格式: [("09:30", 1), ("10:00", 2), ...]
@@ -648,7 +648,7 @@ class NewsDomainService:
         self,
         start_time: int,
         end_time: int,
-        top_n: int = 10,
+        top_n: int = 50,
     ) -> Tuple[List[Keyword], List[Entity]]:
         """
         - 通过 keyword 和 entity 推荐热点 topic 候选

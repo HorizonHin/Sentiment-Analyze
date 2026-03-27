@@ -83,6 +83,8 @@ class SqlServerTopicRepository(TopicRepository):
                     created_at BIGINT NOT NULL DEFAULT DATEDIFF_BIG(SECOND, '1970-01-01', SYSUTCDATETIME()),
                     id BIGINT IDENTITY(1,1) NOT NULL,
                     topic NVARCHAR(300) NOT NULL,
+                    llm_title NVARCHAR(300) NULL,
+                    topic_type NVARCHAR(64) NULL,
                     platform_distribution_json NVARCHAR(MAX) NOT NULL DEFAULT '[]',
                     rank_data_json NVARCHAR(MAX) NOT NULL DEFAULT '{}',
                     start_time BIGINT NULL,
@@ -110,6 +112,18 @@ class SqlServerTopicRepository(TopicRepository):
                 """
                 IF COL_LENGTH('Topic', 'rank_data_json') IS NULL
                     ALTER TABLE Topic ADD rank_data_json NVARCHAR(MAX) NOT NULL DEFAULT '{}'
+                """
+            )
+            cursor.execute(
+                """
+                IF COL_LENGTH('Topic', 'llm_title') IS NULL
+                    ALTER TABLE Topic ADD llm_title NVARCHAR(300) NULL
+                """
+            )
+            cursor.execute(
+                """
+                IF COL_LENGTH('Topic', 'topic_type') IS NULL
+                    ALTER TABLE Topic ADD topic_type NVARCHAR(64) NULL
                 """
             )
 
@@ -230,6 +244,8 @@ class SqlServerTopicRepository(TopicRepository):
             created_at=SqlServerTopicRepository._value_to_ts(row.created_at),
             id=int(row.id),
             topic=str(row.topic or ""),
+            llm_title=(None if SqlServerTopicRepository._row_get(row, "llm_title") is None else str(SqlServerTopicRepository._row_get(row, "llm_title") or "")),
+            topic_type=(None if SqlServerTopicRepository._row_get(row, "topic_type") is None else str(SqlServerTopicRepository._row_get(row, "topic_type") or "")),
             platform_distribution=platform_distribution,
             rank_data=rank_data,
             start_time=SqlServerTopicRepository._value_to_ts(row.start_time),
@@ -257,15 +273,17 @@ class SqlServerTopicRepository(TopicRepository):
             cursor.execute(
                 """
                 INSERT INTO Topic (
-                    created_at, topic, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
+                    created_at, topic, llm_title, topic_type, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
                     sentiment, news_count, total_weight, heat_change_percent, stage,
                     updated_at, version
                 )
                 OUTPUT INSERTED.id
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 created_at_ts,
                 topic.topic,
+                (None if topic.llm_title is None else str(topic.llm_title)),
+                (None if topic.topic_type is None else str(topic.topic_type)),
                 self._serialize_platform_distribution(topic),
                 self._serialize_rank_data(topic),
                 self._to_optional_ts(topic.start_time),
@@ -308,7 +326,12 @@ class SqlServerTopicRepository(TopicRepository):
                     sentiment, news_count, total_weight, heat_change_percent,
                     stage, updated_at, version, id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM topic_metrics_history
+                    WHERE created_at = ? AND id = ? AND updated_at = ?
+                )
                 """,
                 created_at_ts,
                 topic.topic,
@@ -323,6 +346,9 @@ class SqlServerTopicRepository(TopicRepository):
                 write_time_ts,
                 int(topic.version or 0),
                 int(topic.id),
+                created_at_ts,
+                int(topic.id),
+                write_time_ts,
             )
             conn.commit()
         finally:
@@ -336,7 +362,7 @@ class SqlServerTopicRepository(TopicRepository):
             cursor.execute(
                 """
                 SELECT TOP 1
-                    created_at, id, topic, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
+                    created_at, id, topic, llm_title, topic_type, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
                     sentiment, news_count, total_weight, heat_change_percent,
                     stage, updated_at, version
                 FROM Topic
@@ -405,7 +431,7 @@ class SqlServerTopicRepository(TopicRepository):
             cursor.execute(
                 """
                 SELECT TOP 1
-                    created_at, id, topic, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
+                    created_at, id, topic, llm_title, topic_type, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
                     sentiment, news_count, total_weight, heat_change_percent,
                     stage, updated_at, version
                 FROM Topic
@@ -440,7 +466,7 @@ class SqlServerTopicRepository(TopicRepository):
                 cursor.execute(
                     """
                     SELECT TOP (?)
-                        created_at, id, topic, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
+                        created_at, id, topic, llm_title, topic_type, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
                         sentiment, news_count, total_weight, heat_change_percent,
                         stage, updated_at, version
                     FROM Topic
@@ -455,7 +481,7 @@ class SqlServerTopicRepository(TopicRepository):
                 cursor.execute(
                     """
                     SELECT TOP (?)
-                        created_at, id, topic, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
+                        created_at, id, topic, llm_title, topic_type, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
                         sentiment, news_count, total_weight, heat_change_percent,
                         stage, updated_at, version
                     FROM Topic
@@ -503,7 +529,7 @@ class SqlServerTopicRepository(TopicRepository):
             cursor.execute(
                 """
                 SELECT TOP 1
-                    created_at, id, topic, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
+                    created_at, id, topic, llm_title, topic_type, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
                     sentiment, news_count, total_weight, heat_change_percent,
                     stage, updated_at, version
                 FROM Topic
@@ -566,6 +592,8 @@ class SqlServerTopicRepository(TopicRepository):
                 """
                 UPDATE Topic
                 SET
+                    llm_title = ?,
+                    topic_type = ?,
                     platform_distribution_json = ?,
                     rank_data_json = ?,
                     start_time = ?,
@@ -580,6 +608,8 @@ class SqlServerTopicRepository(TopicRepository):
                     version = version + 1
                 WHERE created_at = ? AND id = ?
                 """,
+                (None if topic.llm_title is None else str(topic.llm_title)),
+                (None if topic.topic_type is None else str(topic.topic_type)),
                 self._serialize_platform_distribution(topic),
                 self._serialize_rank_data(topic),
                 self._to_optional_ts(topic.start_time),
@@ -605,7 +635,12 @@ class SqlServerTopicRepository(TopicRepository):
                         sentiment, news_count, total_weight, heat_change_percent,
                         stage, updated_at, version
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM topic_metrics_history
+                        WHERE created_at = ? AND id = ? AND updated_at = ?
+                    )
                     """,
                     created_at_ts,
                     int(existing_id),
@@ -620,6 +655,9 @@ class SqlServerTopicRepository(TopicRepository):
                     str(old_row.stage or ""),
                     self._value_to_ts(old_row.updated_at),
                     int(old_row.version or 0),
+                    created_at_ts,
+                    int(existing_id),
+                    self._value_to_ts(old_row.updated_at),
                 )
                 conn.commit()
 
@@ -629,5 +667,51 @@ class SqlServerTopicRepository(TopicRepository):
             topic.updated_at = updated_at_ts
             topic.version = (int(old_row.version or 0) + 1) if old_row else (int(topic.version or 0) + 1)
             return topic
+        finally:
+            conn.close()
+
+    def list_topics_missing_llm_title(self, limit: int = 50) -> List[Topic]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT TOP (?)
+                    created_at, id, topic, llm_title, topic_type, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
+                    sentiment, news_count, total_weight, heat_change_percent,
+                    stage, updated_at, version
+                FROM Topic
+                WHERE LTRIM(RTRIM(COALESCE(llm_title, ''))) = ''
+                ORDER BY updated_at DESC, created_at DESC, id DESC
+                """,
+                max(1, int(limit)),
+            )
+            rows = cursor.fetchall()
+            return [self._from_topic_row(row) for row in rows]
+        finally:
+            conn.close()
+
+    def update_topic_llm_title_only(
+        self,
+        topic_created_at: int,
+        topic_id: int,
+        llm_title: str,
+    ) -> bool:
+        created_at_ts = self._to_ts(topic_created_at)
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE Topic
+                SET llm_title = ?
+                WHERE created_at = ? AND id = ?
+                """,
+                str(llm_title or "").strip(),
+                created_at_ts,
+                int(topic_id),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0) > 0
         finally:
             conn.close()
