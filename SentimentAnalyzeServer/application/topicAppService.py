@@ -14,18 +14,19 @@ from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyz
 from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsDomainService, NewsItem
 from SentimentAnalyzeServer.domain.topic.topic import Topic, TopicDomainService
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmExecutorService import LLMExecutorService
-logger = logging.getLogger(__name__)
+
+
 
 
 _TOPIC_LOOKBACK_MULTIPLIER = 12.2
 
 
 class TopicCacheManager(ABC):
-    # 热门话题数量上限暂时定为30个
+    # 热门话题数量上限暂时定为60个
 
 
     @abstractmethod
-    def save_or_update_topics_cache(self, topics: List[Topic], limit: int = 30) -> None:
+    def save_or_update_topics_cache(self, topics: List[Topic], limit: int = 60) -> None:
         """保存或更新话题列表，根据"""
         pass
 
@@ -59,7 +60,7 @@ class TopicCacheManager_Memory(TopicCacheManager):
         freshness = 1.0 / (1.0 + age_hours)
         return topic.total_weight * freshness
 
-    def save_or_update_topics_cache(self, topics: List[Topic], limit: int = 30) -> None:
+    def save_or_update_topics_cache(self, topics: List[Topic], limit: int = 60) -> None:
         capped_limit = max(1, limit)
         now_ts = int(time.time())
 
@@ -140,6 +141,7 @@ class TopicAppService:
         topic_cache_manager: Optional[TopicCacheManager] = None,
         llm_title_analyzer: Optional[LLMTitleAnalyzer] = None,
         first_time_lookback_seconds: int = 7 * 24 * 3600,
+        logger: logging.Logger = None,
     ) -> None:
         self.topic_domain_service = topic_domain_service
         self.news_domain_service = news_domain_service
@@ -152,7 +154,18 @@ class TopicAppService:
         self.event_manager = EventManager()
         self.common_thread_pool = CommonThreadPool()
         self.first_time_lookback_seconds = max(60, int(first_time_lookback_seconds))
+
+        self.logger = logger
         self._init_topic_persist_queue()
+
+        # 注入所有默认值
+        topic_conf = self.topic_config
+        self.default_top_n = int(topic_conf.get("default_top_n", 60))
+        self.default_cache_limit = int(topic_conf.get("default_cache_limit", 60))
+        self.default_history_limit = int(topic_conf.get("default_history_limit", 100))
+        # days_lookback自动由first_time_lookback_seconds计算
+        self.days_lookback_days = max(1, int(self.first_time_lookback_seconds // 86400))
+        self.default_days_lookback = int(topic_conf.get("default_days_lookback", self.days_lookback_days))
 
     def _resolve_topic_lookback_window(self) -> int:
         raw_hours = (self.topic_config or {}).get("lookback_hours")
@@ -265,15 +278,31 @@ class TopicAppService:
         start_time: Optional[int],
         end_time: Optional[int],
         news_first_time: Optional[int] = None,
-        top_n: int = 30,
-        cache_limit: int = 30,
+        top_n: int = None,
+        cache_limit: int = None,
     ) -> List[Topic]:
+        # --- MyRedis 计时器逻辑，5分钟内重复调用直接 return ---
+        try:
+            from SentimentAnalyzeServer.system.infra import MyRedis
+        except ImportError:
+            from system.infra import MyRedis
         """
         - start_time/end_time: keyword/entity 的 last_time 查询区间
         - news_first_time: NewsItem 分区下界（默认: 当前时间 - topic 默认窗口）
         - 调用方法二构建 topic 列表
         - 通过 TopicCacheManager 保存
         """
+        redis = MyRedis()
+        redis_key = "recommend_and_cache_topics:last_run"
+        cooldown = 300  # 5分钟
+        now_ts = int(time.time())
+
+        is_locked = redis.set(redis_key, now_ts, ttl_seconds=cooldown, nx=True)
+        if not is_locked:
+            if self.logger:
+                self.logger.info(f"recommend_and_cache_topics: 距离上次执行不足5分钟，直接返回，无需重复执行。now={now_ts}")
+            return []
+
         resolved_end_time = int(end_time) if end_time is not None else int(time.time())
         resolved_start_time = int(start_time) if start_time is not None else (resolved_end_time - self.topic_lookback)
         if resolved_start_time > resolved_end_time:
@@ -287,6 +316,11 @@ class TopicAppService:
         if resolved_news_first_time > resolved_end_time:
             resolved_news_first_time = resolved_end_time - self.topic_lookback
 
+        # 使用默认配置
+        if top_n is None:
+            top_n = self.default_top_n
+        if cache_limit is None:
+            cache_limit = self.default_cache_limit
         recommended_keywords, recommended_entities = self.news_domain_service.recommend_hot_term_items_by_time_range(
             start_time=resolved_start_time,
             end_time=resolved_end_time,
@@ -301,29 +335,50 @@ class TopicAppService:
         )
 
 
-        enriched_topics: List[Topic] = []
+        updated_topics: List[Topic] = []
         for new_status_topic in topics:
             new_status_topic.updated_at = int(time.time())
             # 1. 先根据topic name查找缓存或DB中的Topic（Topic DB）
             topic_name = str(new_status_topic.topic or "").strip()
             topic_db_match = self.topic_cache_manager.get_topic_by_name(topic_name)
             if topic_db_match is None:
-                topic_db_match = self.topic_domain_service.find_recent_topic_by_name(topic_name, days_lookback=3)
+                topic_db_match = self.topic_domain_service.find_recent_topic_by_name(topic_name, days_lookback=self.default_days_lookback)
             # 2. 用Topic DB主键查topic_metrics_history
             if topic_db_match is not None: # update 操作
                 new_status_topic = self.topic_domain_service.applyNewStatus(new_status_topic, topic_db_match)
                 #计算heat_change_percent和stage
                 history = self.topic_domain_service.get_topic_history(new_status_topic)
+                if not history:
+                    if self.logger:
+                        self.logger.warning(
+                        "话题没有历史数据. topic_name=%s, topic_id=%s",
+                        topic_name,
+                        topic_db_match.id,
+                    )
+                    self.put_topic_to_persist_queue(new_status_topic)
+                    continue
+                if (new_status_topic.updated_at - history[-1].updated_at) < 300: #小于5分钟，更新太快
+                    #再防一手更新太快的异常状况，并log
+                    if self.logger:
+                        self.logger.warning(
+                        "话题更新太快，可能导致heat_change_percent和stage计算不准确. topic_name=%s, topic_id=%s, updated_at=%s, last_history_updated_at=%s",
+                        topic_name,
+                        topic_db_match.id,
+                        new_status_topic.updated_at,
+                        history[-1].updated_at if history else None,
+                    )
+                    continue
                 new_status_topic = self.topic_domain_service.calculate_heat_change_and_stage(new_status_topic, history)
             # 生产者：入队，由消费者批量add/update
             self.put_topic_to_persist_queue(new_status_topic)
-            enriched_topics.append(new_status_topic)
+            updated_topics.append(new_status_topic)
 
-        self.topic_cache_manager.save_or_update_topics_cache(topics, limit=cache_limit)
+        self.topic_cache_manager.save_or_update_topics_cache(updated_topics, limit=cache_limit)
         
-        logger.info(
+        if self.logger:
+            self.logger.info(
             "Topic recommendation cached successfully. topic_count=%s, top_n=%s, cache_limit=%s",
-            len(topics),
+            len(updated_topics),
             top_n,
             cache_limit,
         )
@@ -331,7 +386,7 @@ class TopicAppService:
         self.event_manager.publish(
             EVENT_TOPIC_RANK_UPDATED,
             {
-                "topic_count": len(topics),
+                "topic_count": len(updated_topics),
                 "top_n": int(top_n),
                 "cache_limit": int(cache_limit),
                 "start_time": int(resolved_start_time),
@@ -340,19 +395,21 @@ class TopicAppService:
             },
         )
         
-        return topics
+        return updated_topics
 
     def get_topic_snapshot_detail(
         self,
         topic_created_at: int,
         topic_id: int,
-        history_limit: int = 100,
+        history_limit: int = None,
     ) -> Result:
         cached_topic = self.topic_cache_manager.get_topic_by_composite_key(
             topic_created_at=topic_created_at,
             topic_id=topic_id,
         )
 
+        if history_limit is None:
+            history_limit = self.default_history_limit
         timeline = self.topic_domain_service.get_topic_timeline_and_latest(
             topic_created_at=topic_created_at,
             topic_id=int(topic_id),
@@ -386,16 +443,16 @@ class TopicAppService:
             return Result.success_result(cache_topics)
         # 无缓存时，查库
         now = int(time.time())
-        # 默认查最近24小时
-        updated_at_start = now - 86400
+        # 默认查最近6小时
+        updated_at_start = now - self.topic_lookback
         topics = self.topic_domain_service.list_topics_by_time_range(
             created_at_start=now - self.first_time_lookback_seconds,
             updated_at_start=updated_at_start,
             updated_at_end=now,
-            limit=30,
+            limit=self.default_top_n,
         )
         if topics:
-            self.topic_cache_manager.save_or_update_topics_cache(topics, limit=30)
+            self.topic_cache_manager.save_or_update_topics_cache(topics, limit=self.default_cache_limit)
             return Result.success_result(topics)
         else:
             self.common_thread_pool.submit(self.recommend_and_cache_topics)
@@ -439,14 +496,15 @@ class TopicAppService:
                 "updated_count": 0,
                 "candidate_count": 0,
             }
-
-        db_candidates = self.topic_domain_service.list_topics_missing_llm_title(limit=max(1, int(limit)))
-        if not db_candidates:
-            return {
-                "success": True,
-                "updated_count": 0,
-                "candidate_count": 0,
-            }
+        
+        # 暂时不直接查DB了，改为从Cache里找符合条件的Topic进行补全，避免DB查询性能问题。后续如有需要再改回DB查询。
+        # db_candidates = self.topic_domain_service.list_topics_missing_llm_title(limit=max(1, int(limit)))
+        # if not db_candidates:
+        #     return {
+        #         "success": True,
+        #         "updated_count": 0,
+        #         "candidate_count": 0,
+        #     }
 
         cache_topics = self.topic_cache_manager.get_topics()
         cache_map = {self._topic_composite_key(topic): topic for topic in cache_topics}
@@ -477,8 +535,9 @@ class TopicAppService:
                 llm_title = str(future.result() or "").strip()
             except Exception as exc:
                 skipped_count += 1
-                logger.warning(exc)
-                logger.exception(
+                if self.logger:
+                    self.logger.warning(exc)
+                    self.logger.exception(
                     "build llm_title failed. created_at=%s, id=%s, topic=%s",
                     topic.created_at,
                     topic.id,

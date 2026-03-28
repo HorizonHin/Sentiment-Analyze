@@ -260,6 +260,8 @@ class SentimentAnalyzeAppService:
 		item.deduplicate_entities_and_keywords()
 
 	def filter_news_items_not_analyzed(self, items: List[NewsItem]) -> List[NewsItem]:
+		if not items:
+			return []
 		return [
 			item
 			for item in items

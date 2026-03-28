@@ -150,16 +150,25 @@ class MyRedis:
                     cls._instance._lock = threading.RLock()
         return cls._instance
 
-    def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
+    def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None, nx: bool = False) -> bool:
         expires_at: Optional[float] = None
         if ttl_seconds is not None and ttl_seconds > 0:
             expires_at = time.time() + ttl_seconds
 
-        with self._lock:
-            self._cache[key] = {
-                "value": deepcopy(value),
-                "expires_at": expires_at,
-            }
+        try:
+            with self._lock:
+                # 1. 检查是否存在（且处理过期）
+                current_val = self.get(key) # get 方法内部已经处理了过期逻辑
+                if nx and current_val is not None:
+                    return False
+                self._cache[key] = {
+                    "value": deepcopy(value),
+                    "expires_at": expires_at,
+                }
+            return True
+        except Exception as e:
+            logger.error(f"Redis set error: {e}")
+            return False
 
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
@@ -200,11 +209,16 @@ class EventManager:
                     cls._instance._common_thread_pool = CommonThreadPool()
         return cls._instance
 
-    def subscribe(self, event_name: str, handler: Callable[[Dict[str, Any]], None]) -> None:
+    def subscribe(self, event_name: str, handler: Callable) -> None:
         with self._lock:
-            handlers = self._subscribers.setdefault(event_name, [])
-            if handler not in handlers:
-                handlers.append(handler)
+           handlers = self._subscribers.setdefault(event_name, [])
+            # 获取函数的唯一标识（模块名 + 函数名）
+           handler_key = f"{handler.__module__}.{handler.__name__}"
+           # 检查是否已经存在同名的 handler
+           exists = any(f"{h.__module__}.{h.__name__}" == handler_key for h in handlers)
+           if not exists:
+               handlers.append(handler)
+               logger.info(f"Successfully subscribed: {handler_key}")
 
     def unsubscribe(self, event_name: str, handler: Callable[[Dict[str, Any]], None]) -> None:
         with self._lock:

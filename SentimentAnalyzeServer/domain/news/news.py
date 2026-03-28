@@ -32,7 +32,7 @@ def parse_analyzed_datetime(value: Any) -> Optional[datetime]:
         return parsed
     raise TypeError(f"analyzed_time must be datetime or ISO datetime string, got {type(value).__name__}")
 
-@dataclass
+@dataclass(slots=True)
 class Entity:
     id: int = field(default=-1)
     news_item_id: int = field(default=-1)
@@ -43,7 +43,7 @@ class Entity:
     weigh: float = 0.0
 
 
-@dataclass
+@dataclass(slots=True)
 class Keyword:
     id: int = field(default=-1)
     news_item_id: int = field(default=-1)
@@ -54,7 +54,7 @@ class Keyword:
     weigh: float = 0.0
 
 
-@dataclass
+@dataclass(slots=True)
 class RankTimelineEntry:
     id: int = field(default=-1)
     news_item_id: int = field(default=-1)
@@ -78,7 +78,7 @@ class RankTimelineEntry:
     def rank_value(self, value: int) -> None:
         self.rank = value
 
-@dataclass
+@dataclass(slots=True)
 class NewsItem:
     """新闻条目数据模型（热榜数据）"""
 
@@ -305,7 +305,7 @@ class NewsItem:
             rank_timeline_obj=cls._parse_rank_timeline(data.get("rank_timeline", [])),
         )
 
-@dataclass
+@dataclass(slots=True)
 class NewsData:
     """
     新闻数据集合

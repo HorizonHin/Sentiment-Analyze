@@ -216,7 +216,7 @@ class SqlServerTopicRepository(TopicRepository):
                     stage, updated_at, version
                 FROM Topic
                 {where_clause}
-                ORDER BY updated_at DESC, total_weight DESC
+                ORDER BY  total_weight DESC,updated_at DESC
             """
             conn = self._get_connection()
             cursor = conn.cursor()

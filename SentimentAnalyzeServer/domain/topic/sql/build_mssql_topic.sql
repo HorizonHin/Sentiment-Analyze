@@ -91,3 +91,5 @@ AS PARTITION pf_topic_history_time
 ALL TO ([PRIMARY]);
 -- 3) Rebuild clustered index / PK of topic_metrics_history onto ps_topic_history_time(snapshot_time).
 -- Keep the nonclustered indexes aligned to avoid partition elimination loss.
+
+ALTER DATABASE sentiment_analyze SET READ_COMMITTED_SNAPSHOT ON;

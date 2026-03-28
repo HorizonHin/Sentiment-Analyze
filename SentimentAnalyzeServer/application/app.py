@@ -18,6 +18,7 @@ from SentimentAnalyzeServer.application.common import Result
 from SentimentAnalyzeServer.application.dataFetcherAppService import DataFetcherAppService
 from SentimentAnalyzeServer.application.sentimentAnalyzeAppsService import SentimentAnalyzeAppService
 from SentimentAnalyzeServer.application.topicAppService import TopicAppService
+from SentimentAnalyzeServer.application.logging_config import get_app_logger
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import NewsDomainService
 from SentimentAnalyzeServer.domain.news.sqlServerNewsItemRepository import SqlServerNewsItemRepository
@@ -29,7 +30,10 @@ from SentimentAnalyzeServer.system.infra import CommonThreadPool
 
 
 def create_app() -> Flask:
+
     app = Flask(__name__)
+    # 初始化日志，清空原有内容
+    app_logger = get_app_logger()
 
     root_dir = Path(__file__).resolve().parent.parent
     config_path = root_dir / "config.yaml"
@@ -109,6 +113,8 @@ def create_app() -> Flask:
         crawl_interval_seconds=interval_seconds,
         topic_config=config.get("topic") or {},
         llm_title_analyzer=llm_title_analyzer,
+        first_time_lookback_seconds=first_time_lookback_seconds,
+        logger=app_logger,
     )
     workflow_subscribers = WorkflowEventSubscribers(
         sentiment_app_service=sentiment_app_service,
@@ -145,13 +151,12 @@ def create_app() -> Flask:
 
     atexit.register(_shutdown_scheduler)
 
-    @app.get("/topic/recomend")
-    def topic_recommend():
-        return topic_app_service.recommend_and_cache_topics()
-
     @app.get("/health")
     def health() -> Any:
         return jsonify(Result.success_result({"status": "ok"}).to_dict())
+    
+    
+    
     return app
 
     
