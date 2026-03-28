@@ -101,23 +101,6 @@ class Scheduled:
             end_time=end_time,
         )
 
-    def run_refresh_topics_once(self) -> dict[str, Any]:
-        logger.info("[scheduler] 开始执行刷新话题任务")
-        if self.topic_app_service is None:
-            logger.error("[scheduler] topic_app_service 未配置")
-            return {"success": False, "reason": "topic_service_not_configured"}
-
-        lookback_seconds = self.interval_seconds * _TOPIC_LOOKBACK_MULTIPLIER
-        end_time = int(time.time())
-        start_time = end_time - int(lookback_seconds)
-        topics = self.topic_app_service.recommend_and_cache_topics(
-            start_time=start_time,
-            end_time=end_time,
-            top_n=50,
-            cache_limit=50,
-        )
-        return {"success": True, "topic_count": len(topics)}
-
     def _read_last_completed_time(self) -> int | None:
         if not self.last_run_file.exists():
             return None
@@ -179,11 +162,6 @@ class Scheduled:
                 self._run_in_common_pool(self.run_analyze_pending_once, "dataAnalyzer")
             except Exception as exc:
                 print(f"[dataAnalyzer] 补分析任务执行失败: {exc}")
-
-            try:
-                self._run_in_common_pool(self.run_refresh_topics_once, "topicRefresher")
-            except Exception as exc:
-                print(f"[topicRefresher] 热门话题刷新失败: {exc}")
 
             try:
                 self._run_in_common_pool(self.fetch_and_store_news_data, "dataFetcher")

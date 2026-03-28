@@ -12,6 +12,7 @@ STAGE_SET = {
 	"Growth",
 	"Climax",
 	"Decline",
+	"Maturity",
 }
 
 def now_timestamp() -> int:
@@ -158,6 +159,26 @@ class Topic:
 		)
 
 class TopicDomainService:
+
+	def add_topics(self, topics: List["Topic"]) -> List["Topic"]:
+			if self.topic_repository is None:
+				return topics
+			persisted = self.topic_repository.add_topics(topics)
+			self.append_topics_metrics_histories(persisted)
+			return persisted
+
+	def append_topics_metrics_histories(self, topics: List["Topic"], snapshot_time: Optional[int] = None) -> None:
+			if self.topic_repository is None:
+				return
+			self.topic_repository.append_topic_metrics_histories(topics)
+
+	def update_topics(self, topics: List["Topic"]) -> List["Topic"]:
+			if self.topic_repository is None:
+				return topics
+			updated = self.topic_repository.update_topics(topics)
+			self.append_topics_metrics_histories(updated)
+			return updated
+
 	def __init__(
 		self,
 		topic_repository: Optional["TopicRepository"] = None,
@@ -170,6 +191,24 @@ class TopicDomainService:
 		self.climax_change_abs_limit_percent = self._to_float(config.get("climax_change_abs_limit_percent"), 20.0)
 		self.growth_threshold_percent = self._to_float(config.get("growth_threshold_percent"), 20.0)
 
+	def list_topics_by_time_range(
+            self,
+            created_at_start: Optional[int] = None,
+            created_at_end: Optional[int] = None,
+            updated_at_start: Optional[int] = None,
+            updated_at_end: Optional[int] = None,
+            limit: int = 100,
+    ) -> List[Topic]:
+		if self.topic_repository is None:
+			return []
+		return self.topic_repository.list_topics_by_time_range(
+			created_at_start=created_at_start,
+			created_at_end=created_at_end,
+			updated_at_start=updated_at_start,
+			updated_at_end=updated_at_end,
+			limit=limit,
+		)
+
 	@staticmethod
 	def _to_float(value: Any, default: float) -> float:
 		try:
@@ -178,45 +217,51 @@ class TopicDomainService:
 			return default
 
 	def calculate_heat_change_and_stage(self, topic: Topic, history_snapshots: List[Topic]) -> Topic:
-		"""根据历史快照计算热度变化百分比与阶段。"""
+		"""
+		重新设计的话题生命周期算法：基于多点平滑与动态阈值
+		"""
 		current_heat = float(topic.total_weight or 0.0)
-		history = [
-			s for s in history_snapshots
-			if isinstance(s, Topic)
-		]
-		history.sort(
-			key=lambda s: (int(s.updated_at or 0), int(s.created_at or 0), int(s.id or -1)),
-			reverse=True,
+
+			# 1. 历史数据预处理 (确保按时间升序，方便计算趋势)
+		history = sorted(
+			[s for s in history_snapshots if isinstance(s, Topic)],
+			key=lambda s: (int(s.updated_at or 0), int(s.id or -1))
 		)
-
-		prev_heat = float(history[0].total_weight or 0.0) if history else 0.0
-		if prev_heat > 0:
-			topic.heat_change_percent = ((current_heat - prev_heat) / prev_heat) * 100.0
-		else:
-			topic.heat_change_percent = 0.0 #没有历史数据或历史热度为0时，变化百分比定义为0，表示没有变化或无法计算变化
-
-		heat_series = [float(s.total_weight or 0.0) for s in history]
-		heat_series.append(current_heat)
-		peak_heat = max(heat_series) if heat_series else current_heat
-		change = float(topic.heat_change_percent or 0.0)
-
-		if not history:
+		# 获取历史序列（包含当前值）
+		heat_series = [float(s.total_weight or 0.0) for s in history] + [current_heat]
+		# 2. 计算核心指标
+		prev_heat = heat_series[-2] if len(heat_series) > 1 else 0.0
+		# 计算瞬时变化率
+		change = ((current_heat - prev_heat) / prev_heat * 100.0) if prev_heat > 0 else 0.0
+		topic.heat_change_percent = change
+		# 计算移动平均 (最近3个点) 减少噪音
+		window_size = 3
+		recent_avg = sum(heat_series[-window_size:]) / len(heat_series[-window_size:])
+		historical_peak = max(heat_series) if heat_series else current_heat
+		# 3. 阶段判定逻辑 (状态机模式)
+		# A. 初始阶段
+		if len(history) < 2:
 			topic.stage = "Inception"
-		elif change <= self.decline_threshold_percent:
+		# B. 衰退阶段 (跌幅超过阈值 或 远低于峰值)
+		elif change <= self.decline_threshold_percent or current_heat < historical_peak * 0.3:
 			topic.stage = "Decline"
+		# C. 鼎盛阶段 (处于高位平台期：热度接近峰值 且 变化平缓)
 		elif (
-			peak_heat > 0
-			and current_heat >= peak_heat * self.climax_peak_ratio
+			current_heat >= historical_peak * self.climax_peak_ratio
 			and abs(change) < self.climax_change_abs_limit_percent
 		):
 			topic.stage = "Climax"
+
+		# D. 爆发增长阶段 (瞬时涨幅大 或 持续走高)
 		elif change >= self.growth_threshold_percent:
 			topic.stage = "Growth"
-		elif current_heat >= prev_heat:
-			topic.stage = "Growth"
+		# E. 成熟阶段 (高位小幅下滑或回落)
+		elif current_heat > historical_peak * 0.6 and change < 0:
+			topic.stage = "Maturity"
+		# F. 兜底逻辑
 		else:
-			topic.stage = "Decline"
-
+			topic.stage = "Growth" if current_heat >= prev_heat else "Decline"
+		# 4. 安全校验
 		if topic.stage not in STAGE_SET:
 			topic.stage = "Inception"
 		return topic
@@ -249,14 +294,14 @@ class TopicDomainService:
 		"""添加新Topic。同时添加第一条记录"""
 		if self.topic_repository is None:
 			return topic
-		pesisted_topic = self.topic_repository.add_topic(topic)
-		self.append_topic_metrics_history(pesisted_topic)
+		pesisted_topic = self.topic_repository.add_topics([topic])
+		self.append_topics_metrics_histories(pesisted_topic)
 		return pesisted_topic
 
 	def append_topic_metrics_history(self, topic: Topic, snapshot_time: Optional[int] = None) -> None:
 		if self.topic_repository is None:
 			return
-		self.topic_repository.append_topic_metrics_history(topic, snapshot_time=snapshot_time)
+		self.topic_repository.append_topic_metrics_histories([topic], snapshot_time=snapshot_time)
 
 	def list_topics_missing_llm_title(self, limit: int = 50) -> List[Topic]:
 		if self.topic_repository is None:
@@ -269,7 +314,7 @@ class TopicDomainService:
 			return False
 		
 		has_enough_news = topic.news_count >= 5
-		has_high_weight = topic.total_weight >= 150.0
+		has_high_weight = topic.total_weight >= 120.0
 		must = has_enough_news or has_high_weight	
 
 		return must
@@ -279,12 +324,10 @@ class TopicDomainService:
 			return None
 		if topic.created_at is None or topic.id is None:
 			raise ValueError("Topic must have created_at and id for update.")
-		updated = self.topic_repository.update_topic(
-			topic=topic,
-			existing_created_at=int(topic.created_at),
-			existing_id=int(topic.id),
+		updated = self.topic_repository.update_topics(
+			topics=[topic],
 		)
-		self.append_topic_metrics_history(updated)
+		self.append_topics_metrics_histories(updated)
 		return updated
 
 	def update_topic_llm_title_only(
@@ -467,17 +510,38 @@ class TopicDomainService:
 			topic_name=str(topic_name),
 			days_lookback=max(1, int(days_lookback)),
 		)
+
 class TopicRepository(ABC):
+
 	@abstractmethod
-	def add_topic(self, topic: Topic) -> Topic:
+	def add_topics(self, topics: List["Topic"]) -> List["Topic"]:
+		"""批量插入Topic，返回带主键的Topic列表。默认实现为循环调用add_topic。"""
+		pass
+
+	@abstractmethod
+	def append_topic_metrics_histories(self, topics: List["Topic"], snapshot_time: Optional[int] = None) -> None:
+		"""批量插入Topic历史。"""
+		pass
+
+	@abstractmethod
+	def update_topics(self, topics: List["Topic"]) -> List["Topic"]:
+		"""批量更新Topic，不更新llm_title，返回更新后的Topic列表。默认实现为循环调用update_topic。"""
+		pass
+	
+	@abstractmethod
+	def list_topics_by_time_range(
+		self,
+		first_time_start: Optional[int] = None,
+		first_time_end: Optional[int] = None,
+		updated_at_start: Optional[int] = None,
+		updated_at_end: Optional[int] = None,
+		limit: int = 100,
+	) -> List[Topic]:
+		"""根据first_time和updated_at的起止时间，返回Topic表中的所有Topic。"""
 		pass
 
 	@abstractmethod
 	def get_topic_by_composite_key(self, topic_created_at: int, topic_id: int) -> Optional[Topic]:
-		pass
-
-	@abstractmethod
-	def append_topic_metrics_history(self, topic: Topic, snapshot_time: Optional[int] = None) -> None:
 		pass
 
 	@abstractmethod
@@ -496,16 +560,6 @@ class TopicRepository(ABC):
 		days_lookback: int = 7,
 	) -> Optional[Topic]:
 		"""查找最近N天内相同topic名称的最新记录."""
-		pass
-
-	@abstractmethod
-	def update_topic(
-		self,
-		topic: Topic,
-		existing_created_at: int,
-		existing_id: int,
-	) -> Topic:
-		"""不更新llm_title字段，保持原有值不变，由单独的接口 update_topic_llm_title_only 来更新。"""
 		pass
 
 	@abstractmethod

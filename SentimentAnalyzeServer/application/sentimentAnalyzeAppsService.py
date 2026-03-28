@@ -116,16 +116,11 @@ class SentimentAnalyzeAppService:
 		return filtered
 
 	def analyze_and_update_news_items(self, items: List[NewsItem]) -> bool:
-		if not items:
-			logger.debug("No input items for analysis.")
-			return False
-
+		""""一旦执行这个方法，就一定会发出分析完成的事件（即使没有任何数据被分析）。"""
 		pending_items = self.filter_news_items_not_analyzed(items)
+		updated_items: List[NewsItem] = []
 		if not pending_items:
 			logger.info("No pending news items to analyze. input_count=%s", len(items))
-			return False
-
-		updated_items: List[NewsItem] = []
 
 		def consume_batch(batch: List[Any]) -> None:
 			news_batch = [item for item in batch if isinstance(item, NewsItem)]
@@ -162,7 +157,6 @@ class SentimentAnalyzeAppService:
 				"Analysis finished but no items were persisted. pending_count=%s",
 				len(pending_items),
 			)
-			return False
 
 		logger.info(
 			"Analysis and persistence completed. pending_count=%s, persisted_count=%s",
@@ -285,12 +279,9 @@ class SentimentAnalyzeAppService:
 			start_time=start_time,
 			end_time=end_time,
 		)
-		if not latest_items:
-			logger.info("[ScheduledCrawler] 无可分析的数据")
-			return {"success": False, "reason": "no_data"}
 		pending_items = self.filter_news_items_not_analyzed(latest_items)
 		if not pending_items:
-			logger.info("[ScheduledCrawler] 无可分析的数据")
+			logger.info("[Analyze_pending] 无可分析的数据")
 			return {"success": True, "item_count": 0}
 
 		saved = self.analyze_and_update_news_items(pending_items)

@@ -45,8 +45,9 @@ class WorkflowEventSubscribers:
 
         valid_items: List[NewsItem] = [item for item in saved_items if isinstance(item, NewsItem)]
         if not valid_items:
-            return
-
+            logger.info("Crawl saved event received but no valid news items found in payload.")
+        # 注意：即使没有任何有效数据被分析，也要调用analyze_and_update_news_items
+        # 以发布事件触发后续流程（如话题推荐）。
         try:
             self.sentiment_app_service.analyze_and_update_news_items(valid_items)
         except Exception:

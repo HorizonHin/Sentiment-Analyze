@@ -1,10 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from functools import wraps
 import logging
 from queue import Queue
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 EVENT_CRAWL_SAVED = "crawl.saved"
 EVENT_SENTIMENT_ANALYZED = "sentiment.analyzed"
@@ -59,6 +60,9 @@ class CommonThreadPool:
     _instance: "CommonThreadPool | None" = None
     _instance_lock = threading.Lock()
     _configured_max_workers = 8
+# 新增：用於追蹤正在運行的任務 ID
+    _running_tasks: Set[str] = set()
+    _tasks_lock = threading.Lock()
 
     @classmethod
     def configure(cls, max_workers: int) -> None:
@@ -77,6 +81,18 @@ class CommonThreadPool:
 
     def submit(self, fn: Callable[..., Any], *args: Any, **kwargs: Any):
         return self._executor.submit(fn, *args, **kwargs)
+# 新增：嘗試佔用任務位
+    def try_acquire_task(self, task_id: str) -> bool:
+        with self._tasks_lock:
+            if task_id in self._running_tasks:
+                return False
+            self._running_tasks.add(task_id)
+            return True
+
+    # 新增：釋放任務位
+    def release_task(self, task_id: str):
+        with self._tasks_lock:
+            self._running_tasks.discard(task_id)
 
     @staticmethod
     def create_queue_batch_manager(
@@ -85,6 +101,41 @@ class CommonThreadPool:
     ) -> QueueBatchManager:
         return QueueBatchManager(batch_size=batch_size, consume_batch=consume_batch)
 
+def singleton_task(task_id_provider: Callable[..., str] | None = None):
+    """
+    防止同名任務在線程池中併發執行的裝飾器。
+    :param task_id_provider: 可選，一個函數用於根據原函數參數生成唯一 ID。
+                             如果不傳，默認使用函數名。
+    """
+    def decorator(fn: Callable):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            tp = CommonThreadPool()
+            
+            # 生成唯一的 Task ID
+            if task_id_provider:
+                tid = task_id_provider(*args, **kwargs)
+            else:
+                # 默認 ID：函數名
+                tid = f"{fn.__name__}"
+
+            # 嘗試獲取執行權
+            if tp.try_acquire_task(tid):
+                def task_with_cleanup():
+                    try:
+                        return fn(*args, **kwargs)
+                    finally:
+                        # 無論成功失敗，執行完必須釋放
+                        tp.release_task(tid)
+                
+                # 提交到線程池異步執行
+                print(f"[ThreadPool] 提交任務: {tid}")
+                return tp.submit(task_with_cleanup)
+            else:
+                print(f"[ThreadPool] 任務 {tid} 正在運行中，跳過本次提交")
+                return None
+        return wrapper
+    return decorator
 
 class MyRedis:
     _instance: "MyRedis | None" = None
