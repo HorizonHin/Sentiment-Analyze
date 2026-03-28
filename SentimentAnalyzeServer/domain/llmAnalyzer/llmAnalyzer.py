@@ -258,7 +258,7 @@ class LLMTitleAnalyzer:
             try:
                 results.append(self.analyze_title(title))
             except Exception as e:
-                print(f"分析标题列表时遇到异常，跳过该标题。标题: {title}，异常: {e}")
+                logger.error(f"分析标题列表时遇到异常，跳过该标题。标题: {title}，异常: {e}")
                 continue
         return results
 

@@ -129,10 +129,10 @@ def singleton_task(task_id_provider: Callable[..., str] | None = None):
                         tp.release_task(tid)
                 
                 # 提交到線程池異步執行
-                print(f"[ThreadPool] 提交任務: {tid}")
+                logger.info(f"[ThreadPool] 提交任務: {tid}")
                 return tp.submit(task_with_cleanup)
             else:
-                print(f"[ThreadPool] 任務 {tid} 正在運行中，跳過本次提交")
+                logger.info(f"[ThreadPool] 任務 {tid} 正在運行中，跳過本次提交")
                 return None
         return wrapper
     return decorator

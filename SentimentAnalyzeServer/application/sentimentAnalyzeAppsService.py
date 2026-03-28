@@ -121,7 +121,15 @@ class SentimentAnalyzeAppService:
 		updated_items: List[NewsItem] = []
 		if not pending_items:
 			logger.info("No pending news items to analyze. input_count=%s", len(items))
-
+			self.event_manager.publish(
+			EVENT_SENTIMENT_ANALYZED,
+			{
+				"analyzed_items": updated_items,
+				"pending_count": len(pending_items),
+				"persisted_count": len(updated_items),
+			},
+			)	
+			return True
 		def consume_batch(batch: List[Any]) -> None:
 			news_batch = [item for item in batch if isinstance(item, NewsItem)]
 			if not news_batch:

@@ -161,17 +161,17 @@ class Scheduled:
             try:
                 self._run_in_common_pool(self.run_analyze_pending_once, "dataAnalyzer")
             except Exception as exc:
-                print(f"[dataAnalyzer] 补分析任务执行失败: {exc}")
+                logger.error(f"[dataAnalyzer] 补分析任务执行失败: {exc}")
 
             try:
                 self._run_in_common_pool(self.fetch_and_store_news_data, "dataFetcher")
             except Exception as exc:
-                print(f"[dataFetcher] 任务执行失败: {exc}")
+                logger.error(f"[dataFetcher] 任务执行失败: {exc}")
 
             try:
                 self._write_last_completed_time(int(time.time()))
             except OSError as exc:
-                print(f"[scheduler] 写入上次完成时间失败: {exc}")
+                logger.error(f"[scheduler] 写入上次完成时间失败: {exc}")
 
             elapsed = time.time() - started_at
             wait_seconds = max(0, self.interval_seconds - elapsed)

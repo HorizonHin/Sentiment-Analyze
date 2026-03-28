@@ -1,3 +1,4 @@
+import logging
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -16,6 +17,7 @@ from SentimentAnalyzeServer.domain.news.news import (
     RankTimelineEntry,
 )
 
+logger = logging.getLogger(__name__)
 
 class SqlServerNewsItemRepository(NewsItemRepository):
     """基于 SQL Server 的新闻数据存储后端。"""
@@ -727,7 +729,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             return self.get_news_list_by_source_title_list(key_list, 0)
         except pyodbc.Error as e:
             conn.rollback()
-            print(f"添加新闻数据失败: {e}")
+            logger.error(f"添加新闻数据失败: {e}")
             return []
         finally:
             conn.close()
@@ -793,14 +795,14 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 err = str(e).lower()
                 if "timeout" in err and attempt < max_retries:
                     wait_seconds = base_retry_delay * (2 ** (attempt - 1))
-                    print(f"更新新闻列表遇到超时，重试 {attempt}/{max_retries}，等待 {wait_seconds:.2f}s")
+                    logger.warning(f"更新新闻列表遇到超时，重试 {attempt}/{max_retries}，等待 {wait_seconds:.2f}s")
                     time.sleep(wait_seconds)
                     continue
-                print(f"更新新闻列表失败: {e}")
+                logger.error(f"更新新闻列表失败: {e}")
                 return False
             except pyodbc.Error as e:
                 conn.rollback()
-                print(f"更新新闻列表失败: {e}")
+                logger.error(f"更新新闻列表失败: {e}")
                 return False
             finally:
                 conn.close()
@@ -861,14 +863,14 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 err = str(e).lower()
                 if "timeout" in err and attempt < max_retries:
                     wait_seconds = base_retry_delay * (2 ** (attempt - 1))
-                    print(f"抓取更新遇到超时，重试 {attempt}/{max_retries}，等待 {wait_seconds:.2f}s")
+                    logger.warning(f"抓取更新遇到超时，重试 {attempt}/{max_retries}，等待 {wait_seconds:.2f}s")
                     time.sleep(wait_seconds)
                     continue
-                print(f"抓取更新失败: {e}")
+                logger.error(f"抓取更新失败: {e}")
                 return []
             except pyodbc.Error as e:
                 conn.rollback()
-                print(f"抓取更新失败: {e}")
+                logger.error(f"抓取更新失败: {e}")
                 return []
             finally:
                 conn.close()

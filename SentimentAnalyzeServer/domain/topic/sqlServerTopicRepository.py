@@ -82,11 +82,11 @@ class SqlServerTopicRepository(TopicRepository):
                 cursor.execute(
                     """
                     INSERT INTO topic_metrics_history (
-                        created_at, topic, start_time, end_time, window_size,
+                        created_at, topic, llm_title, start_time, end_time, window_size,
                         sentiment, news_count, total_weight, heat_change_percent,
                         stage, updated_at, version, id
                     )
-                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     WHERE NOT EXISTS (
                         SELECT 1
                         FROM topic_metrics_history
@@ -95,6 +95,7 @@ class SqlServerTopicRepository(TopicRepository):
                     """,
                     created_at_ts,
                     topic.topic,
+                    (None if topic.llm_title is None else str(topic.llm_title)),
                     self._to_optional_ts(topic.start_time),
                     self._to_optional_ts(topic.end_time),
                     int(topic.window_size or 0),

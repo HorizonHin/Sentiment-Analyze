@@ -60,7 +60,7 @@ class DataFetcherAppService:
     def crawl_and_save_news_data(self) -> tuple[dict[str, Any], List[NewsItem]]:
         ids = self._load_platforms()
         if not ids:
-            print("[dataFetcher] 未在配置中找到可抓取平台")
+            logger.error("[dataFetcher] 未在配置中找到可抓取平台")
             return {"success": False, "reason": "no_platforms"}, []
 
         results, id_to_name, failed_ids = self.fetcher.crawl_websites(ids)

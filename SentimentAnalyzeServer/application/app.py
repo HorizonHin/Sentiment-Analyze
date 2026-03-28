@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from logging.handlers import RotatingFileHandler
 import sys
 import atexit
 from pathlib import Path
@@ -18,7 +19,6 @@ from SentimentAnalyzeServer.application.common import Result
 from SentimentAnalyzeServer.application.dataFetcherAppService import DataFetcherAppService
 from SentimentAnalyzeServer.application.sentimentAnalyzeAppsService import SentimentAnalyzeAppService
 from SentimentAnalyzeServer.application.topicAppService import TopicAppService
-from SentimentAnalyzeServer.application.logging_config import get_app_logger
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import NewsDomainService
 from SentimentAnalyzeServer.domain.news.sqlServerNewsItemRepository import SqlServerNewsItemRepository
@@ -27,13 +27,54 @@ from SentimentAnalyzeServer.domain.topic.sqlServerTopicRepository import SqlServ
 from SentimentAnalyzeServer.inbound.controller import create_external_controller
 from SentimentAnalyzeServer.inbound.workflow_event_subscribers import WorkflowEventSubscribers
 from SentimentAnalyzeServer.system.infra import CommonThreadPool
+import logging
+import os
+
+def get_app_logger(log_name: str = None, log_dir: str = None) -> logging.Logger:
+    """
+    配置并返回 Logger。
+    :param log_name: 传 None 则配置 Root Logger，子模块日志将自动汇总。
+    """
+    if log_dir is None:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        log_dir = os.path.join(base_dir, 'system', 'logs')
+    
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # 如果是 Root Logger，文件名叫 app.log；否则按 log_name 命名
+    file_name = log_name if log_name else "root_app"
+    log_file = os.path.join(log_dir, f'{file_name}.log')
+
+    # 获取 Logger (传 None 即获取 Root Logger)
+    logger = logging.getLogger(log_name)
+    logger.setLevel(logging.INFO)
+
+    if not logger.handlers:
+        # 每达到 10MB 自动换新文件，最多保留 5 个备份
+        file_handler = RotatingFileHandler(
+            log_file, 
+            maxBytes=10 * 1024 * 1024, 
+            backupCount=5, 
+            encoding='utf-8'
+        )
+        # 建议在 Formatter 中加入线程名 [%(threadName)s]，对你排查调度任务非常有帮助
+        formatter = logging.Formatter(
+            '[%(asctime)s] %(levelname)s [%(name)s] [%(threadName)s]: %(message)s'
+        )
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        
+        # 控制台也要加，方便开发看
+        console = logging.StreamHandler()
+        console.setFormatter(formatter)
+        logger.addHandler(console)
+    return logger
 
 
 def create_app() -> Flask:
 
     app = Flask(__name__)
-    # 初始化日志，清空原有内容
-    app_logger = get_app_logger()
+    app_logger = get_app_logger(None)  # 配置 Root Logger，所有模块日志汇总到一起
 
     root_dir = Path(__file__).resolve().parent.parent
     config_path = root_dir / "config.yaml"
@@ -85,7 +126,7 @@ def create_app() -> Flask:
             first_time_lookback_days=first_time_lookback_days,
         )
     except RuntimeError as e:
-        print(f"[错误] {e}", file=sys.stderr)
+        app_logger.error(f"[错误] {e}", file=sys.stderr)
         sys.exit(1)
     
     data_fetcher_app_service = DataFetcherAppService(config_path=config_path, storage=storage)

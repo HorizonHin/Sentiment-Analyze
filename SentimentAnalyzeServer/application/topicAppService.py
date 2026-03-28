@@ -16,7 +16,7 @@ from SentimentAnalyzeServer.domain.topic.topic import Topic, TopicDomainService
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmExecutorService import LLMExecutorService
 
 
-
+logger = logging.getLogger(__name__)
 
 _TOPIC_LOOKBACK_MULTIPLIER = 12.2
 
