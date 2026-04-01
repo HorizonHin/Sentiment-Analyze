@@ -95,10 +95,6 @@ class DataFetcherAppService:
         )
 
     
-    def _cache_latest_not_need_analysis_items(self, items: List[NewsItem]) -> None:
-        payload = self._serialize_news_items(items)
-        self.redis.set(REDIS_KEY_LATEST_NOT_NEED_ANALYSIS_NEWS, payload)
-
     def _load_platforms(self) -> list[tuple[str, str]]:
         with self.config_path.open("r", encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
@@ -200,18 +196,8 @@ class DataFetcherAppService:
             if not updated_items:
                 raise RuntimeError("更新已存在新闻数据失败")
 
-            # 过滤出不需要进行分析的 items
-            not_need_analysis_items = [
-                item for item in updated_items 
-                if not is_item_analysis_pending(item)
-            ]
+            # 缓存操作现已全部交给 sentimentAnalyzeAppsService 处理，以避免被覆盖丢失数据
             
-            if not_need_analysis_items:
-                self.common_thread_pool.submit(
-                    self._cache_latest_not_need_analysis_items,
-                    not_need_analysis_items,
-                )
-
             saved_items.extend(updated_items)
 
         if saved_items:

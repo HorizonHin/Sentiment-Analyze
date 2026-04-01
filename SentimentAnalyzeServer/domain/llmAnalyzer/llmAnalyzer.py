@@ -47,6 +47,7 @@ class LLMTitleAnalyzer:
                             )
         self.prompt_file = os.path.join(os.path.dirname(__file__), "analyze_title_prompt.txt")
         self.topic_prompt_file = os.path.join(os.path.dirname(__file__), "analyze_topic_title.txt")
+        self.title_only_prompt_file = os.path.join(os.path.dirname(__file__), "analyze_title_only_prompt.txt")
         self.max_retries = 5
         self.initial_retry_delay = 1.0
 
@@ -56,6 +57,10 @@ class LLMTitleAnalyzer:
 
     def _get_analyze_topic_prompt(self) -> str:
         with open(self.topic_prompt_file, "r", encoding="utf-8") as f:
+            return f.read().strip()
+
+    def _get_analyze_title_only_prompt(self) -> str:
+        with open(self.title_only_prompt_file, "r", encoding="utf-8") as f:
             return f.read().strip()
 
     @staticmethod
@@ -157,6 +162,18 @@ class LLMTitleAnalyzer:
             "sentiment_analysis": self._normalize_sentiment(payload.get("sentiment_analysis", {})),
         }
 
+    def _normalize_title_only_result(self, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("LLM payload is not a JSON object")
+
+        return {
+            "entities": self._normalize_entities(payload.get("entities", [])),
+            "event_type": "other",  
+            "summary": "无该来源评论抓取支持，仅分析标题实体和关键词",
+            "keywords": payload.get("keywords", []),
+            "sentiment_analysis": self._normalize_sentiment({}),  # Default neutral sentiment
+        }
+
     @staticmethod
     def _extract_error_code(exc: BadRequestError) -> str:
         # Compatible with different OpenAI SDK error payload shapes.
@@ -255,6 +272,59 @@ class LLMTitleAnalyzer:
                     continue
 
                 logger.exception("LLM 分析标题异常 (非速率限制)，已超过重试次数。title=%s", title)
+                raise
+
+    def analyze_title_only(self, title: str) -> dict[str, Any]:
+        if not title or not title.strip():
+            raise ValueError("title cannot be empty")
+
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                messages = [
+                    {"role": "system", "content": self._get_analyze_title_only_prompt()},
+                    {
+                        "role": "user",
+                        "content": (
+                            "请分析以下新闻标题的实体和关键词，仅输出 json。\n"
+                            f"标题：{title}"
+                        ),
+                    },
+                ]
+
+                completion = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=0.1,
+                    response_format={"type": "json_object"},
+                    extra_body={"enable_thinking": False}
+                )
+
+                raw_content = completion.choices[0].message.content or ""
+                payload = json.loads(self._strip_json_fence(raw_content))
+                return self._normalize_title_only_result(payload)
+            except BadRequestError as e:
+                error_code = self._extract_error_code(e)
+                if error_code == "data_inspection_failed":
+                    logger.warning(
+                        "LLM 内容审核拦截标题分析，返回空结果。title=%s, code=%s",
+                        title, error_code,
+                    )
+                    return self._build_empty_result()
+                logger.exception("LLM 仅分析标题 BadRequest。title=%s, code=%s", title, error_code)
+                raise
+            except RateLimitError:
+                if attempt < self.max_retries:
+                    wait_seconds = self.initial_retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                    time.sleep(wait_seconds)
+                    continue
+                logger.exception("LLM 仅分析标题连续触发速率限制。title=%s", title)
+                raise
+            except Exception:
+                if attempt < self.max_retries:
+                    wait_seconds = self.initial_retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                    time.sleep(wait_seconds)
+                    continue
+                logger.exception("LLM 仅分析标题异常。title=%s", title)
                 raise
 
     def summarize_topic_title(self, old_topic: str, titles: list[str]) -> str:

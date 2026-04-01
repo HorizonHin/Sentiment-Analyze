@@ -13,7 +13,7 @@ from SentimentAnalyzeServer.system.infra import (
 	EventManager,
 	MyRedis,
 )
-from SentimentAnalyzeServer.application.common import is_item_analysis_pending
+from SentimentAnalyzeServer.application.common import is_item_analysis_pending, is_source_support_comments
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmExecutorService import LLMExecutorService
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsItem, NewsDomainService
@@ -64,6 +64,10 @@ class SentimentAnalyzeAppService:
 	def _cache_recent_analyzed_news(self, items: List[NewsItem]) -> None:
 		payload = self._serialize_news_items(items)
 		self.redis.set(REDIS_KEY_RECENT_30M_ANALYZED_NEWS, payload)
+
+	def _cache_latest_not_need_analysis_items(self, items: List[NewsItem]) -> None:
+		payload = self._serialize_news_items(items)
+		self.redis.set(REDIS_KEY_LATEST_NOT_NEED_ANALYSIS_NEWS, payload)
 
 	def _deduplicate_news_items(self, items: List[NewsItem]) -> List[NewsItem]:
 		def _score(news_item: NewsItem) -> int:
@@ -120,67 +124,74 @@ class SentimentAnalyzeAppService:
 	def analyze_and_update_news_items(self, items: List[NewsItem]) -> bool:
 		""""一旦执行这个方法，就一定会发出分析完成的事件（即使没有任何数据被分析）。"""
 		# 过滤规则：使用公共方法判断是否需要分析
-		pending_items = [
-			item for item in items
-			if is_item_analysis_pending(item)
-		]
+		pending_items: List[NewsItem] = []
+		not_need_analysis_items: List[NewsItem] = []
+		for item in items:
+			if is_item_analysis_pending(item):
+				pending_items.append(item)
+			else:
+				not_need_analysis_items.append(item)
 		
 		updated_items: List[NewsItem] = []
 		if not pending_items:
 			logger.info("No pending news items to analyze. input_count=%s", len(items))
-			self.event_manager.publish(
-			EVENT_SENTIMENT_ANALYZED,
-			{
-				"analyzed_items": updated_items,
-				"pending_count": len(pending_items),
-				"persisted_count": len(updated_items),
-			},
-			)	
-			return True
-		def consume_batch(batch: List[Any]) -> None:
-			news_batch = [item for item in batch if isinstance(item, NewsItem)]
-			if not news_batch:
-				return
-			if self._save_batch_with_retry(news_batch):
-				updated_items.extend(news_batch)
+		else:
+			def consume_batch(batch: List[Any]) -> None:
+				news_batch = [item for item in batch if isinstance(item, NewsItem)]
+				if not news_batch:
+					return
+				if self._save_batch_with_retry(news_batch):
+					updated_items.extend(news_batch)
 
-		batch_manager = self.executor_service.create_queue_batch_manager(
-			batch_size=self.batch_save_size,
-			consume_batch=consume_batch,
-		)
-
-		futures = [
-			self.executor_service.execute(self._analyze_with_retry, item)
-			for item in pending_items
-		]
-
-		try:
-			for future in futures:
-				try:
-					result_item = future.result()
-				except Exception:
-					logger.exception("Unexpected error in LLM executor future.")
-					continue
-
-				if result_item is not None:
-					batch_manager.put(result_item)
-		finally:
-			batch_manager.close_and_wait()
-
-		if not updated_items:
-			logger.warning(
-				"Analysis finished but no items were persisted. pending_count=%s",
-				len(pending_items),
+			batch_manager = self.executor_service.create_queue_batch_manager(
+				batch_size=self.batch_save_size,
+				consume_batch=consume_batch,
 			)
+
+			futures = [
+				self.executor_service.execute(self._analyze_with_retry, item)
+				for item in pending_items
+			]
+
+			try:
+				for future in futures:
+					try:
+						result_item = future.result()
+					except Exception:
+						logger.exception("Unexpected error in LLM executor future.")
+						continue
+
+					if result_item is not None:
+						batch_manager.put(result_item)
+			finally:
+				batch_manager.close_and_wait()
+
+			if not updated_items:
+				logger.warning(
+					"Analysis finished but no items were persisted. pending_count=%s",
+					len(pending_items),
+				)
 
 		now_ts = int(time.time())
 		recent_threshold = now_ts - self.recent_window_seconds
+		
+		# 将本次 crawl 和处理的所有项合并
+		final_items = updated_items + not_need_analysis_items
+		
 		recent_items = [
-			item for item in updated_items
+			item for item in final_items
 			if item.last_time is not None and item.last_time >= recent_threshold
 		]
 		if recent_items:
 			self.common_thread_pool.submit(self._cache_recent_analyzed_news, recent_items)
+
+		# 取所有最终属于"不强制再次分析(含刚分析完的 title_only 或者其他不需要再次分析)"的items放入这个专门的缓存
+		latest_not_need_analysis = [
+			item for item in final_items
+			if not is_item_analysis_pending(item) or not is_source_support_comments(item.source_id or "")
+		]
+		if latest_not_need_analysis:
+			self.common_thread_pool.submit(self._cache_latest_not_need_analysis_items, latest_not_need_analysis)
 
 		self.event_manager.publish(
 			EVENT_SENTIMENT_ANALYZED,
@@ -194,9 +205,15 @@ class SentimentAnalyzeAppService:
 		return True
 
 	def _analyze_with_retry(self, item: NewsItem) -> Optional[NewsItem]:
+		supports_comments = is_source_support_comments(item.source_id or "")
+
 		for attempt in range(1, self.max_retries + 1):
 			try:
-				result = self.llm_domain_analyzer.analyze_title(item.title, comments=item.comments)
+				if supports_comments:
+					result = self.llm_domain_analyzer.analyze_title(item.title, comments=item.comments)
+				else:
+					result = self.llm_domain_analyzer.analyze_title_only(item.title)
+					
 				self.apply_llm_result(item, result)
 				return item
 			except Exception:
@@ -278,15 +295,6 @@ class SentimentAnalyzeAppService:
 			if not (item.analyzed_time or item.sentiment_polarity or item.entities or item.keywords)
 		]
 
-	def analyze_pending_items_by_latest_time(
-		self,
-		first_time: Optional[int] = None,
-		start_time: Optional[int] = None,
-		end_time: Optional[int] = None,
-	) -> dict[str, Any]:
-		"""[DEPRECATED] 该方法已废弃，建议使用 analyze_and_update_news_items 处理。"""
-		logger.warning("analyze_pending_items_by_latest_time is DEPRECATED.")
-		return {"success": True, "item_count": 0}
 
 	def get_analyzed_news_grouped_by_latest_time(
 		self,

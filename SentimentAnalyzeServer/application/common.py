@@ -50,21 +50,36 @@ def get_interval_seconds() -> int:
         minutes = 30
     return minutes * 60
 
+def is_source_support_comments(source_id: str) -> bool:
+    """判断该数据源是否属于能抓取评论的源 (baidu, weibo, bilibili等)"""
+    sid = str(source_id).lower()
+    return "baidu" in sid or "weibo" in sid or "bilibili" in sid
+
 def is_item_analysis_pending(item: NewsItem) -> bool:
     """
-    判断新闻项是否需要进行情感分析。
-    过滤规则：comments 不为空且（未分析过 或 上次分析时间距今已过 2.2 个系统周期）
+    判断新闻项是否需要进行情感/实体分析。
+    过滤规则：
+    1. 如果属于能抓取 comments 的 source，则 comments 必须不为空才能分析
+       上次分析时间为空，或距今已过 2.2 个系统周期，则需要（重新）分析
+    2. 如果属于不能抓取 comments 的 source，则只分析标题，确保只分析一次
     """
-    if not hasattr(item, 'comments') or not item.comments:
-        return False
+    source_id = getattr(item, 'source_id', '')
+    analyzed_time: Optional[datetime] = getattr(item, 'analyzed_time', None)
+
+    if is_source_support_comments(source_id):
+        if not hasattr(item, 'comments') or not item.comments:
+            return False
+    else:
+        # 不支持评论的来源，只分析标题，确保只分析一次
+        if analyzed_time is not None:
+            return False
+            
+    if not analyzed_time:
+        return True
     
     # 2.2 个系统周期
     interval_seconds = get_interval_seconds()
     lookback_threshold = int(time.time()) - int(2.2 * interval_seconds)
-    
-    analyzed_time: Optional[datetime] = getattr(item, 'analyzed_time', None)
-    if not analyzed_time:
-        return True
     
     return int(analyzed_time.timestamp()) < lookback_threshold
 
