@@ -191,9 +191,11 @@ class LLMTitleAnalyzer:
             },
         }
 
-    def analyze_title(self, title: str) -> dict[str, Any]:
+    def analyze_title(self, title: str, comments: List[str] | None = None) -> dict[str, Any]:
         if not title or not title.strip():
             raise ValueError("title cannot be empty")
+
+        comments_text = "\n".join(comments) if comments else "无"
 
         for attempt in range(1, self.max_retries + 1):
             try:
@@ -202,8 +204,9 @@ class LLMTitleAnalyzer:
                     {
                         "role": "user",
                         "content": (
-                            "请分析以下新闻标题并输出 json。仅输出 json，不要输出任何解释。"
-                            f"\n标题：{title}"
+                            "请分析以下新闻标题及公众评论并输出 json。仅输出 json，不要输出任何解释。"
+                            f"\n新闻标题：{title}"
+                            f"\n公众评论：\n{comments_text}"
                         ),
                     },
                 ]

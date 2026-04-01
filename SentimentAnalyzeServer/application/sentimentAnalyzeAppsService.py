@@ -118,7 +118,19 @@ class SentimentAnalyzeAppService:
 
 	def analyze_and_update_news_items(self, items: List[NewsItem]) -> bool:
 		""""一旦执行这个方法，就一定会发出分析完成的事件（即使没有任何数据被分析）。"""
-		pending_items = self.filter_news_items_not_analyzed(items)
+		now_ts = int(time.time())
+		# 过滤规则：comments 不为空且（未分析过 或 上次分析时间距今已过两个系统周期）
+		# 注意：这里假设 interval_seconds 即为系统周期
+		lookback_threshold = now_ts - (2 * self.interval_seconds if hasattr(self, 'interval_seconds') else 2 * 30 * 60)
+		
+		pending_items = [
+			item for item in items
+			if item.comments and (
+				not item.analyzed_time or 
+				int(item.analyzed_time.timestamp()) < lookback_threshold
+			)
+		]
+		
 		updated_items: List[NewsItem] = []
 		if not pending_items:
 			logger.info("No pending news items to analyze. input_count=%s", len(items))
@@ -190,7 +202,7 @@ class SentimentAnalyzeAppService:
 	def _analyze_with_retry(self, item: NewsItem) -> Optional[NewsItem]:
 		for attempt in range(1, self.max_retries + 1):
 			try:
-				result = self.llm_domain_analyzer.analyze_title(item.title)
+				result = self.llm_domain_analyzer.analyze_title(item.title, comments=item.comments)
 				self.apply_llm_result(item, result)
 				return item
 			except Exception:
@@ -278,21 +290,9 @@ class SentimentAnalyzeAppService:
 		start_time: Optional[int] = None,
 		end_time: Optional[int] = None,
 	) -> dict[str, Any]:
-		resolved_first_time = int(first_time) if first_time is not None else int(time.time()) - self.first_time_lookback_seconds
-		latest_items = self.news_domain_service.get_news_list_by_latest_crawl_range(
-			isAnalyzed=False,
-			first_time=resolved_first_time,
-			start_time=start_time,
-			end_time=end_time,
-		)
-		pending_items = self.filter_news_items_not_analyzed(latest_items)
-		if not pending_items:
-			logger.info("[Analyze_pending] 无可分析的数据")
-			return {"success": True, "item_count": 0}
-
-		saved = self.analyze_and_update_news_items(pending_items)
-		analyzed_count = len(pending_items) if saved else 0
-		return {"success": True, "item_count": analyzed_count}
+		"""[DEPRECATED] 该方法已废弃，建议使用 analyze_and_update_news_items 处理。"""
+		logger.warning("analyze_pending_items_by_latest_time is DEPRECATED.")
+		return {"success": True, "item_count": 0}
 
 	def get_analyzed_news_grouped_by_latest_time(
 		self,

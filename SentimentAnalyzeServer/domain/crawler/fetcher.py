@@ -13,8 +13,10 @@ import json
 import logging
 import random
 import time
+import re
 from typing import Dict, List, Tuple, Optional, Union
 import requests
+from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,41 @@ class DataFetcher:
         """
         self.proxy_url = proxy_url
         self.api_url = api_url or self.DEFAULT_API_URL
+        self._playwright = None
+        self._browser = None
+
+    def _get_browser(self):
+        """
+        获取或创建常驻的 Playwright 浏览器实例
+        """
+        if self._browser:
+            return self._browser
+            
+        try:
+            self._playwright = sync_playwright().start()
+            browser_args = []
+            if self.proxy_url:
+                browser_args.append(f'--proxy-server={self.proxy_url}')
+            self._browser = self._playwright.chromium.launch(headless=True, args=browser_args)
+            return self._browser
+        except Exception as e:
+            logger.warning(f"启动 Playwright 浏览器失败: {e}")
+            self.close()
+            raise
+
+    def close(self):
+        """
+        关闭浏览器和 Playwright 实例
+        """
+        try:
+            if self._browser:
+                self._browser.close()
+                self._browser = None
+            if self._playwright:
+                self._playwright.stop()
+                self._playwright = None
+        except Exception as e:
+            logger.warning(f"关闭浏览器实例失败: {e}")
 
     def fetch_data(
         self,
@@ -185,8 +222,20 @@ class DataFetcher:
         logger.info(f"成功: {list(results.keys())}, 失败: {failed_ids}")        
         return results, id_to_name, failed_ids
 
-
-
+    def crawl_comments_dispatch(self, source_id: str, title: str) -> List[str]:
+        """
+        根据 source_id 分发到不同的评论爬取方法
+        """
+        if "baidu" in source_id.lower():
+            return self.crawl_baidu_comments(title)
+        elif "weibo" in source_id.lower():
+            return self.crawl_weibo_comments(title)
+        elif "bilibili" in source_id.lower():
+            return self.crawl_bilibili_comments(title)
+        else:
+            logger.warning(f"未知平台 {source_id}，无法抓取评论")
+            return []
+             
     def crawl_baidu_comments(self, title: str) -> List[str]:
         """
         爬取百度事件数据，返回评论区评论内容列表。使用 Playwright。
@@ -195,52 +244,45 @@ class DataFetcher:
         search_url = f"{base_url}{requests.utils.quote(title)}"
         comments = []
 
+        context = None
         try:
-            with sync_playwright() as p:
-                # 启动浏览器，指定为 headless 模式
-                browser = p.chromium.launch(headless=True)
-                # 创建上下文，设置 User-Agent 防止被简单识别
-                context = browser.new_context(user_agent=self.DEFAULT_HEADERS["User-Agent"])
-                page = context.new_page()
+            # 1. 使用常驻浏览器实例
+            browser = self._get_browser()
+            context = browser.new_context(user_agent=self.DEFAULT_HEADERS["User-Agent"])
+            page = context.new_page()
+
+            # 访问搜索结果页
+            page.goto(search_url, wait_until="networkidle", timeout=30000)
+            
+            # 找到首条结果中的跳转链接
+            link_selector = 'div[class*="title_1WDM0"] a'
+            page.wait_for_selector(link_selector, timeout=10000)
+            first_link = page.query_selector(link_selector)
+            if not first_link:
+                logger.warning(f"Playwright 无法定位到百度搜索首条链接")
+                return []
                 
-                # 1. 访问搜索结果页
-                logger.info(f"Playwright 开始搜索百度: {search_url}")
-                page.goto(search_url, wait_until="networkidle", timeout=30000)
-                
-                # 2. 找到首条结果中的跳转链接
-                # 百度新闻/网页结果的类名中常含 title_1WDM0
-                link_selector = 'div[class*="title_1WDM0"] a'
-                try:
-                    page.wait_for_selector(link_selector, timeout=10000)
-                    first_link = page.query_selector(link_selector)
-                    if not first_link:
-                        logger.warning(f"Playwright 无法定位到百度搜索首条链接")
-                        return []
-                        
-                    href = first_link.get_attribute('href')
-                    if not href:
-                        logger.warning("Playwright 抓取到空 href")
-                        return []
-                    
-                    # 3. 在当前页跳转到详情页以获取评论
-                    logger.info(f"Playwright 正在渲染详情页: {href}")
-                    page.goto(href, wait_until="networkidle", timeout=30000)
-                    
-                    # 4. 等待并提取评论元素 (class属性模糊匹配 type-text)
-                    comment_selector = 'span[class*="type-text"]'
-                    page.wait_for_selector(comment_selector, timeout=10000)
-                    comment_elements = page.query_selector_all(comment_selector)
-                    
-                    comments = [el.inner_text().strip() for el in comment_elements if el.inner_text().strip()]
-                    
-                except Exception as inner_e:
-                    logger.warning(f"Playwright 页面渲染过程中报错: {inner_e}")
-                
-                browser.close()
-            return comments
+            href = first_link.get_attribute('href')
+            if not href:
+                logger.warning("Playwright 抓取到空 href")
+                return []
+            
+            # 在当前页跳转到详情页以获取评论
+            page.goto(href, wait_until="networkidle", timeout=30000)
+            
+            # 等待并提取评论元素
+            comment_selector = 'span[class*="type-text"]'
+            page.wait_for_selector(comment_selector, timeout=10000)
+            comment_elements = page.query_selector_all(comment_selector)
+            comments = [el.inner_text().strip() for el in comment_elements if el.inner_text().strip()]
+            logger.info(f"Playwright 为标题 '{title}' 抓取到 {len(comments)} 条百度评论")
         except Exception as e:
-            logger.warning(f"crawl_baidu_comments (Playwright) 整体失败: {e}")
+            logger.warning(f"crawl_baidu_comments 整体失败: {e}")
             return []
+        finally:
+            if context:
+                context.close()
+        return comments
         
     def crawl_weibo_comments(self, title: str) -> List[str]:
         """
@@ -248,6 +290,7 @@ class DataFetcher:
         参考 MediaCrawler 实现。
         """
         comments = []
+        context = None
         try:
             browser = self._get_browser()
             # 微博移动端需要特有的 User-Agent
@@ -255,76 +298,86 @@ class DataFetcher:
             context = browser.new_context(user_agent=mobile_ua)
             page = context.new_page()
 
-            try:
-                # 1. 访问微博移动端主页初始化 Cookie
-                logger.info(f"Playwright 正在初始化微博移动端...")
-                page.goto("https://m.weibo.cn", wait_until="networkidle", timeout=30000)
-                time.sleep(2)
+            # 1. 访问微博移动端主页初始化 Cookie
+            page.goto("https://m.weibo.cn", wait_until="networkidle", timeout=30000)
+            time.sleep(2)
 
-                # 2. 调用搜索接口获取 mid
-                # SearchType: 1-综合, 61-实时, 60-热门, 64-视频
-                search_url = f"https://m.weibo.cn/api/container/getIndex?containerid=100103type=1&q={requests.utils.quote(title)}&page_type=searchall"
-                logger.info(f"Playwright 搜索微博: {search_url}")
-                page.goto(search_url, wait_until="networkidle", timeout=30000)
-                
-                content = page.content()
-                # 提取 JSON 内容 (Playwright goto 后的 page.content() 包含 <html> 标签，需要处理)
-                # 也可以直接通过 page.evaluate("() => document.body.innerText")
-                json_text = page.evaluate("() => document.body.innerText")
-                search_data = json.loads(json_text)
-
-                cards = search_data.get("data", {}).get("cards", [])
-                mid = None
-                for card in cards:
-                    if card.get("card_type") == 11:
-                        card_group = card.get("card_group", [])
-                        for item in card_group:
-                            if item.get("mblog"):
-                                mid = item.get("mblog", {}).get("id")
-                                break
-                    if mid: break
-
-                if not mid:
-                    logger.warning(f"未找到微博 mid: {title}")
-                    return []
-
-                # 3. 获取热评接口
-                comments_url = f"https://m.weibo.cn/comments/hotflow?id={mid}&mid={mid}&max_id_type=0"
-                logger.info(f"Playwright 获取微博评论: {comments_url}")
-                page.goto(comments_url, wait_until="networkidle", timeout=30000)
-                
-                comments_json_text = page.evaluate("() => document.body.innerText")
-                comments_data = json.loads(comments_json_text)
-                
-                raw_comments = comments_data.get("data", {}).get("data", [])
-                for c in raw_comments:
-                    text = c.get("text", "")
-                    # 去除 HTML 标签
-                    clean_text = re.sub(r'<[^>]+>', '', text).strip()
-                    if clean_text:
-                        comments.append(clean_text)
-                
-                # 限制返回数量 (默认20条)
-                comments = comments[:20]
-
-            except Exception as inner_e:
-                logger.warning(f"Playwright 抓取微博过程中报错: {inner_e}")
-            finally:
-                context.close()
+            # 2. 调用搜索接口获取 mid
+            # SearchType: 1-综合, 61-实时, 60-热门, 64-视频
+            search_type = 60
+            search_url = f"https://m.weibo.cn/api/container/getIndex?containerid=100103type={search_type}&q={requests.utils.quote(title)}&page_type=searchall"
+            page.goto(search_url, wait_until="networkidle", timeout=30000)
             
-            return comments
+            # 提取 JSON 内容
+            json_text = page.evaluate("() => document.body.innerText")
+            search_data = json.loads(json_text)
+
+            cards = search_data.get("data", {}).get("cards", [])
+            mid_list = []
+            for card in cards:
+                # 微博搜索 API 返回的 card_type 含义：
+                # 9: 微博正文 (mblog)
+                # 11: 卡片集合 (通常包含多个 card_group 内容)
+                # 58: 搜索建议或相关词
+                # 101: 话题/栏目信息
+                if card.get("card_type") == 11:
+                    card_group = card.get("card_group", [])
+                    for item in card_group:
+                        if item.get("mblog"):
+                            mid_list.append(item.get("mblog", {}).get("id"))
+                elif card.get("card_type") == 9:
+                    if card.get("mblog"):
+                        mid_list.append(card.get("mblog", {}).get("id"))
+                
+                # 限制抓取的微博正文数量，防止过量请求
+                if len(mid_list) >= 5:
+                    break
+
+            if not mid_list:
+                logger.warning(f"未找到任何微博 mid: {title}")
+                return []
+
+            # 3. 遍历 mid_list 获取每个微博的热评
+            for mid in mid_list:
+                try:
+                    comments_url = f"https://m.weibo.cn/comments/hotflow?id={mid}&mid={mid}&max_id_type=0"
+                    page.goto(comments_url, wait_until="networkidle", timeout=30000)
+                    comments_json_text = page.evaluate("() => document.body.innerText")
+                    # 判空处理，防止 API 返回非 JSON 内容
+                    if not comments_json_text or not comments_json_text.strip().startswith('{'):
+                        continue
+
+                    comments_data = json.loads(comments_json_text)
+                    raw_comments = comments_data.get("data", {}).get("data", [])
+                    
+                    for c in raw_comments:
+                        text = c.get("text", "")
+                        # 去除 HTML 标签 (微博评论中常含 <a> 或 <img>)
+                        clean_text = re.sub(r'<[^>]+>', '', text).strip()
+                        if clean_text:
+                            comments.append(clean_text)
+                    
+                    # 适当休眠，模拟真实行为
+                    time.sleep(1)
+                except Exception as loop_e:
+                    logger.warning(f"获取 mid={mid} 的评论时出错: {loop_e}")
+                    continue
+            
+            # 去重并限制最终返回的总评论数量
+            comments = list(dict.fromkeys(comments))[:30]
+            logger.info(f"Playwright 为标题 '{title}' 抓取到 {len(comments)} 条微博评论")
+
         except Exception as e:
             logger.warning(f"crawl_weibo_comments 整体失败: {e}")
             return []
-
-
+        finally:
+            if context:
+                context.close()
+        return comments
 
     def crawl_bilibili_comments(self, title: str) -> List[str]:
         """
         爬取哔哩哔哩事件数据，返回评论区评论内容列表。
         """
-        # 1.https://search.bilibili.com/all?keyword=
-
-        # 2.所有 <div class="bili-watch-later--wrap"> 下的 a 标签
-        # 3.
+        
         return []
