@@ -7,12 +7,13 @@ from typing import Any, Dict, List, Optional
 
 from SentimentAnalyzeServer.system.infra import (
 	EVENT_SENTIMENT_ANALYZED,
-	REDIS_KEY_LATEST_UPDATED_ANALYZED_NEWS,
+	REDIS_KEY_LATEST_NOT_NEED_ANALYSIS_NEWS,
 	REDIS_KEY_RECENT_30M_ANALYZED_NEWS,
 	CommonThreadPool,
 	EventManager,
 	MyRedis,
 )
+from SentimentAnalyzeServer.application.common import is_item_analysis_pending
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmExecutorService import LLMExecutorService
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsItem, NewsDomainService
@@ -118,17 +119,10 @@ class SentimentAnalyzeAppService:
 
 	def analyze_and_update_news_items(self, items: List[NewsItem]) -> bool:
 		""""一旦执行这个方法，就一定会发出分析完成的事件（即使没有任何数据被分析）。"""
-		now_ts = int(time.time())
-		# 过滤规则：comments 不为空且（未分析过 或 上次分析时间距今已过两个系统周期）
-		# 注意：这里假设 interval_seconds 即为系统周期
-		lookback_threshold = now_ts - (2 * self.interval_seconds if hasattr(self, 'interval_seconds') else 2 * 30 * 60)
-		
+		# 过滤规则：使用公共方法判断是否需要分析
 		pending_items = [
 			item for item in items
-			if item.comments and (
-				not item.analyzed_time or 
-				int(item.analyzed_time.timestamp()) < lookback_threshold
-			)
+			if is_item_analysis_pending(item)
 		]
 		
 		updated_items: List[NewsItem] = []
@@ -304,7 +298,7 @@ class SentimentAnalyzeAppService:
 		resolved_first_time = int(first_time) if first_time is not None else int(time.time()) - self.first_time_lookback_seconds
 		cached_payload_map = self.redis.get_many(
 			[
-				REDIS_KEY_LATEST_UPDATED_ANALYZED_NEWS,
+				REDIS_KEY_LATEST_NOT_NEED_ANALYSIS_NEWS,
 				REDIS_KEY_RECENT_30M_ANALYZED_NEWS,
 			]
 		)

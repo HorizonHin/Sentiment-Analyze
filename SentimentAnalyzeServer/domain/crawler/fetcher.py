@@ -40,6 +40,7 @@ class DataFetcher:
         self,
         proxy_url: Optional[str] = None,
         api_url: Optional[str] = None,
+        max_comments: int = 30,
     ):
         """
         初始化数据获取器
@@ -47,9 +48,11 @@ class DataFetcher:
         Args:
             proxy_url: 代理服务器 URL（可选）
             api_url: API 基础 URL（可选，默认使用 DEFAULT_API_URL）
+            max_comments: 最大抓取评论数量（默认 30）
         """
         self.proxy_url = proxy_url
         self.api_url = api_url or self.DEFAULT_API_URL
+        self.max_comments = max_comments
         self._playwright = None
         self._browser = None
 
@@ -274,7 +277,14 @@ class DataFetcher:
             comment_selector = 'span[class*="type-text"]'
             page.wait_for_selector(comment_selector, timeout=10000)
             comment_elements = page.query_selector_all(comment_selector)
-            comments = [el.inner_text().strip() for el in comment_elements if el.inner_text().strip()]
+            
+            for el in comment_elements:
+                text = el.inner_text().strip()
+                if text:
+                    comments.append(text)
+                if len(comments) >= self.max_comments:
+                    break
+            
             logger.info(f"Playwright 为标题 '{title}' 抓取到 {len(comments)} 条百度评论")
         except Exception as e:
             logger.warning(f"crawl_baidu_comments 整体失败: {e}")
@@ -355,16 +365,22 @@ class DataFetcher:
                         # 去除 HTML 标签 (微博评论中常含 <a> 或 <img>)
                         clean_text = re.sub(r'<[^>]+>', '', text).strip()
                         if clean_text:
-                            comments.append(clean_text)
+                            # 去重并添加
+                            if clean_text not in comments:
+                                comments.append(clean_text)
+                        
+                        if len(comments) >= self.max_comments:
+                            break
                     
+                    if len(comments) >= self.max_comments:
+                        break
+                        
                     # 适当休眠，模拟真实行为
                     time.sleep(1)
                 except Exception as loop_e:
                     logger.warning(f"获取 mid={mid} 的评论时出错: {loop_e}")
                     continue
             
-            # 去重并限制最终返回的总评论数量
-            comments = list(dict.fromkeys(comments))[:30]
             logger.info(f"Playwright 为标题 '{title}' 抓取到 {len(comments)} 条微博评论")
 
         except Exception as e:
@@ -377,7 +393,112 @@ class DataFetcher:
 
     def crawl_bilibili_comments(self, title: str) -> List[str]:
         """
-        爬取哔哩哔哩事件数据，返回评论区评论内容列表。
+        根据关键词title，爬取哔哩哔哩数据，返回热门评论区评论内容列表。
+        使用 Playwright 搜索视频并获取多个视频的评论，直到达到上限。
         """
-        
-        return []
+        comments = []
+        context = None
+        try:
+            # 1. 获取浏览器实例，注意处理 _playwright 被关闭的情况
+            browser = self._get_browser()
+            context = browser.new_context(user_agent=self.DEFAULT_HEADERS["User-Agent"])
+            page = context.new_page()
+
+            # 2. 搜索视频
+            search_url = f"https://search.bilibili.com/all?keyword={requests.utils.quote(title)}"
+            page.goto(search_url, wait_until="networkidle", timeout=30000)
+            
+            # 获取搜索页面的视频链接列表
+            video_link_selector = '.bili-video-card__info--right a'
+            try:
+                page.wait_for_selector(video_link_selector, timeout=10000)
+            except:
+                logger.warning(f"搜索结果未及时加载: {title}")
+                return []
+
+            video_links = page.query_selector_all(video_link_selector)
+            video_urls = []
+            for link in video_links:
+                href = link.get_attribute("href")
+                if href:
+                    url = "https:" + href if href.startswith("//") else href
+                    video_urls.append(url)
+            
+            if not video_urls:
+                logger.warning(f"无法找到 Bilibili 搜索结果: {title}")
+                return []
+
+            # 3. 遍历视频 URL 列表，直到评论达到上限
+            for video_url in video_urls:
+                if len(comments) >= self.max_comments:
+                    break
+                
+                try:
+                    # 进入视频详情页
+                    page.goto(video_url, wait_until="networkidle", timeout=20000)
+                    
+                    # 提取评论 (Shadow DOM 穿透)
+                    page.evaluate("window.scrollBy(0, 800)")
+                    time.sleep(2.5) # 等待渲染
+
+                    comments_script = """
+                    () => {
+                        const results = [];
+                        const commentsApp = document.querySelector("#commentapp > bili-comments");
+                        if (!commentsApp || !commentsApp.shadowRoot) return results;
+
+                        const threads = commentsApp.shadowRoot.querySelectorAll("#feed > bili-comment-thread-renderer");
+                        for (const thread of threads) {
+                            if (!thread.shadowRoot) continue;
+                            
+                            // 提取根评论
+                            const commentNode = thread.shadowRoot.querySelector("#comment");
+                            if (commentNode && commentNode.shadowRoot) {
+                                const richText = commentNode.shadowRoot.querySelector("#content > bili-rich-text");
+                                if (richText && richText.shadowRoot) {
+                                    const textSpan = richText.shadowRoot.querySelector("#contents > span");
+                                    if (textSpan && textSpan.innerText.trim()) {
+                                        results.push(textSpan.innerText.trim());
+                                    }
+                                }
+                            }
+
+                            // 提取首个回复
+                            const repliesRenderer = thread.shadowRoot.querySelector("#replies > bili-comment-replies-renderer");
+                            if (repliesRenderer && repliesRenderer.shadowRoot) {
+                                const firstReply = repliesRenderer.shadowRoot.querySelector("#expander-contents > bili-comment-reply-renderer");
+                                if (firstReply && firstReply.shadowRoot) {
+                                    const replyRichText = firstReply.shadowRoot.querySelector("#main > bili-rich-text");
+                                    if (replyRichText && replyRichText.shadowRoot) {
+                                        const replySpan = replyRichText.shadowRoot.querySelector("#contents > span");
+                                        if (replySpan && replySpan.innerText.trim()) {
+                                            results.push(replySpan.innerText.trim());
+                                        }
+                                    }
+                                }
+                            }
+                            if (results.length >= 10) break;
+                        }
+                        return results;
+                    }
+                    """
+                    
+                    extracted_texts = page.evaluate(comments_script)
+                    for text in extracted_texts:
+                        if text and text not in comments:
+                            comments.append(text)
+                        if len(comments) >= self.max_comments:
+                            break
+                    
+                except Exception as video_e:
+                    logger.warning(f"处理 B站单个视频 {video_url} 报错: {video_e}")
+                    continue
+
+            logger.info(f"Playwright 最终为 B站标题 '{title}' 抓取到 {len(comments)} 条评论")
+        except Exception as e:
+            logger.warning(f"crawl_bilibili_comments 整体失败: {e}")
+            return []
+        finally:
+            if context:
+                context.close()
+        return comments

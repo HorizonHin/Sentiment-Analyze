@@ -12,7 +12,7 @@ from typing import Any
 from flask import Flask, jsonify
 import yaml
 from SentimentAnalyzeServer.application.scheduled import Scheduled
-from SentimentAnalyzeServer.application.common import Result
+from SentimentAnalyzeServer.application.common import Result, get_config, get_interval_seconds
 from SentimentAnalyzeServer.application.dataFetcherAppService import DataFetcherAppService
 from SentimentAnalyzeServer.application.sentimentAnalyzeAppsService import SentimentAnalyzeAppService
 from SentimentAnalyzeServer.application.topicAppService import TopicAppService
@@ -69,23 +69,12 @@ def get_app_logger( log_dir: str = None) -> logging.Logger:
 
     return root_logger
 
-#系统周期性任务的调度器，负责定时触发爬取、分析等流程
-def get_interval_seconds_from_config(config: dict[str, Any] | None) -> int:
-    scheduler_config = ((config or {}).get("scheduler") or {})
-    raw = str(scheduler_config.get("crawl_interval_minutes", "30")).strip()
-    try:
-        minutes = max(1, int(raw))
-    except ValueError:
-        minutes = 30
-    return minutes * 60
-
 def create_app() -> Flask:
     app_logger = get_app_logger()  # 配置 Root Logger，所有模块日志汇总到一起
     app = Flask(__name__)
+    config = get_config()
     root_dir = Path(__file__).resolve().parent.parent
     config_path = root_dir / "config.yaml"
-    with config_path.open("r", encoding="utf-8") as f:
-        config = yaml.safe_load(f) or {}
 
     llm_executor_config = config.get("llm_executor") or {}
     try:
@@ -93,7 +82,7 @@ def create_app() -> Flask:
     except (TypeError, ValueError):
         llm_max_workers = 32
 
-    interval_seconds = get_interval_seconds_from_config(config)
+    interval_seconds = get_interval_seconds()
 
     sentiment_config = config.get("sentiment") or {}
     try:

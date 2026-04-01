@@ -9,16 +9,16 @@ platforms:
     #   name: "华尔街见闻"
     # - id: "thepaper"
     #   name: "澎湃新闻"
-    # - id: "bilibili-hot-search"
-    #   name: "bilibili 热搜"
+    - id: "bilibili-hot-search"
+      name: "bilibili 热搜"
     # - id: "cls-hot"
     #   name: "财联社热门"
     # - id: "ifeng"
     #   name: "凤凰网"
     # - id: "tieba"
     #   name: "贴吧"
-    - id: "weibo"
-      name: "微博"
+    # - id: "weibo"
+    #   name: "微博"
     # - id: "douyin"
     #   name: "抖音"
     # - id: "zhihu"
@@ -43,12 +43,15 @@ sentiment:
     max_comments: 20               # 微博评论爬取数量限制
     search_type: "1"               # 默认搜索类型 (SearchType.DEFAULT)
     mobile_index_url: "https://m.weibo.cn"
+  bilibili:
+    search_url: "https://search.bilibili.com/all?keyword="
+    comment_api_url: "https://api.bilibili.com/x/v2/reply?type=1&oid="
 
 common_thread_pool:
-  max_workers: 8
+  max_workers: 1
 
 llm:
-  api_key: ""                      # 必填：请填写通义千问 API Key #不填则默认使用环境变量中的 API Key
+  api_key: ""                      # 请填写通义千问 API Key ，不填则默认使用环境变量中的 API Key
 
 topic:
   lookback_hours: 3                 # 热点回看窗口（小时）。不配置时默认按 12.2 个抓取周期

@@ -3,7 +3,7 @@ import logging
 import os
 import random
 import time
-from typing import Any
+from typing import Any, List
 
 from openai import BadRequestError, OpenAI, RateLimitError
 
@@ -194,6 +194,8 @@ class LLMTitleAnalyzer:
     def analyze_title(self, title: str, comments: List[str] | None = None) -> dict[str, Any]:
         if not title or not title.strip():
             raise ValueError("title cannot be empty")
+        if not isinstance(comments, list) and comments is not None:
+            raise ValueError("comments must be a list of strings or None")
 
         comments_text = "\n".join(comments) if comments else "无"
 
@@ -254,16 +256,6 @@ class LLMTitleAnalyzer:
 
                 logger.exception("LLM 分析标题异常 (非速率限制)，已超过重试次数。title=%s", title)
                 raise
-
-    def analyze_titles(self, titles: list[str]) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
-        for title in titles:
-            try:
-                results.append(self.analyze_title(title))
-            except Exception as e:
-                logger.error(f"分析标题列表时遇到异常，跳过该标题。标题: {title}，异常: {e}")
-                continue
-        return results
 
     def summarize_topic_title(self, old_topic: str, titles: list[str]) -> str:
         cleaned_titles = [str(title).strip() for title in (titles or []) if str(title).strip()]

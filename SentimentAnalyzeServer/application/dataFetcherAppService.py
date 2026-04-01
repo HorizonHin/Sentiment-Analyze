@@ -7,11 +7,12 @@ import yaml
 
 from SentimentAnalyzeServer.system.infra import (
     EVENT_CRAWL_SAVED,
-    REDIS_KEY_LATEST_UPDATED_ANALYZED_NEWS,
+    REDIS_KEY_LATEST_NOT_NEED_ANALYSIS_NEWS,
     CommonThreadPool,
     EventManager,
     MyRedis,
 )
+from SentimentAnalyzeServer.application.common import is_item_analysis_pending
 from SentimentAnalyzeServer.domain.crawler import DataFetcher
 from SentimentAnalyzeServer.domain.news.news import (
     NewsData,
@@ -27,7 +28,15 @@ logger = logging.getLogger(__name__)
 class DataFetcherAppService:
     def __init__(self, config_path: str | Path, storage: object) -> None:
         self.config_path = Path(config_path)
-        self.fetcher = DataFetcher()
+        
+        # 从配置中读取最大评论数
+        with self.config_path.open("r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+        
+        sentiment_config = config.get("sentiment") or {}
+        max_comments = int(sentiment_config.get("weibo", {}).get("max_comments", 30))
+        
+        self.fetcher = DataFetcher(max_comments=max_comments)
         self.news_domain_service = NewsDomainService(storage)
         self.event_manager = EventManager()
         self.redis = MyRedis()
@@ -36,72 +45,8 @@ class DataFetcherAppService:
     def _serialize_news_items(self, items: List[NewsItem]) -> List[Dict[str, Any]]:
         return [item.to_dict() for item in items]
 
-    def _cache_latest_updated_analyzed_items(self, items: List[NewsItem]) -> None:
-        payload = self._serialize_news_items(items)
-        self.redis.set(REDIS_KEY_LATEST_UPDATED_ANALYZED_NEWS, payload)
-
-    def _load_platforms(self) -> list[tuple[str, str]]:
-        with self.config_path.open("r", encoding="utf-8") as f:
-            config = yaml.safe_load(f) or {}
-
-        sources = (config.get("platforms") or {}).get("sources") or []
-        ids: list[tuple[str, str]] = []
-        for item in sources:
-            if not isinstance(item, dict):
-                continue
-            platform_id = str(item.get("id", "")).strip()
-            if not platform_id:
-                continue
-            name = str(item.get("name", platform_id)).strip() or platform_id
-            ids.append((platform_id, name))
-
-        return ids
-
-    def crawl_and_save_news_data(self) -> tuple[dict[str, Any], List[NewsItem]]:
-        ids = self._load_platforms()
-        if not ids:
-            logger.error("[dataFetcher] 未在配置中找到可抓取平台")
-            return {"success": False, "reason": "no_platforms"}, []
-
-        results, id_to_name, failed_ids = self.fetcher.crawl_websites(ids)
-        last_time = int(time.time())
-        crawl_date = last_time - (last_time % 86400)
-        try:
-            saved_items = self.convert_crawl_results_and_save(
-                results=results,
-                id_to_name=id_to_name,
-                failed_ids=failed_ids,
-                last_time=last_time,
-                crawl_date=crawl_date,
-            )
-        except Exception:
-            return {
-                "success": False,
-                "reason": "save_failed",
-                "platform_count": len(ids),
-                "success_count": len(results),
-                "failed_count": len(failed_ids),
-                "failed_ids": failed_ids,
-                "id_to_name": id_to_name,
-            }, []
-
-        logger.info(
-            "[dataFetcher] 抓取并入库成功。platform_count=%s, success_count=%s, failed_count=%s, saved_count=%s",
-            len(ids),
-            len(results),
-            len(failed_ids),
-            len(saved_items),
-        )
-        return {
-            "success": True,
-            "platform_count": len(ids),
-            "success_count": len(results),
-            "failed_count": len(failed_ids),
-            "failed_ids": failed_ids,
-            "id_to_name": id_to_name,
-        }, saved_items
-
-    def convert_crawl_results_to_news_data(
+    
+    def _convert_crawl_results_to_news_data(
         self,
         results: Dict[str, Dict],
         id_to_name: Dict[str, str],
@@ -149,6 +94,28 @@ class DataFetcherAppService:
             failed_ids=failed_ids,
         )
 
+    
+    def _cache_latest_not_need_analysis_items(self, items: List[NewsItem]) -> None:
+        payload = self._serialize_news_items(items)
+        self.redis.set(REDIS_KEY_LATEST_NOT_NEED_ANALYSIS_NEWS, payload)
+
+    def _load_platforms(self) -> list[tuple[str, str]]:
+        with self.config_path.open("r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+
+        sources = (config.get("platforms") or {}).get("sources") or []
+        ids: list[tuple[str, str]] = []
+        for item in sources:
+            if not isinstance(item, dict):
+                continue
+            platform_id = str(item.get("id", "")).strip()
+            if not platform_id:
+                continue
+            name = str(item.get("name", platform_id)).strip() or platform_id
+            ids.append((platform_id, name))
+
+        return ids
+
     def convert_crawl_results_and_save(
         self,
         results: Dict[str, Dict],
@@ -157,7 +124,7 @@ class DataFetcherAppService:
         last_time: int,
         crawl_date: int,
     ) -> List[NewsItem]:
-        current_data = self.convert_crawl_results_to_news_data(
+        current_data = self._convert_crawl_results_to_news_data(
             results=results,
             id_to_name=id_to_name,
             failed_ids=failed_ids,
@@ -173,8 +140,8 @@ class DataFetcherAppService:
         if not incoming_items:
             return self.news_domain_service.add_news_items(incoming_items)
 
-        # 在保存前抓取评论
-        for item in incoming_items:
+        # 在保存前并行抓取评论
+        def fetch_comments_task(item: NewsItem):
             try:
                 comments = self.fetcher.crawl_comments_dispatch(item.source_id, item.title)
                 if comments:
@@ -182,6 +149,14 @@ class DataFetcherAppService:
                     logger.info(f"成功抓取到评论: {item.source_id} - {item.title} (count: {len(comments)})")
             except Exception as e:
                 logger.warning(f"抓取评论失败 {item.source_id} - {item.title}: {e}")
+
+        futures = [self.common_thread_pool.submit(fetch_comments_task, item) for item in incoming_items]
+        # 等待所有抓取任务完成
+        for future in futures:
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"评论抓取线程执行出错: {e}")
 
         key_list = list({(item.source_id, item.title) for item in incoming_items if item.source_id and item.title})
         existing_items = self.news_domain_service.get_news_list_by_source_title_list(
@@ -225,11 +200,16 @@ class DataFetcherAppService:
             if not updated_items:
                 raise RuntimeError("更新已存在新闻数据失败")
 
-            analyzed_updated_items = [item for item in updated_items if item.analyzed_time is not None]
-            if analyzed_updated_items:
+            # 过滤出不需要进行分析的 items
+            not_need_analysis_items = [
+                item for item in updated_items 
+                if not is_item_analysis_pending(item)
+            ]
+            
+            if not_need_analysis_items:
                 self.common_thread_pool.submit(
-                    self._cache_latest_updated_analyzed_items,
-                    analyzed_updated_items,
+                    self._cache_latest_not_need_analysis_items,
+                    not_need_analysis_items,
                 )
 
             saved_items.extend(updated_items)
@@ -245,3 +225,48 @@ class DataFetcherAppService:
             )
 
         return saved_items
+
+    def crawl_and_save_news_data(self) -> tuple[dict[str, Any], List[NewsItem]]:
+        ids = self._load_platforms()
+        if not ids:
+            logger.error("[dataFetcher] 未在配置中找到可抓取平台")
+            return {"success": False, "reason": "no_platforms"}, []
+
+        results, id_to_name, failed_ids = self.fetcher.crawl_websites(ids)
+        last_time = int(time.time())
+        crawl_date = last_time - (last_time % 86400)
+        try:
+            saved_items = self.convert_crawl_results_and_save(
+                results=results,
+                id_to_name=id_to_name,
+                failed_ids=failed_ids,
+                last_time=last_time,
+                crawl_date=crawl_date,
+            )
+        except Exception:
+            return {
+                "success": False,
+                "reason": "save_failed",
+                "platform_count": len(ids),
+                "success_count": len(results),
+                "failed_count": len(failed_ids),
+                "failed_ids": failed_ids,
+                "id_to_name": id_to_name,
+            }, []
+
+        logger.info(
+            "[dataFetcher] 抓取并入库成功。platform_count=%s, success_count=%s, failed_count=%s, saved_count=%s",
+            len(ids),
+            len(results),
+            len(failed_ids),
+            len(saved_items),
+        )
+        return {
+            "success": True,
+            "platform_count": len(ids),
+            "success_count": len(results),
+            "failed_count": len(failed_ids),
+            "failed_ids": failed_ids,
+            "id_to_name": id_to_name,
+        }, saved_items
+
