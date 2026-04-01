@@ -28,16 +28,21 @@ class WorkflowEventSubscribers:
         topic_app_service: TopicAppService,
         crawl_interval_seconds: int,
     ) -> None:
+        self._is_registered = False
         self.event_manager = EventManager()
         self.sentiment_app_service = sentiment_app_service
         self.topic_app_service = topic_app_service
         self.crawl_interval_seconds = max(60, int(crawl_interval_seconds))
 
     def register(self) -> None:
-        self.event_manager.subscribe(EVENT_CRAWL_SAVED, self._on_crawl_saved)
+        if self._is_registered:
+            logger.warning("WorkflowEventSubscribers already registered, skipping.")
+            return
+        # self.event_manager.subscribe(EVENT_CRAWL_SAVED, self._on_crawl_saved)
         self.event_manager.subscribe(EVENT_SENTIMENT_ANALYZED, self._on_sentiment_analyzed)
         self.event_manager.subscribe(EVENT_TOPIC_RANK_UPDATED, self._on_topic_rank_updated)
-
+        self._is_registered = True
+        
     def _on_crawl_saved(self, payload: Dict[str, Any]) -> None:
         saved_items = payload.get("saved_items", [])
         if not isinstance(saved_items, list) or not saved_items:
@@ -58,7 +63,7 @@ class WorkflowEventSubscribers:
         lookback_seconds = self.crawl_interval_seconds * _TOPIC_LOOKBACK_MULTIPLIER
         end_time = int(time.time())
         start_time = end_time - int(lookback_seconds)
-
+        logger.info('处理情感分析完成事件，触发话题推荐。lookback_seconds=%s, start_time=%s, end_time=%s',)
         try:
             self.topic_app_service.recommend_and_cache_topics(
                 start_time=start_time,

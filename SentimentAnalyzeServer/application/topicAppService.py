@@ -141,7 +141,6 @@ class TopicAppService:
         topic_cache_manager: Optional[TopicCacheManager] = None,
         llm_title_analyzer: Optional[LLMTitleAnalyzer] = None,
         first_time_lookback_seconds: int = 7 * 24 * 3600,
-        logger: logging.Logger = None,
     ) -> None:
         self.topic_domain_service = topic_domain_service
         self.news_domain_service = news_domain_service
@@ -154,8 +153,6 @@ class TopicAppService:
         self.event_manager = EventManager()
         self.common_thread_pool = CommonThreadPool()
         self.first_time_lookback_seconds = max(60, int(first_time_lookback_seconds))
-
-        self.logger = logger
         self._init_topic_persist_queue()
 
         # 注入所有默认值
@@ -299,8 +296,7 @@ class TopicAppService:
 
         is_locked = redis.set(redis_key, now_ts, ttl_seconds=cooldown, nx=True)
         if not is_locked:
-            if self.logger:
-                self.logger.info(f"recommend_and_cache_topics: 距离上次执行不足5分钟，直接返回，无需重复执行。now={now_ts}")
+            logger.info(f"recommend_and_cache_topics: 距离上次执行不足5分钟，直接返回，无需重复执行。now={now_ts}")
             return []
 
         resolved_end_time = int(end_time) if end_time is not None else int(time.time())
@@ -349,18 +345,17 @@ class TopicAppService:
                 #计算heat_change_percent和stage
                 history = self.topic_domain_service.get_topic_history(new_status_topic)
                 if not history:
-                    if self.logger:
-                        self.logger.warning(
+                    logger.warning(
                         "话题没有历史数据. topic_name=%s, topic_id=%s",
                         topic_name,
                         topic_db_match.id,
                     )
                     self.put_topic_to_persist_queue(new_status_topic)
                     continue
-                if (new_status_topic.updated_at - history[-1].updated_at) < 300: #小于5分钟，更新太快
+                if (new_status_topic.updated_at - history[-1].updated_at) < 600: #小于5分钟，更新太快
                     #再防一手更新太快的异常状况，并log
-                    if self.logger:
-                        self.logger.warning(
+
+                    logger.warning(
                         "话题更新太快，可能导致heat_change_percent和stage计算不准确. topic_name=%s, topic_id=%s, updated_at=%s, last_history_updated_at=%s",
                         topic_name,
                         topic_db_match.id,
@@ -374,9 +369,8 @@ class TopicAppService:
             updated_topics.append(new_status_topic)
 
         self.topic_cache_manager.save_or_update_topics_cache(updated_topics, limit=cache_limit)
-        
-        if self.logger:
-            self.logger.info(
+
+        logger.info(
             "Topic recommendation cached successfully. topic_count=%s, top_n=%s, cache_limit=%s",
             len(updated_topics),
             top_n,
@@ -535,13 +529,13 @@ class TopicAppService:
                 llm_title = str(future.result() or "").strip()
             except Exception as exc:
                 skipped_count += 1
-                if self.logger:
-                    self.logger.warning(exc)
-                    self.logger.exception(
-                    "build llm_title failed. created_at=%s, id=%s, topic=%s",
-                    topic.created_at,
-                    topic.id,
-                    topic.topic,
+
+                logger.warning(exc)
+                logger.exception(
+                "build llm_title failed. created_at=%s, id=%s, topic=%s",
+                   topic.created_at,
+                topic.id,
+                topic.topic,
                 )
                 continue
 

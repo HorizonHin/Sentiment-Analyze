@@ -1,28 +1,28 @@
 platforms:
   enabled: true                         # 是否启用热榜平台抓取
   sources:
-    - id: "toutiao"
-      name: "今日头条"
+    # - id: "toutiao"
+    #   name: "今日头条"
     - id: "baidu"
       name: "百度热搜"
-    - id: "wallstreetcn-hot"
-      name: "华尔街见闻"
-    - id: "thepaper"
-      name: "澎湃新闻"
-    - id: "bilibili-hot-search"
-      name: "bilibili 热搜"
-    - id: "cls-hot"
-      name: "财联社热门"
-    - id: "ifeng"
-      name: "凤凰网"
-    - id: "tieba"
-      name: "贴吧"
+    # - id: "wallstreetcn-hot"
+    #   name: "华尔街见闻"
+    # - id: "thepaper"
+    #   name: "澎湃新闻"
+    # - id: "bilibili-hot-search"
+    #   name: "bilibili 热搜"
+    # - id: "cls-hot"
+    #   name: "财联社热门"
+    # - id: "ifeng"
+    #   name: "凤凰网"
+    # - id: "tieba"
+    #   name: "贴吧"
     - id: "weibo"
       name: "微博"
-    - id: "douyin"
-      name: "抖音"
-    - id: "zhihu"
-      name: "知乎"
+    # - id: "douyin"
+    #   name: "抖音"
+    # - id: "zhihu"
+    #   name: "知乎"
 
 weight:
   rank_threshold: 10
@@ -34,11 +34,15 @@ weight:
 llm_executor:
   max_workers: 4
 
-scheduler:
-  crawl_interval_minutes: 23       # 系统周期（原 CRAWL_INTERVAL_MINUTES）
+scheduler:  #记得改回来
+  crawl_interval_minutes: 230000000       # 系统周期（原 CRAWL_INTERVAL_MINUTES）
 
 sentiment:
   first_time_lookback_days: 3      # 查询分区键 first_time 默认回溯天数
+  weibo:
+    max_comments: 20               # 微博评论爬取数量限制
+    search_type: "1"               # 默认搜索类型 (SearchType.DEFAULT)
+    mobile_index_url: "https://m.weibo.cn"
 
 common_thread_pool:
   max_workers: 8

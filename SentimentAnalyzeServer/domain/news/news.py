@@ -87,7 +87,8 @@ class NewsItem:
     source_id: str = ""                      # 来源平台ID（如 toutiao, baidu）
     source_name: str = ""                    # 来源平台名称（运行时使用，数据库不存储）
     event_type: str = ""
-    summary: str = ""
+    summary: str = "" # LLM总结的公众评论摘要
+    comments: List[str] = field(default_factory=list)  # 公众评论内容列表，不存储数据库，仅运行时使用
     entities: List[Entity] = field(default_factory=list)
     keywords: List[Keyword] = field(default_factory=list)
     latest_rank: int = 0                 # 排名

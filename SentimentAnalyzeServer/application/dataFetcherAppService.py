@@ -173,6 +173,16 @@ class DataFetcherAppService:
         if not incoming_items:
             return self.news_domain_service.add_news_items(incoming_items)
 
+        # 在保存前抓取评论
+        for item in incoming_items:
+            try:
+                comments = self.fetcher.crawl_comments_dispatch(item.source_id, item.title)
+                if comments:
+                    item.comments = comments
+                    logger.info(f"成功抓取到评论: {item.source_id} - {item.title} (count: {len(comments)})")
+            except Exception as e:
+                logger.warning(f"抓取评论失败 {item.source_id} - {item.title}: {e}")
+
         key_list = list({(item.source_id, item.title) for item in incoming_items if item.source_id and item.title})
         existing_items = self.news_domain_service.get_news_list_by_source_title_list(
             key_list,

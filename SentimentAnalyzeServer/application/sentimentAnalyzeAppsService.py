@@ -29,8 +29,9 @@ class SentimentAnalyzeAppService:
 		max_workers: int = 32,
 		recent_window_seconds: int = 30 * 60,
 		first_time_lookback_seconds: int = 7 * 24 * 60 * 60,
+		news_domain_service: Optional[NewsDomainService] = None,
 	) -> None:
-		self.news_domain_service = NewsDomainService(storage)
+		self.news_domain_service = news_domain_service or NewsDomainService(storage)
 		self.llm_domain_analyzer = analyzer
 		self.event_manager = EventManager()
 		self.redis = MyRedis()
@@ -166,11 +167,6 @@ class SentimentAnalyzeAppService:
 				len(pending_items),
 			)
 
-		logger.info(
-			"Analysis and persistence completed. pending_count=%s, persisted_count=%s",
-			len(pending_items),
-			len(updated_items),
-		)
 		now_ts = int(time.time())
 		recent_threshold = now_ts - self.recent_window_seconds
 		recent_items = [

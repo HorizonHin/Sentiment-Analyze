@@ -8,3 +8,4 @@ uml/*
 .vscode/settings.json
 SentimentAnalyzeServer/.vscode/*
 SentimentAnalyzeServer/system/last_scheduler_run.txt
+SentimentAnalyzeServer/system/logs/root_app.log

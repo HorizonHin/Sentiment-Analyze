@@ -160,6 +160,7 @@ class MyRedis:
                 # 1. 检查是否存在（且处理过期）
                 current_val = self.get(key) # get 方法内部已经处理了过期逻辑
                 if nx and current_val is not None:
+                    logger.info(f"Redis set NX failed: key '{key}' already exists")
                     return False
                 self._cache[key] = {
                     "value": deepcopy(value),
@@ -211,14 +212,23 @@ class EventManager:
 
     def subscribe(self, event_name: str, handler: Callable) -> None:
         with self._lock:
-           handlers = self._subscribers.setdefault(event_name, [])
-            # 获取函数的唯一标识（模块名 + 函数名）
-           handler_key = f"{handler.__module__}.{handler.__name__}"
-           # 检查是否已经存在同名的 handler
-           exists = any(f"{h.__module__}.{h.__name__}" == handler_key for h in handlers)
-           if not exists:
-               handlers.append(handler)
-               logger.info(f"Successfully subscribed: {handler_key}")
+            if event_name not in self._subscribers:
+                self._subscribers[event_name] = []
+            
+            handlers = self._subscribers[event_name]
+            
+            # 改进：直接比较函数对象本身，或者使用更稳定的 qualname
+            # handler.__qualname__ 会包含类名，如 "WorkflowEventSubscribers._on_sentiment_analyzed"
+            handler_id = f"{handler.__module__}.{handler.__qualname__}"
+            
+            exists = any(f"{h.__module__}.{h.__qualname__}" == handler_id for h in handlers)
+            
+            if not exists:
+                handlers.append(handler)
+                logger.info(f"[EventManager] Subscribed: {event_name} -> {handler_id}")
+            else:
+                # 这种日志能帮你快速发现代码里哪里写重了
+                logger.debug(f"[EventManager] Skip duplicate subscription: {handler_id}")
 
     def unsubscribe(self, event_name: str, handler: Callable[[Dict[str, Any]], None]) -> None:
         with self._lock:

@@ -11,10 +11,7 @@ from typing import Any
 
 from flask import Flask, jsonify
 import yaml
-from SentimentAnalyzeServer.application.scheduled import (
-    Scheduled,
-    get_interval_seconds_from_config,
-)
+from SentimentAnalyzeServer.application.scheduled import Scheduled
 from SentimentAnalyzeServer.application.common import Result
 from SentimentAnalyzeServer.application.dataFetcherAppService import DataFetcherAppService
 from SentimentAnalyzeServer.application.sentimentAnalyzeAppsService import SentimentAnalyzeAppService
@@ -30,52 +27,61 @@ from SentimentAnalyzeServer.system.infra import CommonThreadPool
 import logging
 import os
 
-def get_app_logger(log_name: str = None, log_dir: str = None) -> logging.Logger:
-    """
-    配置并返回 Logger。
-    :param log_name: 传 None 则配置 Root Logger，子模块日志将自动汇总。
-    """
+def get_app_logger( log_dir: str = None) -> logging.Logger:
     if log_dir is None:
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         log_dir = os.path.join(base_dir, 'system', 'logs')
     
     os.makedirs(log_dir, exist_ok=True)
-    
-    # 如果是 Root Logger，文件名叫 app.log；否则按 log_name 命名
-    file_name = log_name if log_name else "root_app"
-    log_file = os.path.join(log_dir, f'{file_name}.log')
+    log_file = os.path.join(log_dir, 'root_app.log')
 
-    # 获取 Logger (传 None 即获取 Root Logger)
-    logger = logging.getLogger(log_name)
-    logger.setLevel(logging.INFO)
+    # 1. 获取 Root Logger
+    root_logger = logging.getLogger() # 明确获取根
+    root_logger.setLevel(logging.INFO)
 
-    if not logger.handlers:
-        # 每达到 10MB 自动换新文件，最多保留 5 个备份
-        file_handler = RotatingFileHandler(
-            log_file, 
-            maxBytes=10 * 1024 * 1024, 
-            backupCount=5, 
-            encoding='utf-8'
-        )
-        # 建议在 Formatter 中加入线程名 [%(threadName)s]，对你排查调度任务非常有帮助
-        formatter = logging.Formatter(
-            '[%(asctime)s] %(levelname)s [%(name)s] [%(threadName)s]: %(message)s'
-        )
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        
-        # 控制台也要加，方便开发看
-        console = logging.StreamHandler()
-        console.setFormatter(formatter)
-        logger.addHandler(console)
-    return logger
+    # 2. 【关键】清理所有已存在的 Handler，防止重复或冲突
+    # 有些库可能在你启动前就偷偷塞了 Handler
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
 
+    # 3. 创建统一的 Formatter
+    formatter = logging.Formatter(
+        '[%(asctime)s] %(levelname)s [%(name)s] [%(threadName)s]: %(message)s'
+    )
+
+    # 4. 配置新的 FileHandler
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=10*1024*1024, backupCount=5, encoding='utf-8'
+    )
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+
+    # 5. 配置新的 StreamHandler (控制台)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+    # 6. 【黑科技】强制开启所有子模块的传播
+    # 遍历当前所有已创建的 logger，强制它们把日志交给 Root
+    for name in logging.root.manager.loggerDict:
+        if name.startswith("SentimentAnalyzeServer"):
+            logging.getLogger(name).propagate = True
+
+    return root_logger
+
+#系统周期性任务的调度器，负责定时触发爬取、分析等流程
+def get_interval_seconds_from_config(config: dict[str, Any] | None) -> int:
+    scheduler_config = ((config or {}).get("scheduler") or {})
+    raw = str(scheduler_config.get("crawl_interval_minutes", "30")).strip()
+    try:
+        minutes = max(1, int(raw))
+    except ValueError:
+        minutes = 30
+    return minutes * 60
 
 def create_app() -> Flask:
-
+    app_logger = get_app_logger()  # 配置 Root Logger，所有模块日志汇总到一起
     app = Flask(__name__)
-    app_logger = get_app_logger(None)  # 配置 Root Logger，所有模块日志汇总到一起
-
     root_dir = Path(__file__).resolve().parent.parent
     config_path = root_dir / "config.yaml"
     with config_path.open("r", encoding="utf-8") as f:
@@ -155,7 +161,6 @@ def create_app() -> Flask:
         topic_config=config.get("topic") or {},
         llm_title_analyzer=llm_title_analyzer,
         first_time_lookback_seconds=first_time_lookback_seconds,
-        logger=app_logger,
     )
     workflow_subscribers = WorkflowEventSubscribers(
         sentiment_app_service=sentiment_app_service,
@@ -185,16 +190,27 @@ def create_app() -> Flask:
     )
 
     app.config["scheduler"] = scheduler
-    scheduler.start()
+    
+    # 只有在非 Debug 模式，或者是 Debug 模式下的工作子进程中，才启动调度器
+    is_main_process = os.environ.get("WERKZEUG_RUN_MAIN") == "true"
+    is_debug_disabled = not app.debug
+
+    if is_main_process or is_debug_disabled:
+        # app.config["scheduler"] = scheduler
+        # scheduler.start()
+        app_logger.info("[Scheduler] 确认在工作进程中启动")
+    else:
+        app_logger.info("[Scheduler] 检测到 Flask 热重载父进程，跳过启动以防重复")
 
     def _shutdown_scheduler() -> None:
         scheduler.stop()
 
     atexit.register(_shutdown_scheduler)
 
-    @app.get("/health")
+    @app.get("/test")
     def health() -> Any:
-        return jsonify(Result.success_result({"status": "ok"}).to_dict())
+        result = data_fetcher_app_service.crawl_and_save_news_data()
+        return jsonify(Result.success_result(result).to_dict())
     
     
     
