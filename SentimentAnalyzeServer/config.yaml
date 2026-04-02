@@ -17,11 +17,11 @@ platforms:
     #   name: "贴吧"
     # - id: "thepaper"
     #   name: "澎湃新闻"
+    # - id: "hupu"
+    #   name: "虎扑"
 
-      - id: "hupu"
-        name: "虎扑"
-
-
+      - id: "tencent-hot"
+        name: "腾讯新闻"
 
     ####下面的平台由于评论过低，暂时停用
     # - id: "cls-hot"

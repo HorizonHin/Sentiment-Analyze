@@ -257,6 +257,8 @@ class DataFetcher:
             return self.crawl_thepaper_comments(title, url)
         elif "hupu" in source_id.lower():
             return self.crawl_hupu_comments(title, url)
+        elif "tencent" in source_id.lower() or "qq" in source_id.lower():
+            return self.crawl_tencent_hot_comments(title, url)
         else:
             logger.warning(f"未知平台 {source_id}，无法抓取评论")
             return []
@@ -879,4 +881,70 @@ class DataFetcher:
             return comments
         except Exception as e:
             logger.warning(f"crawl_hupu_comments 整体失败: {e}")
+            return []
+        
+    def crawl_tencent_hot_comments(self, title: str, url: str) -> List[str]:
+        """爬取腾讯新闻评论。"""
+        comments: List[str] = []
+        try:
+            # 随机等待，降低请求频率
+            time.sleep(random.uniform(1.0, 2.5))
+
+            article_id = None
+            # 示例: https://view.inews.qq.com/a/20260402A00UY000
+            match = re.search(r"/(?:rain/)?a/([A-Za-z0-9]+)", url or "")
+            if match:
+                article_id = match.group(1)
+            else:
+                q_match = re.search(r"[?&]article_id=([A-Za-z0-9]+)", url or "")
+                if q_match:
+                    article_id = q_match.group(1)
+
+            if not article_id:
+                logger.warning(f"无法从腾讯新闻链接提取 article_id: {url}")
+                return []
+
+            api_url = "https://i.news.qq.com/getQQNewsComment"
+            proxies = {"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None
+            req_num = max(5, min(self.max_comments, 50))
+
+            params = {
+                "apptype": "web",
+                "article_id": article_id,
+                "reqNum": str(req_num),
+                "transparam": "",
+            }
+
+            resp = requests.get(
+                api_url,
+                params=params,
+                headers=self.DEFAULT_HEADERS,
+                proxies=proxies,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json() if resp.text else {}
+            comments_obj = data.get("comments", {})
+
+            def walk_nodes(node):
+                if isinstance(node, dict):
+                    text = str(node.get("reply_content") or node.get("content") or "").strip()
+                    if text:
+                        text = re.sub(r"\s+", " ", text)
+                        if text not in comments:
+                            comments.append(text)
+                    for v in node.values():
+                        walk_nodes(v)
+                elif isinstance(node, list):
+                    for item in node:
+                        walk_nodes(item)
+
+            walk_nodes(comments_obj.get("new", []))
+            if len(comments) < self.max_comments:
+                walk_nodes(comments_obj.get("hot", []))
+
+            logger.info(f"为腾讯标题 '{title}' 抓取到 {min(len(comments), self.max_comments)} 条评论")
+            return comments[: self.max_comments]
+        except Exception as e:
+            logger.warning(f"crawl_tencent_hot_comments 整体失败: {e}")
             return []
