@@ -253,6 +253,8 @@ class DataFetcher:
             return await self.crawl_zhihu_comments(title, url)
         elif "tieba" in source_id.lower():
             return await self.crawl_tieba_comments(title, url)
+        elif "thepaper" in source_id.lower() or "pengpai" in source_id.lower():
+            return self.crawl_thepaper_comments(title, url)
         else:
             logger.warning(f"未知平台 {source_id}，无法抓取评论")
             return []
@@ -744,4 +746,72 @@ class DataFetcher:
                 await browser_client.release_page(page)
         return comments
         
-    
+    def crawl_thepaper_comments(self, title: str, url: str) -> List[str]:
+        """爬取澎湃新闻评论。"""
+        comments: List[str] = []
+        cont_id = None
+
+        try:
+            # 示例: https://www.thepaper.cn/newsDetail_forward_32870834
+            match = re.search(r"newsDetail_forward_(\d+)", url or "")
+            if match:
+                cont_id = match.group(1)
+            else:
+                # 兜底：尝试从 URL 中提取连续数字
+                fallback = re.search(r"(\d{6,})", url or "")
+                if fallback:
+                    cont_id = fallback.group(1)
+
+            if not cont_id:
+                logger.warning(f"无法从澎湃链接提取 contId: {url}")
+                return []
+
+            api_url = "https://api.thepaper.cn/comment/news/comment/talkList"
+            proxies = {"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None
+
+            page_num = 1
+            page_size = 20
+
+            while len(comments) < self.max_comments:
+                payload = {
+                    "contId": str(cont_id),
+                    "pageSize": page_size,
+                    "commentSort": 2,
+                    "contType": 2,
+                    "pageNum": page_num,
+                }
+
+                resp = requests.post(
+                    api_url,
+                    json=payload,
+                    headers=self.DEFAULT_HEADERS,
+                    proxies=proxies,
+                    timeout=15,
+                )
+                resp.raise_for_status()
+
+                data = resp.json() if resp.text else {}
+                items = data.get("data", {}).get("list", [])
+                has_next = bool(data.get("data", {}).get("hasNext", False))
+
+                if not items:
+                    break
+
+                for item in items:
+                    text = str(item.get("content", "")).strip()
+                    if text and text not in comments:
+                        comments.append(text)
+                        if len(comments) >= self.max_comments:
+                            break
+
+                if not has_next:
+                    break
+
+                page_num += 1
+                time.sleep(random.uniform(2, 3))
+
+            logger.info(f"为澎湃标题 '{title}' 抓取到 {len(comments)} 条评论")
+            return comments
+        except Exception as e:
+            logger.warning(f"crawl_thepaper_comments 整体失败: {e}")
+            return []

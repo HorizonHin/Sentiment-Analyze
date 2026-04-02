@@ -15,15 +15,21 @@ platforms:
     #   name: "知乎"
     # - id: "tieba"
     #   name: "贴吧"
-
-    # - id: "wallstreetcn-hot"
-    #   name: "华尔街见闻"
     # - id: "thepaper"
     #   name: "澎湃新闻"
+
+      - id: "hupu"
+        name: "虎扑"
+
+
+
+    ####下面的平台由于评论过低，暂时停用
     # - id: "cls-hot"
     #   name: "财联社热门"
     # - id: "ifeng"
     #   name: "凤凰网"
+    # - id: "wallstreetcn-hot"
+    #   name: "华尔街见闻"
 
 
 
