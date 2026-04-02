@@ -208,11 +208,9 @@ class LLMTitleAnalyzer:
             },
         }
 
-    def analyze_title(self, title: str, comments: List[str] | None = None) -> dict[str, Any]:
+    def analyze_title_and_comments(self, title: str, comments: List[str] | None = None) -> dict[str, Any]:
         if not title or not title.strip():
             raise ValueError("title cannot be empty")
-        if not isinstance(comments, list) and comments is not None:
-            raise ValueError("comments must be a list of strings or None")
 
         comments_text = "\n".join(comments) if comments else "无"
 

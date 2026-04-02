@@ -13,6 +13,8 @@ platforms:
     #   name: "今日头条"
     #   - id: "zhihu"
     #   name: "知乎"
+    # - id: "tieba"
+    #   name: "贴吧"
 
     # - id: "wallstreetcn-hot"
     #   name: "华尔街见闻"
@@ -23,8 +25,7 @@ platforms:
     # - id: "ifeng"
     #   name: "凤凰网"
 
-    - id: "tieba"
-      name: "贴吧"
+
 
 
 weight:

@@ -251,6 +251,8 @@ class DataFetcher:
             return await self.crawl_toutiao_comments(title, url)
         elif "zhihu" in source_id.lower():
             return await self.crawl_zhihu_comments(title, url)
+        elif "tieba" in source_id.lower():
+            return await self.crawl_tieba_comments(title, url)
         else:
             logger.warning(f"未知平台 {source_id}，无法抓取评论")
             return []
@@ -665,7 +667,7 @@ class DataFetcher:
             await asyncio.sleep(random.uniform(2.0, 3.0))
             browser_client = await self._get_browser_client()
             page = await browser_client.acquire_page()
-            await page.goto(url, wait_until="networkidle", timeout=20000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=8*1000)
             await asyncio.sleep(2)
 
             thread_items = await page.query_selector_all("li.thread-item")
@@ -700,7 +702,6 @@ class DataFetcher:
                 await browser_client.release_page(page)
         return comments
  
-    # 知乎的反爬机制较强，虽然流程正确，但是经常被验证码拦住，停用
     async def crawl_zhihu_comments(self, title: str, url: str) -> List[str]:
         comments: List[str] = []
         page = None
