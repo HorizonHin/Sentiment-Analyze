@@ -255,6 +255,8 @@ class DataFetcher:
             return await self.crawl_tieba_comments(title, url)
         elif "thepaper" in source_id.lower() or "pengpai" in source_id.lower():
             return self.crawl_thepaper_comments(title, url)
+        elif "hupu" in source_id.lower():
+            return self.crawl_hupu_comments(title, url)
         else:
             logger.warning(f"未知平台 {source_id}，无法抓取评论")
             return []
@@ -814,4 +816,67 @@ class DataFetcher:
             return comments
         except Exception as e:
             logger.warning(f"crawl_thepaper_comments 整体失败: {e}")
+            return []
+        
+    def crawl_hupu_comments(self, title: str, url: str) -> List[str]:
+        """爬取虎扑体育社区评论。"""
+        comments: List[str] = []
+        try:
+            # 随机等待，降低请求频率
+            time.sleep(random.uniform(1.5, 3.0))
+
+            proxies = {"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None
+            response = requests.get(
+                url,
+                headers=self.DEFAULT_HEADERS,
+                proxies=proxies,
+                timeout=15,
+            )
+            response.raise_for_status()
+
+            soup = BeautifulSoup(response.text, "html.parser")
+            detail_blocks = soup.find_all("div", class_="thread-content-detail")
+            simple_detail_blocks = soup.find_all(
+                "div",
+                class_=lambda c: c and any(
+                    cls.startswith("index_simple-detail-content__")
+                    for cls in c.split()
+                ),
+            )
+
+            for block in detail_blocks:
+                p_nodes = block.find_all("p")
+                for p in p_nodes:
+                    text = p.get_text(" ", strip=True)
+                    text = re.sub(r"\s+", " ", text).strip()
+                    if not text:
+                        continue
+                    if text not in comments:
+                        comments.append(text)
+                        if len(comments) >= self.max_comments:
+                            break
+
+                if len(comments) >= self.max_comments:
+                    break
+
+            if len(comments) < self.max_comments:
+                for block in simple_detail_blocks:
+                    p_nodes = block.find_all("p")
+                    for p in p_nodes:
+                        text = p.get_text(" ", strip=True)
+                        text = re.sub(r"\s+", " ", text).strip()
+                        if not text:
+                            continue
+                        if text not in comments:
+                            comments.append(text)
+                            if len(comments) >= self.max_comments:
+                                break
+
+                    if len(comments) >= self.max_comments:
+                        break
+
+            logger.info(f"为虎扑标题 '{title}' 抓取到 {len(comments)} 条评论")
+            return comments
+        except Exception as e:
+            logger.warning(f"crawl_hupu_comments 整体失败: {e}")
             return []
