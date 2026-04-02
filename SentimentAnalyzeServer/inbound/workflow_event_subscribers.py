@@ -38,7 +38,7 @@ class WorkflowEventSubscribers:
         if self._is_registered:
             logger.warning("WorkflowEventSubscribers already registered, skipping.")
             return
-        # self.event_manager.subscribe(EVENT_CRAWL_SAVED, self._on_crawl_saved)
+        self.event_manager.subscribe(EVENT_CRAWL_SAVED, self._on_crawl_saved)
         self.event_manager.subscribe(EVENT_SENTIMENT_ANALYZED, self._on_sentiment_analyzed)
         self.event_manager.subscribe(EVENT_TOPIC_RANK_UPDATED, self._on_topic_rank_updated)
         self._is_registered = True
@@ -63,7 +63,7 @@ class WorkflowEventSubscribers:
         lookback_seconds = self.crawl_interval_seconds * _TOPIC_LOOKBACK_MULTIPLIER
         end_time = int(time.time())
         start_time = end_time - int(lookback_seconds)
-        logger.info('处理情感分析完成事件，触发话题推荐。lookback_seconds=%s, start_time=%s, end_time=%s',)
+        logger.info('处理情感分析完成事件，触发话题推荐。lookback_seconds=%s, start_time=%s, end_time=%s', lookback_seconds, start_time, end_time)
         try:
             self.topic_app_service.recommend_and_cache_topics(
                 start_time=start_time,

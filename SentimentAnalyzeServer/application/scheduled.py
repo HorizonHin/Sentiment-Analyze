@@ -51,16 +51,16 @@ class Scheduled:
         self._thread: threading.Thread | None = None
         self._thread_lock = threading.Lock()
 
-    # def start(self) -> bool:
-    #     """Start scheduler loop in a daemon thread, return True if started now."""
-    #     with self._thread_lock:
-    #         if self._thread is not None and self._thread.is_alive():
-    #             return False
+    def start(self) -> bool:
+        """Start scheduler loop in a daemon thread, return True if started now."""
+        with self._thread_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False
 
-    #         self._stop_event.clear()
-    #         self._thread = threading.Thread(target=self._loop, name="scheduled-worker", daemon=True)
-    #         self._thread.start()
-    #         return True
+            self._stop_event.clear()
+            self._thread = threading.Thread(target=self._loop, name="scheduled-worker", daemon=True)
+            self._thread.start()
+            return True
 
     def stop(self, timeout: float = 10.0) -> bool:
         """Stop scheduler loop, return True when worker is fully stopped."""
@@ -88,9 +88,18 @@ class Scheduled:
         return result
 
     def run_analyze_pending_once(self) -> dict[str, Any]:
-        """已移除旧的分析逻辑，改为通过事件驱动或定时全量过滤。"""
-        logger.info("[scheduler] 补分析任务（analyze_pending_items_by_latest_time）已废弃并停止执行。")
-        return {"success": True, "reason": "deprecated"}
+        logger.info("[scheduler] 开始执行补分析任务")
+        if self.sentiment_app_service is None:
+            logger.error("[scheduler] sentiment_app_service 未配置")
+            return {"success": False, "reason": "sentiment_service_not_configured"}
+
+        end_time = int(time.time()) - int(self.interval_seconds)
+        first_time = end_time - self.first_time_lookback_seconds
+        return self.sentiment_app_service.analyze_pending_items_by_latest_time(
+            first_time=first_time,
+            start_time=None,
+            end_time=end_time,
+        )
 
     def _read_last_completed_time(self) -> int | None:
         if not self.last_run_file.exists():

@@ -31,7 +31,8 @@ class DataFetcher:
     DEFAULT_API_URL = "https://newsnow.busiyi.world/api/s"
     
     # 支持抓取评论的平台集合。抖音等平台的评论反爬较强，暂不支持。
-    SUPPORTED_COMMENT_PLATFORMS = {"baidu", "weibo", "bilibili","douyin"}
+    SUPPORTED_COMMENT_PLATFORMS = {"baidu", "weibo", "bilibili","douyin", "toutiao", 
+                                   "zhihu", "tieba", "thepaper", "hupu", "tencent-hot"}
 
     # 默认请求头
     DEFAULT_HEADERS = {
@@ -257,7 +258,7 @@ class DataFetcher:
             return self.crawl_thepaper_comments(title, url)
         elif "hupu" in source_id.lower():
             return self.crawl_hupu_comments(title, url)
-        elif "tencent" in source_id.lower() or "qq" in source_id.lower():
+        elif "tencent-hot" in source_id.lower():
             return self.crawl_tencent_hot_comments(title, url)
         else:
             logger.warning(f"未知平台 {source_id}，无法抓取评论")
@@ -310,7 +311,8 @@ class DataFetcher:
                 if len(comments) >= self.max_comments:
                     break
 
-            logger.info(f"Playwright 为标题 '{title}' 抓取到 {len(comments)} 条百度评论")
+            if not comments:
+                logger.info(f"Playwright 为标题 '{title}' 抓取到 0 条百度评论")
         except Exception as e:
             logger.warning(f"crawl_baidu_comments_opyimized 整体失败: {e}")
             return []
@@ -389,7 +391,8 @@ class DataFetcher:
                     logger.warning(f"获取 mid={mid} 的评论时出错: {loop_e}")
                     continue
 
-            logger.info(f"Playwright 为标题 '{title}' 抓取到 {len(comments)} 条微博评论")
+            if not comments:
+                logger.info(f"Playwright 为标题 '{title}' 抓取到 0 条微博评论")
         except Exception as e:
             logger.warning(f"crawl_weibo_comments 整体失败: {e}")
             return []
@@ -486,7 +489,8 @@ class DataFetcher:
                     logger.warning(f"处理 B站单个视频 {video_url} 报错: {video_e}")
                     continue
 
-            logger.info(f"Playwright 最终为 B站标题 '{title}' 抓取到 {len(comments)} 条评论")
+            if not comments:
+                logger.info(f"Playwright 最终为 B站标题 '{title}' 抓取到 0 条评论")
         except Exception as e:
             logger.warning(f"crawl_bilibili_comments_optimized 获取评论阶段失败: {e}")
             return []
@@ -610,8 +614,9 @@ class DataFetcher:
             page.on("response", handle_response)
             await page.goto(url, wait_until="networkidle", timeout=30000)
             await asyncio.sleep(5)
-            await page.screenshot(path="screenshots/douyin_after_wait.png")
-            logger.info(f"Playwright 为标题 '{title}' 抓取到 {len(comments)} 条抖音评论")
+            if not comments:
+                await page.screenshot(path="screenshots/douyin_no_comments.png")
+                logger.info(f"Playwright 为标题 '{title}' 抓取到 0 条抖音评论")
         except Exception as e:
             try:
                 if page:
@@ -651,7 +656,8 @@ class DataFetcher:
             page.on("response", handle_response)
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(5)
-            logger.info(f"Playwright 为标题 '{title}' 抓获到 {len(comments)} 条头条评论")
+            if not comments:
+                logger.info(f"Playwright 为标题 '{title}' 抓获到 0 条头条评论")
         except Exception as e:
             try:
                 if page:
@@ -694,7 +700,8 @@ class DataFetcher:
                 if len(comments) >= self.max_comments:
                     break
 
-            logger.info(f"Playwright 从贴吧热议/列表页直接抓取到 {len(comments)} 条（标题+预览）内容")
+            if not comments:
+                logger.info(f"Playwright 从贴吧热议/列表页直接抓取到 0 条（标题+预览）内容")
         except Exception as e:
             try:
                 if page:
@@ -736,7 +743,8 @@ class DataFetcher:
                     if len(comments) >= self.max_comments:
                         break
 
-            logger.info(f"Playwright 从知乎链接 '{url}' 直接抓取到 {len(comments)} 条内容")
+            if not comments:
+                logger.info(f"Playwright 从知乎链接 '{url}' 直接抓取到 0 条内容")
         except Exception as e:
             try:
                 if page:
@@ -814,7 +822,8 @@ class DataFetcher:
                 page_num += 1
                 time.sleep(random.uniform(2, 3))
 
-            logger.info(f"为澎湃标题 '{title}' 抓取到 {len(comments)} 条评论")
+            if not comments:
+                logger.info(f"为澎湃标题 '{title}' 抓取到 0 条评论")
             return comments
         except Exception as e:
             logger.warning(f"crawl_thepaper_comments 整体失败: {e}")
@@ -877,7 +886,8 @@ class DataFetcher:
                     if len(comments) >= self.max_comments:
                         break
 
-            logger.info(f"为虎扑标题 '{title}' 抓取到 {len(comments)} 条评论")
+            if not comments:
+                logger.info(f"为虎扑标题 '{title}' 抓取到 0 条评论")
             return comments
         except Exception as e:
             logger.warning(f"crawl_hupu_comments 整体失败: {e}")
@@ -943,7 +953,8 @@ class DataFetcher:
             if len(comments) < self.max_comments:
                 walk_nodes(comments_obj.get("hot", []))
 
-            logger.info(f"为腾讯标题 '{title}' 抓取到 {min(len(comments), self.max_comments)} 条评论")
+            if not comments:
+                logger.info(f"为腾讯标题 '{title}' 抓取到 0 条评论")
             return comments[: self.max_comments]
         except Exception as e:
             logger.warning(f"crawl_tencent_hot_comments 整体失败: {e}")

@@ -93,9 +93,9 @@ def create_app() -> Flask:
 
     common_thread_pool_config = config.get("common_thread_pool") or {}
     try:
-        common_thread_pool_max_workers = max(1, int(common_thread_pool_config.get("max_workers", 8)))
+        common_thread_pool_max_workers = max(4, int(common_thread_pool_config.get("max_workers", 8)))
     except (TypeError, ValueError):
-        common_thread_pool_max_workers = 8
+        common_thread_pool_max_workers = 16
     CommonThreadPool.configure(common_thread_pool_max_workers)
 
     llm_config = config.get("llm") or {}
@@ -184,12 +184,14 @@ def create_app() -> Flask:
     is_main_process = os.environ.get("WERKZEUG_RUN_MAIN") == "true"
     is_debug_disabled = not app.debug
 
-    if is_main_process or is_debug_disabled:
-        # app.config["scheduler"] = scheduler
-        # scheduler.start()
-        app_logger.info("[Scheduler] 确认在工作进程中启动")
-    else:
-        app_logger.info("[Scheduler] 检测到 Flask 热重载父进程，跳过启动以防重复")
+    app.config["scheduler"] = scheduler
+    scheduler.start()
+    # if is_main_process or is_debug_disabled:
+    #     app.config["scheduler"] = scheduler
+    #     scheduler.start()
+    #     app_logger.info("[Scheduler] 确认在工作进程中启动")
+    # else:
+    #     app_logger.info("[Scheduler] 检测到 Flask 热重载父进程，跳过启动以防重复")
 
     def _shutdown_scheduler() -> None:
         scheduler.stop()

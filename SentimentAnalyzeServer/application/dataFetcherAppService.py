@@ -46,7 +46,60 @@ class DataFetcherAppService:
     def _serialize_news_items(self, items: List[NewsItem]) -> List[Dict[str, Any]]:
         return [item.to_dict() for item in items]
 
-    
+    def _fetch_comments_by_platform(self, incoming_items: List[NewsItem]) -> None:
+        """
+        按照平台(source_id)分配并发任务，每个平台内的抓取任务在各自的协程中运行。
+        """
+        if not incoming_items:
+            return
+
+        # 按平台分组
+        platform_groups: Dict[str, List[NewsItem]] = {}
+        for item in incoming_items:
+            platform_groups.setdefault(item.source_id, []).append(item)
+
+        async def fetch_item_comments(item: NewsItem):
+            try:
+                fetch_url = item.url or item.mobile_url
+                if not fetch_url:
+                    return
+                comments = await self.fetcher.crawl_comments_dispatch(item.source_id, item.title, fetch_url)
+                if comments:
+                    item.comments = comments
+            except Exception as e:
+                logger.warning(f"抓取评论失败 {item.source_id} - {item.title}: {e}")
+
+        async def fetch_platform_group(items: List[NewsItem]):
+            # 限制每个平台同时只能有一个新闻项在进行抓取任务
+            semaphore = asyncio.Semaphore(1)
+            
+            async def semaphore_wrapper(item: NewsItem):
+                async with semaphore:
+                    await fetch_item_comments(item)
+
+            await asyncio.gather(*(semaphore_wrapper(item) for item in items))
+
+        async def main_task():
+            # 为每个平台创建一个并发任务
+            tasks = [fetch_platform_group(items) for items in platform_groups.values()]
+            await asyncio.gather(*tasks)
+            await self.fetcher.close()
+
+        try:
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            if loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(main_task(), loop)
+                future.result()
+            else:
+                loop.run_until_complete(main_task())
+        except Exception as e:
+            logger.error(f"按平台异步抓取评论执行出错: {e}")
+
     def _convert_crawl_results_to_news_data(
         self,
         results: Dict[str, Dict],
@@ -137,35 +190,9 @@ class DataFetcherAppService:
         if not incoming_items:
             return self.news_domain_service.add_news_items(incoming_items)
 
-        # 在保存前抓取评论 (异步集成)
-        async def fetch_comments_task(item: NewsItem):
-            try:
-                # 获取 item 的 url，如果为空则尝试使用 mobile_url
-                fetch_url = item.url or item.mobile_url
-                comments = await self.fetcher.crawl_comments_dispatch(item.source_id, item.title, fetch_url)
-                if comments:
-                    item.comments = comments
-            except Exception as e:
-                logger.warning(f"抓取评论失败 {item.source_id} - {item.title}: {e}")
-
-        # 使用 asyncio 运行单次任务 (目前代码中是调试用的单次任务)
-        try:
-            # 尝试获取当前线程的事件循环
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-
-            if loop.is_running():
-                # 如果当前有运行中的事件循环，使用 run_coroutine_threadsafe
-                asyncio.run_coroutine_threadsafe(fetch_comments_task(incoming_items[0]), loop).result()
-                asyncio.run_coroutine_threadsafe(self.fetcher.close(), loop).result()
-            else:
-                loop.run_until_complete(fetch_comments_task(incoming_items[0]))
-                loop.run_until_complete(self.fetcher.close())
-        except Exception as e:
-            logger.error(f"异步评论抓取执行出错: {e}")
+        # 在保存前抓取评论 (由子方法处理)
+        self._fetch_comments_by_platform(incoming_items)
+            
         key_list = list({(item.source_id, item.title) for item in incoming_items if item.source_id and item.title})
         existing_items = self.news_domain_service.get_news_list_by_source_title_list(
             key_list,

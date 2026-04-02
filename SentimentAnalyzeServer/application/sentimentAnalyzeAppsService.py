@@ -121,7 +121,7 @@ class SentimentAnalyzeAppService:
 
 		return filtered
 
-	def analyze_and_update_news_items(self, items: List[NewsItem]) -> bool:
+	def analyze_and_update_news_items(self, items: List[NewsItem], should_cache: bool = True) -> bool:
 		""""一旦执行这个方法，就一定会发出分析完成的事件（即使没有任何数据被分析）。"""
 		# 过滤规则：使用公共方法判断是否需要分析
 		pending_items: List[NewsItem] = []
@@ -172,26 +172,28 @@ class SentimentAnalyzeAppService:
 					len(pending_items),
 				)
 
-		now_ts = int(time.time())
-		recent_threshold = now_ts - self.recent_window_seconds
-		
-		# 将本次 crawl 和处理的所有项合并
-		final_items = updated_items + not_need_analysis_items
-		
-		recent_items = [
-			item for item in final_items
-			if item.last_time is not None and item.last_time >= recent_threshold
-		]
-		if recent_items:
-			self.common_thread_pool.submit(self._cache_recent_analyzed_news, recent_items)
+		# 仅在 should_cache 为 True 时更新 Redis 热门缓存（通常来自实时爬取）
+		if should_cache:
+			now_ts = int(time.time())
+			recent_threshold = now_ts - self.recent_window_seconds
+			
+			# 将本次 crawl 和处理的所有项合并
+			final_items = updated_items + not_need_analysis_items
+			
+			recent_items = [
+				item for item in final_items
+				if item.last_time is not None and item.last_time >= recent_threshold
+			]
+			if recent_items:
+				self.common_thread_pool.submit(self._cache_recent_analyzed_news, recent_items)
 
-		# 取所有最终属于"不强制再次分析(含刚分析完的 title_only 或者其他不需要再次分析)"的items放入这个专门的缓存
-		latest_not_need_analysis = [
-			item for item in final_items
-			if not is_item_analysis_pending(item) or not is_source_support_comments(item.source_id or "")
-		]
-		if latest_not_need_analysis:
-			self.common_thread_pool.submit(self._cache_latest_not_need_analysis_items, latest_not_need_analysis)
+			# 取所有最终属于"不强制再次分析(含刚分析完的 title_only 或者其他不需要再次分析)"的items放入这个专门的缓存
+			latest_not_need_analysis = [
+				item for item in final_items
+				if not is_item_analysis_pending(item) or not is_source_support_comments(item.source_id or "")
+			]
+			if latest_not_need_analysis:
+				self.common_thread_pool.submit(self._cache_latest_not_need_analysis_items, latest_not_need_analysis)
 
 		self.event_manager.publish(
 			EVENT_SENTIMENT_ANALYZED,
@@ -205,13 +207,17 @@ class SentimentAnalyzeAppService:
 		return True
 
 	def _analyze_with_retry(self, item: NewsItem) -> Optional[NewsItem]:
+		# 检查是否支持评论抓取，且评论字段确实有内容
 		supports_comments = is_source_support_comments(item.source_id or "")
+		has_comments = bool(item.comments)
 
 		for attempt in range(1, self.max_retries + 1):
 			try:
-				if supports_comments:
+				# 只有当平台支持评论且抓取到了评论时，才调用带评论的分析方法
+				if supports_comments and has_comments:
 					result = self.llm_domain_analyzer.analyze_title_and_comments(item.title, comments=item.comments)
 				else:
+					# 否则（不支持评论，或支持但没抓到评论），降级为仅分析标题
 					result = self.llm_domain_analyzer.analyze_title_only(item.title)
 					
 				self.apply_llm_result(item, result)
@@ -294,7 +300,29 @@ class SentimentAnalyzeAppService:
 			for item in items
 			if not (item.analyzed_time)
 		]
+  
+	def analyze_pending_items_by_latest_time(
+		self,
+		first_time: Optional[int] = None,
+		start_time: Optional[int] = None,
+		end_time: Optional[int] = None,
+	) -> dict[str, Any]:
+		resolved_first_time = int(first_time) if first_time is not None else int(time.time()) - self.first_time_lookback_seconds
+		latest_items = self.news_domain_service.get_news_list_by_latest_crawl_range(
+			isAnalyzed=False,
+			first_time=resolved_first_time,
+			start_time=start_time,
+			end_time=end_time,
+		)
+		pending_items = self.filter_news_items_not_analyzed(latest_items)
+		if not pending_items:
+			logger.info("[Analyze_pending] 无可分析的数据")
+			return {"success": True, "item_count": 0}
 
+		# 对于补救措施分析任务，不应更新热门数据的 Redis 缓存
+		saved = self.analyze_and_update_news_items(pending_items, should_cache=False)
+		analyzed_count = len(pending_items) if saved else 0
+		return {"success": True, "item_count": analyzed_count}
 
 	def get_analyzed_news_grouped_by_latest_time(
 		self,
@@ -317,10 +345,12 @@ class SentimentAnalyzeAppService:
 
 			if cached_items:
 				cached_items = self._deduplicate_news_items(cached_items)
+				# 强化过滤：不仅检查时间范围，还要确保缓存中的数据是不需要分析的（即已分析完成或不支持分析）
 				cached_items = [
 					item
 					for item in cached_items
-					if item.first_time is not None and item.first_time >= resolved_first_time
+					if (item.first_time is not None and item.first_time >= resolved_first_time)
+					and (not is_item_analysis_pending(item))
 				]
 				cached_items = self._filter_items_by_last_time_range(cached_items, start_time, end_time)
 				if cached_items:

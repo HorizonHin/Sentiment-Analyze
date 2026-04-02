@@ -6,6 +6,7 @@ import time
 from typing import Any, List
 
 from openai import BadRequestError, OpenAI, RateLimitError
+from SentimentAnalyzeServer.system.rate_limiter import SlidingWindowRateLimiter
 
 
 EVENT_TYPE_MAP = {
@@ -50,6 +51,9 @@ class LLMTitleAnalyzer:
         self.title_only_prompt_file = os.path.join(os.path.dirname(__file__), "analyze_title_only_prompt.txt")
         self.max_retries = 5
         self.initial_retry_delay = 1.0
+        
+        # 滑动窗口速率限制：每分钟最大 120 个请求 (针对通义千问免费版/基础版)
+        self._rate_limiter = SlidingWindowRateLimiter(window_seconds=60, max_requests=120)
 
     def _get_analyze_title_prompt(self) -> str:
         with open(self.prompt_file, "r", encoding="utf-8") as f:
@@ -216,6 +220,9 @@ class LLMTitleAnalyzer:
 
         for attempt in range(1, self.max_retries + 1):
             try:
+                # 获取速率限制令牌
+                self._rate_limiter.acquire()
+
                 messages = [
                     {"role": "system", "content": self._get_analyze_title_prompt()},
                     {
@@ -278,6 +285,9 @@ class LLMTitleAnalyzer:
 
         for attempt in range(1, self.max_retries + 1):
             try:
+                # 获取速率限制令牌
+                self._rate_limiter.acquire()
+
                 messages = [
                     {"role": "system", "content": self._get_analyze_title_only_prompt()},
                     {
@@ -332,6 +342,9 @@ class LLMTitleAnalyzer:
 
         for attempt in range(1, self.max_retries + 1):
             try:
+                # 获取速率限制令牌
+                self._rate_limiter.acquire()
+
                 title_lines = "\n".join([f"- {title}" for title in cleaned_titles[:50]])
                 messages = [
                     {"role": "system", "content": self._get_analyze_topic_prompt()},
