@@ -9,3 +9,5 @@ uml/*
 SentimentAnalyzeServer/.vscode/*
 SentimentAnalyzeServer/system/last_scheduler_run.txt
 SentimentAnalyzeServer/system/logs/root_app.log
+SentimentAnalyzeServer/domain/crawler/fetcher.py
+screenshots/*

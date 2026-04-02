@@ -12,12 +12,15 @@
 import json
 import logging
 import random
-import time
 import re
+import time
+import os
+import yaml
+import asyncio
 from typing import Dict, List, Tuple, Optional, Union
 import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+from SentimentAnalyzeServer.domain.crawler.async_browser_client import AsyncBrowserClient
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,9 @@ class DataFetcher:
 
     # 默认 API 地址
     DEFAULT_API_URL = "https://newsnow.busiyi.world/api/s"
+    
+    # 支持抓取评论的平台集合。抖音等平台的评论反爬较强，暂不支持。
+    SUPPORTED_COMMENT_PLATFORMS = {"baidu", "weibo", "bilibili","douyin"}
 
     # 默认请求头
     DEFAULT_HEADERS = {
@@ -53,41 +59,45 @@ class DataFetcher:
         self.proxy_url = proxy_url
         self.api_url = api_url or self.DEFAULT_API_URL
         self.max_comments = max_comments
-        self._playwright = None
-        self._browser = None
+        self._browser_client: Optional[AsyncBrowserClient] = None
+        
+        # 确保截图保存目录存在
+        self.screenshot_dir = "screenshots"
+        if not os.path.exists(self.screenshot_dir):
+            os.makedirs(self.screenshot_dir)
+            logger.info(f"创建截图目录: {self.screenshot_dir}")
 
-    def _get_browser(self):
-        """
-        获取或创建常驻的 Playwright 浏览器实例
-        """
-        if self._browser:
-            return self._browser
-            
-        try:
-            self._playwright = sync_playwright().start()
-            browser_args = []
-            if self.proxy_url:
-                browser_args.append(f'--proxy-server={self.proxy_url}')
-            self._browser = self._playwright.chromium.launch(headless=True, args=browser_args)
-            return self._browser
-        except Exception as e:
-            logger.warning(f"启动 Playwright 浏览器失败: {e}")
-            self.close()
-            raise
+        self.headers_config = self._load_headers_config()
 
-    def close(self):
+    def _load_headers_config(self) -> Dict:
+        """加载 headers.yaml 配置文件"""
+        config_path = os.path.join(os.path.dirname(__file__), "headers.yaml")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    return yaml.safe_load(f) or {}
+            except Exception as e:
+                logger.error(f"加载 headers.yaml 失败: {e}")
+        return {}
+
+    async def _get_browser_client(self) -> AsyncBrowserClient:
+        if self._browser_client is None:
+            self._browser_client = await AsyncBrowserClient.get_instance(
+                proxy_url=self.proxy_url,
+                headers_config=self.headers_config,
+                default_headers=self.DEFAULT_HEADERS,
+                max_comments=self.max_comments,
+                max_concurrent_pages=5,
+            )
+        return self._browser_client
+
+    async def close(self):
         """
-        关闭浏览器和 Playwright 实例
+        关闭异步浏览器客户端 (异步)
         """
-        try:
-            if self._browser:
-                self._browser.close()
-                self._browser = None
-            if self._playwright:
-                self._playwright.stop()
-                self._playwright = None
-        except Exception as e:
-            logger.warning(f"关闭浏览器实例失败: {e}")
+        if self._browser_client:
+            await self._browser_client.close()
+            self._browser_client = None
 
     def fetch_data(
         self,
@@ -225,233 +235,210 @@ class DataFetcher:
         logger.info(f"成功: {list(results.keys())}, 失败: {failed_ids}")        
         return results, id_to_name, failed_ids
 
-    def crawl_comments_dispatch(self, source_id: str, title: str) -> List[str]:
+    async def crawl_comments_dispatch(self, source_id: str, title: str, url: str) -> List[str]:
         """
-        根据 source_id 分发到不同的评论爬取方法
+        根据 source_id 分发到不同的评论爬取方法 (异步)
         """
         if "baidu" in source_id.lower():
-            return self.crawl_baidu_comments(title)
+            return await self.crawl_baidu_comments_opyimized(title, url)
         elif "weibo" in source_id.lower():
-            return self.crawl_weibo_comments(title)
+            return await self.crawl_weibo_comments(title)
         elif "bilibili" in source_id.lower():
-            return self.crawl_bilibili_comments(title)
+            return await self.crawl_bilibili_comments_optimized(title, url)  
+        elif "douyin" in source_id.lower():
+            return await self.crawl_douyin_comments(title, url)                  
+        elif "toutiao" in source_id.lower():
+            return await self.crawl_toutiao_comments(title, url)
+        elif "zhihu" in source_id.lower():
+            return await self.crawl_zhihu_comments(title, url)
         else:
             logger.warning(f"未知平台 {source_id}，无法抓取评论")
             return []
-             
-    def crawl_baidu_comments(self, title: str) -> List[str]:
-        """
-        爬取百度事件数据，返回评论区评论内容列表。使用 Playwright。
-        """ 
-        base_url = "https://www.baidu.com/s?wd="
-        search_url = f"{base_url}{requests.utils.quote(title)}"
-        comments = []
+           
+    async def crawl_baidu_comments_opyimized(self, title: str, url: str) -> List[str]:
+        search_url = url
+        comments: List[str] = []
+        page = None
 
-        context = None
         try:
-            # 1. 使用常驻浏览器实例
-            browser = self._get_browser()
-            context = browser.new_context(user_agent=self.DEFAULT_HEADERS["User-Agent"])
-            page = context.new_page()
+            await asyncio.sleep(random.uniform(2.5, 3.5))
 
-            # 访问搜索结果页
-            page.goto(search_url, wait_until="networkidle", timeout=30000)
-            
-            # 找到首条结果中的跳转链接
-            link_selector = 'div[class*="title_1WDM0"] a'
-            page.wait_for_selector(link_selector, timeout=10000)
-            first_link = page.query_selector(link_selector)
+            proxies = {"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None
+            search_response = requests.get(search_url, headers=self.DEFAULT_HEADERS, proxies=proxies, timeout=15)
+            search_response.raise_for_status()
+            soup = BeautifulSoup(search_response.text, "html.parser")
+
+            first_link = None
+            link_el = soup.select_one('div[class*="title_1WDM0"] a')
+            if link_el and link_el.get("href"):
+                first_link = link_el
+            else:
+                fallback_el = soup.select_one('div[class*="result"] h3 a') or soup.find("a", {"class": "c-showurl"})
+                if fallback_el and fallback_el.get("href"):
+                    first_link = fallback_el
+
             if not first_link:
-                logger.warning(f"Playwright 无法定位到百度搜索首条链接")
+                logger.warning(f"BeautifulSoup 无法定位到百度搜索首条链接: {title}")
                 return []
-                
-            href = first_link.get_attribute('href')
+
+            href = first_link.get("href")
             if not href:
-                logger.warning("Playwright 抓取到空 href")
+                logger.warning("BeautifulSoup 抓取到空 href")
                 return []
-            
-            # 在当前页跳转到详情页以获取评论
-            page.goto(href, wait_until="networkidle", timeout=30000)
-            
-            # 等待并提取评论元素
+            if href.startswith("/s?"):
+                href = f"https://www.baidu.com{href}"
+
+            browser_client = await self._get_browser_client()
+            page = await browser_client.acquire_page()
+            await page.goto(href, wait_until="networkidle", timeout=30000)
+
             comment_selector = 'span[class*="type-text"]'
-            page.wait_for_selector(comment_selector, timeout=10000)
-            comment_elements = page.query_selector_all(comment_selector)
-            
+            await page.wait_for_selector(comment_selector, timeout=10000)
+            comment_elements = await page.query_selector_all(comment_selector)
             for el in comment_elements:
-                text = el.inner_text().strip()
+                text = (await el.inner_text()).strip()
                 if text:
                     comments.append(text)
                 if len(comments) >= self.max_comments:
                     break
-            
+
             logger.info(f"Playwright 为标题 '{title}' 抓取到 {len(comments)} 条百度评论")
         except Exception as e:
-            logger.warning(f"crawl_baidu_comments 整体失败: {e}")
+            logger.warning(f"crawl_baidu_comments_opyimized 整体失败: {e}")
             return []
         finally:
-            if context:
-                context.close()
+            if page:
+                browser_client = await self._get_browser_client()
+                await browser_client.release_page(page)
         return comments
-        
-    def crawl_weibo_comments(self, title: str) -> List[str]:
-        """
-        爬取微博事件数据，返回评论区评论内容列表。使用 Playwright 模拟 H5 接口。
-        参考 MediaCrawler 实现。
-        """
-        comments = []
+       
+    # 反爬虫机制较强的平台，完全使用 Playwright。
+    async def crawl_weibo_comments(self, title: str) -> List[str]:
+        comments: List[str] = []
         context = None
+        page = None
         try:
-            browser = self._get_browser()
-            # 微博移动端需要特有的 User-Agent
-            mobile_ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1"
-            context = browser.new_context(user_agent=mobile_ua)
-            page = context.new_page()
+            browser_client = await self._get_browser_client()
+            mobile_ua = (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 "
+                "Mobile/15E148 Safari/604.1"
+            )
+            context = await browser_client.new_isolated_context(user_agent=mobile_ua)
+            context.set_extra_http_headers(browser_client.get_headers("crawl_weibo_comments"))
+            page = await context.new_page()
 
-            # 1. 访问微博移动端主页初始化 Cookie
-            page.goto("https://m.weibo.cn", wait_until="networkidle", timeout=30000)
-            time.sleep(2)
+            await page.goto("https://m.weibo.cn", wait_until="networkidle", timeout=30000)
+            await asyncio.sleep(2)
 
-            # 2. 调用搜索接口获取 mid
-            # SearchType: 1-综合, 61-实时, 60-热门, 64-视频
             search_type = 60
-            search_url = f"https://m.weibo.cn/api/container/getIndex?containerid=100103type={search_type}&q={requests.utils.quote(title)}&page_type=searchall"
-            page.goto(search_url, wait_until="networkidle", timeout=30000)
-            
-            # 提取 JSON 内容
-            json_text = page.evaluate("() => document.body.innerText")
+            search_url = (
+                "https://m.weibo.cn/api/container/getIndex?containerid=100103type="
+                f"{search_type}&q={requests.utils.quote(title)}&page_type=searchall"
+            )
+            await page.goto(search_url, wait_until="networkidle", timeout=30000)
+
+            json_text = await page.evaluate("() => document.body.innerText")
             search_data = json.loads(json_text)
 
             cards = search_data.get("data", {}).get("cards", [])
             mid_list = []
             for card in cards:
-                # 微博搜索 API 返回的 card_type 含义：
-                # 9: 微博正文 (mblog)
-                # 11: 卡片集合 (通常包含多个 card_group 内容)
-                # 58: 搜索建议或相关词
-                # 101: 话题/栏目信息
                 if card.get("card_type") == 11:
-                    card_group = card.get("card_group", [])
-                    for item in card_group:
+                    for item in card.get("card_group", []):
                         if item.get("mblog"):
                             mid_list.append(item.get("mblog", {}).get("id"))
-                elif card.get("card_type") == 9:
-                    if card.get("mblog"):
-                        mid_list.append(card.get("mblog", {}).get("id"))
-                
-                # 限制抓取的微博正文数量，防止过量请求
-                if len(mid_list) >= 5:
+                elif card.get("card_type") == 9 and card.get("mblog"):
+                    mid_list.append(card.get("mblog", {}).get("id"))
+                if len(mid_list) >= 30:
                     break
 
             if not mid_list:
                 logger.warning(f"未找到任何微博 mid: {title}")
                 return []
 
-            # 3. 遍历 mid_list 获取每个微博的热评
             for mid in mid_list:
                 try:
                     comments_url = f"https://m.weibo.cn/comments/hotflow?id={mid}&mid={mid}&max_id_type=0"
-                    page.goto(comments_url, wait_until="networkidle", timeout=30000)
-                    comments_json_text = page.evaluate("() => document.body.innerText")
-                    # 判空处理，防止 API 返回非 JSON 内容
-                    if not comments_json_text or not comments_json_text.strip().startswith('{'):
+                    await page.goto(comments_url, wait_until="networkidle", timeout=30000)
+                    comments_json_text = await page.evaluate("() => document.body.innerText")
+                    if not comments_json_text or not comments_json_text.strip().startswith("{"):
                         continue
 
                     comments_data = json.loads(comments_json_text)
                     raw_comments = comments_data.get("data", {}).get("data", [])
-                    
                     for c in raw_comments:
                         text = c.get("text", "")
-                        # 去除 HTML 标签 (微博评论中常含 <a> 或 <img>)
-                        clean_text = re.sub(r'<[^>]+>', '', text).strip()
-                        if clean_text:
-                            # 去重并添加
-                            if clean_text not in comments:
-                                comments.append(clean_text)
-                        
+                        clean_text = re.sub(r"<[^>]+>", "", text).strip()
+                        if clean_text and clean_text not in comments:
+                            comments.append(clean_text)
                         if len(comments) >= self.max_comments:
                             break
-                    
                     if len(comments) >= self.max_comments:
                         break
-                        
-                    # 适当休眠，模拟真实行为
-                    time.sleep(1)
+                    await asyncio.sleep(1)
                 except Exception as loop_e:
                     logger.warning(f"获取 mid={mid} 的评论时出错: {loop_e}")
                     continue
-            
-            logger.info(f"Playwright 为标题 '{title}' 抓取到 {len(comments)} 条微博评论")
 
+            logger.info(f"Playwright 为标题 '{title}' 抓取到 {len(comments)} 条微博评论")
         except Exception as e:
             logger.warning(f"crawl_weibo_comments 整体失败: {e}")
             return []
         finally:
+            if page:
+                await page.close()
             if context:
-                context.close()
+                await context.close()
         return comments
 
-    def crawl_bilibili_comments(self, title: str) -> List[str]:
-        """
-        根据关键词title，爬取哔哩哔哩数据，返回热门评论区评论内容列表。
-        使用 Playwright 搜索视频并获取多个视频的评论，直到达到上限。
-        """
-        comments = []
-        context = None
+    async def crawl_bilibili_comments_optimized(self, title: str, url: str) -> List[str]:
+        comments: List[str] = []
+        video_urls: List[str] = []
+        page = None
+
+        search_url = url or f"https://search.bilibili.com/all?keyword={requests.utils.quote(title)}"
         try:
-            # 1. 获取浏览器实例，注意处理 _playwright 被关闭的情况
-            browser = self._get_browser()
-            context = browser.new_context(user_agent=self.DEFAULT_HEADERS["User-Agent"])
-            page = context.new_page()
+            await asyncio.sleep(random.uniform(2.0, 3.0))
+            proxies = {"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None
+            response = requests.get(search_url, headers=self.DEFAULT_HEADERS, proxies=proxies, timeout=15)
+            response.raise_for_status()
 
-            # 2. 搜索视频
-            search_url = f"https://search.bilibili.com/all?keyword={requests.utils.quote(title)}"
-            page.goto(search_url, wait_until="networkidle", timeout=30000)
-            
-            # 获取搜索页面的视频链接列表
-            video_link_selector = '.bili-video-card__info--right a'
-            try:
-                page.wait_for_selector(video_link_selector, timeout=10000)
-            except:
-                logger.warning(f"搜索结果未及时加载: {title}")
-                return []
+            soup = BeautifulSoup(response.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = a.get("href")
+                if "/video/BV" in href:
+                    resolved = "https:" + href if href.startswith("//") else href
+                    clean_url = resolved.split("?")[0]
+                    if clean_url not in video_urls:
+                        video_urls.append(clean_url)
 
-            video_links = page.query_selector_all(video_link_selector)
-            video_urls = []
-            for link in video_links:
-                href = link.get_attribute("href")
-                if href:
-                    url = "https:" + href if href.startswith("//") else href
-                    video_urls.append(url)
-            
             if not video_urls:
-                logger.warning(f"无法找到 Bilibili 搜索结果: {title}")
+                logger.warning(f"BeautifulSoup 无法找到 Bilibili 搜索结果: {title}")
                 return []
+        except Exception as e:
+            logger.warning(f"crawl_bilibili_comments_optimized 搜索阶段失败: {e}")
+            return []
 
-            # 3. 遍历视频 URL 列表，直到评论达到上限
+        try:
+            browser_client = await self._get_browser_client()
+            page = await browser_client.acquire_page()
             for video_url in video_urls:
                 if len(comments) >= self.max_comments:
                     break
-                
                 try:
-                    # 进入视频详情页
-                    page.goto(video_url, wait_until="networkidle", timeout=20000)
-                    
-                    # 提取评论 (Shadow DOM 穿透)
-                    page.evaluate("window.scrollBy(0, 800)")
-                    time.sleep(2.5) # 等待渲染
+                    await page.goto(video_url, wait_until="networkidle", timeout=20000)
+                    await page.evaluate("window.scrollBy(0, 800)")
+                    await asyncio.sleep(2.5)
 
                     comments_script = """
                     () => {
                         const results = [];
                         const commentsApp = document.querySelector("#commentapp > bili-comments");
                         if (!commentsApp || !commentsApp.shadowRoot) return results;
-
                         const threads = commentsApp.shadowRoot.querySelectorAll("#feed > bili-comment-thread-renderer");
                         for (const thread of threads) {
                             if (!thread.shadowRoot) continue;
-                            
-                            // 提取根评论
                             const commentNode = thread.shadowRoot.querySelector("#comment");
                             if (commentNode && commentNode.shadowRoot) {
                                 const richText = commentNode.shadowRoot.querySelector("#content > bili-rich-text");
@@ -462,8 +449,6 @@ class DataFetcher:
                                     }
                                 }
                             }
-
-                            // 提取首个回复
                             const repliesRenderer = thread.shadowRoot.querySelector("#replies > bili-comment-replies-renderer");
                             if (repliesRenderer && repliesRenderer.shadowRoot) {
                                 const firstReply = repliesRenderer.shadowRoot.querySelector("#expander-contents > bili-comment-reply-renderer");
@@ -482,14 +467,106 @@ class DataFetcher:
                         return results;
                     }
                     """
-                    
-                    extracted_texts = page.evaluate(comments_script)
+
+                    extracted_texts = await page.evaluate(comments_script)
                     for text in extracted_texts:
                         if text and text not in comments:
                             comments.append(text)
                         if len(comments) >= self.max_comments:
                             break
-                    
+                except Exception as video_e:
+                    logger.warning(f"处理 B站单个视频 {video_url} 报错: {video_e}")
+                    continue
+
+            logger.info(f"Playwright 最终为 B站标题 '{title}' 抓取到 {len(comments)} 条评论")
+        except Exception as e:
+            logger.warning(f"crawl_bilibili_comments_optimized 获取评论阶段失败: {e}")
+            return []
+        finally:
+            if page:
+                browser_client = await self._get_browser_client()
+                await browser_client.release_page(page)
+        return comments
+
+    async def crawl_bilibili_comments(self, title: str, url: str = None) -> List[str]:
+        comments: List[str] = []
+        page = None
+        try:
+            browser_client = await self._get_browser_client()
+            page = await browser_client.acquire_page()
+            search_url = url or f"https://search.bilibili.com/all?keyword={requests.utils.quote(title)}"
+            await page.goto(search_url, wait_until="networkidle", timeout=30000)
+
+            video_link_selector = '.bili-video-card__info--right a'
+            try:
+                await page.wait_for_selector(video_link_selector, timeout=10000)
+            except Exception:
+                logger.warning(f"搜索结果未及时加载: {title}")
+                return []
+
+            video_links = await page.query_selector_all(video_link_selector)
+            video_urls = []
+            for link in video_links:
+                href = await link.get_attribute("href")
+                if href:
+                    video_url = "https:" + href if href.startswith("//") else href
+                    video_urls.append(video_url)
+
+            if not video_urls:
+                logger.warning(f"无法找到 Bilibili 搜索结果: {title}")
+                return []
+
+            for video_url in video_urls:
+                if len(comments) >= self.max_comments:
+                    break
+                try:
+                    await page.goto(video_url, wait_until="networkidle", timeout=20000)
+                    await page.evaluate("window.scrollBy(0, 800)")
+                    await asyncio.sleep(2.5)
+
+                    comments_script = """
+                    () => {
+                        const results = [];
+                        const commentsApp = document.querySelector("#commentapp > bili-comments");
+                        if (!commentsApp || !commentsApp.shadowRoot) return results;
+                        const threads = commentsApp.shadowRoot.querySelectorAll("#feed > bili-comment-thread-renderer");
+                        for (const thread of threads) {
+                            if (!thread.shadowRoot) continue;
+                            const commentNode = thread.shadowRoot.querySelector("#comment");
+                            if (commentNode && commentNode.shadowRoot) {
+                                const richText = commentNode.shadowRoot.querySelector("#content > bili-rich-text");
+                                if (richText && richText.shadowRoot) {
+                                    const textSpan = richText.shadowRoot.querySelector("#contents > span");
+                                    if (textSpan && textSpan.innerText.trim()) {
+                                        results.push(textSpan.innerText.trim());
+                                    }
+                                }
+                            }
+                            const repliesRenderer = thread.shadowRoot.querySelector("#replies > bili-comment-replies-renderer");
+                            if (repliesRenderer && repliesRenderer.shadowRoot) {
+                                const firstReply = repliesRenderer.shadowRoot.querySelector("#expander-contents > bili-comment-reply-renderer");
+                                if (firstReply && firstReply.shadowRoot) {
+                                    const replyRichText = firstReply.shadowRoot.querySelector("#main > bili-rich-text");
+                                    if (replyRichText && replyRichText.shadowRoot) {
+                                        const replySpan = replyRichText.shadowRoot.querySelector("#contents > span");
+                                        if (replySpan && replySpan.innerText.trim()) {
+                                            results.push(replySpan.innerText.trim());
+                                        }
+                                    }
+                                }
+                            }
+                            if (results.length >= 10) break;
+                        }
+                        return results;
+                    }
+                    """
+
+                    extracted_texts = await page.evaluate(comments_script)
+                    for text in extracted_texts:
+                        if text and text not in comments:
+                            comments.append(text)
+                        if len(comments) >= self.max_comments:
+                            break
                 except Exception as video_e:
                     logger.warning(f"处理 B站单个视频 {video_url} 报错: {video_e}")
                     continue
@@ -499,6 +576,171 @@ class DataFetcher:
             logger.warning(f"crawl_bilibili_comments 整体失败: {e}")
             return []
         finally:
-            if context:
-                context.close()
+            if page:
+                browser_client = await self._get_browser_client()
+                await browser_client.release_page(page)
         return comments
+
+    async def crawl_douyin_comments(self, title: str, url: str) -> List[str]:
+        comments: List[str] = []
+        page = None
+        try:
+            browser_client = await self._get_browser_client()
+            page = await browser_client.acquire_page()
+
+            async def handle_response(response):
+                try:
+                    if "douyin.com/aweme/v1/web/comment/list" in response.url and response.status == 200:
+                        data = await response.json()
+                        for comment in data.get("comments", []):
+                            text = comment.get("text", "")
+                            if text and text not in comments:
+                                comments.append(text)
+                except Exception:
+                    pass
+
+            page.on("response", handle_response)
+            await page.goto(url, wait_until="networkidle", timeout=30000)
+            await asyncio.sleep(5)
+            await page.screenshot(path="screenshots/douyin_after_wait.png")
+            logger.info(f"Playwright 为标题 '{title}' 抓取到 {len(comments)} 条抖音评论")
+        except Exception as e:
+            try:
+                if page:
+                    await page.screenshot(path="screenshots/douyin_fatal_error.png")
+            except Exception:
+                pass
+            logger.warning(f"crawl_douyin_comments 整体失败: {e}")
+        finally:
+            if page:
+                browser_client = await self._get_browser_client()
+                await browser_client.release_page(page)
+        return comments[: self.max_comments]
+    
+    async def crawl_toutiao_comments(self, title: str, url: str) -> List[str]:
+        comments: List[str] = []
+        page = None
+        try:
+            browser_client = await self._get_browser_client()
+            page = await browser_client.acquire_page()
+
+            async def handle_response(response):
+                try:
+                    if ("tab_comments" in response.url or "v2/comment/list" in response.url) and response.status == 200:
+                        data = await response.json()
+                        items = data.get("data", [])
+                        if not isinstance(items, list):
+                            items = data.get("data", {}).get("comments", [])
+
+                        for item in items:
+                            comment_obj = item if "text" in item else item.get("comment", {})
+                            text = comment_obj.get("text", "")
+                            if text and text not in comments:
+                                comments.append(text)
+                except Exception:
+                    pass
+
+            page.on("response", handle_response)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(5)
+            logger.info(f"Playwright 为标题 '{title}' 抓获到 {len(comments)} 条头条评论")
+        except Exception as e:
+            try:
+                if page:
+                    await page.screenshot(path="screenshots/toutiao_fatal_error.png")
+            except Exception:
+                pass
+            logger.warning(f"crawl_toutiao_comments 整体失败: {e}")
+        finally:
+            if page:
+                browser_client = await self._get_browser_client()
+                await browser_client.release_page(page)
+        return comments[: self.max_comments]
+
+    # 贴吧的反爬机制较强，虽然流程正确，但是经常被验证码拦住，停用
+    async def crawl_tieba_comments(self, title: str, url: str) -> List[str]:
+        comments: List[str] = []
+        page = None
+        try:
+            await asyncio.sleep(random.uniform(2.0, 3.0))
+            browser_client = await self._get_browser_client()
+            page = await browser_client.acquire_page()
+            await page.goto(url, wait_until="networkidle", timeout=20000)
+            await asyncio.sleep(2)
+
+            thread_items = await page.query_selector_all("li.thread-item")
+            for item in thread_items:
+                title_el = await item.query_selector(".track-thread-title")
+                if title_el:
+                    title_text = (await title_el.inner_text()).strip()
+                    if title_text and title_text not in comments:
+                        comments.append(title_text)
+                if len(comments) >= self.max_comments:
+                    break
+
+                content_el = await item.query_selector("p.content")
+                if content_el:
+                    content_text = (await content_el.inner_text()).strip()
+                    if content_text and content_text not in comments:
+                        comments.append(content_text)
+                if len(comments) >= self.max_comments:
+                    break
+
+            logger.info(f"Playwright 从贴吧热议/列表页直接抓取到 {len(comments)} 条（标题+预览）内容")
+        except Exception as e:
+            try:
+                if page:
+                    await page.screenshot(path="screenshots/tieba_debug_fatal_error.png")
+            except Exception:
+                pass
+            logger.warning(f"crawl_tieba_comments 整体失败: {e}")
+        finally:
+            if page:
+                browser_client = await self._get_browser_client()
+                await browser_client.release_page(page)
+        return comments
+ 
+    # 知乎的反爬机制较强，虽然流程正确，但是经常被验证码拦住，停用
+    async def crawl_zhihu_comments(self, title: str, url: str) -> List[str]:
+        comments: List[str] = []
+        page = None
+        try:
+            browser_client = await self._get_browser_client()
+            page = await browser_client.acquire_page()
+            await page.goto(url, wait_until="networkidle", timeout=20000)
+            await page.screenshot(path="screenshots/zhihu_debug_page_loaded.png")
+
+            content_blocks = await page.query_selector_all(".RichContent-inner")
+            for block in content_blocks:
+                content_span = await block.query_selector('xpath=.//*[@id="content"]/span[1]')
+                if not content_span:
+                    continue
+
+                text = (await content_span.inner_text()).strip()
+                if not text:
+                    continue
+
+                text = re.sub(r"\s+", " ", text).strip()
+                if text == "阅读全文":
+                    continue
+
+                if text not in comments:
+                    comments.append(text)
+                    if len(comments) >= self.max_comments:
+                        break
+
+            logger.info(f"Playwright 从知乎链接 '{url}' 直接抓取到 {len(comments)} 条内容")
+        except Exception as e:
+            try:
+                if page:
+                    await page.screenshot(path="screenshots/zhihu_debug_fatal_error.png")
+            except Exception:
+                pass
+            logger.warning(f"crawl_zhihu_comments 整体失败: {e}")
+        finally:
+            if page:
+                browser_client = await self._get_browser_client()
+                await browser_client.release_page(page)
+        return comments
+        
+    

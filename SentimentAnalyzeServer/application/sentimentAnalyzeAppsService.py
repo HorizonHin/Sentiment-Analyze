@@ -210,7 +210,7 @@ class SentimentAnalyzeAppService:
 		for attempt in range(1, self.max_retries + 1):
 			try:
 				if supports_comments:
-					result = self.llm_domain_analyzer.analyze_title(item.title, comments=item.comments)
+					result = self.llm_domain_analyzer.analyze_title_and_comments(item.title, comments=item.comments)
 				else:
 					result = self.llm_domain_analyzer.analyze_title_only(item.title)
 					
@@ -292,7 +292,7 @@ class SentimentAnalyzeAppService:
 		return [
 			item
 			for item in items
-			if not (item.analyzed_time or item.sentiment_polarity or item.entities or item.keywords)
+			if not (item.analyzed_time)
 		]
 
 

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Optional
 from SentimentAnalyzeServer.domain.news.news import NewsItem
+from SentimentAnalyzeServer.domain.crawler.fetcher import DataFetcher
 
 @dataclass(slots=True)
 class Result:
@@ -51,23 +52,24 @@ def get_interval_seconds() -> int:
     return minutes * 60
 
 def is_source_support_comments(source_id: str) -> bool:
-    """判断该数据源是否属于能抓取评论的源 (baidu, weibo, bilibili等)"""
+    """判断该数据源是否属于能抓取评论的源"""
     sid = str(source_id).lower()
-    return "baidu" in sid or "weibo" in sid or "bilibili" in sid
+    return any(platform in sid for platform in DataFetcher.SUPPORTED_COMMENT_PLATFORMS)
 
 def is_item_analysis_pending(item: NewsItem) -> bool:
     """
     判断新闻项是否需要进行情感/实体分析。
     过滤规则：
-    1. 如果属于能抓取 comments 的 source，则 comments 必须不为空才能分析
-       上次分析时间为空，或距今已过 2.2 个系统周期，则需要（重新）分析
+    1. 如果属于能抓取 comments 的 source，且上次分析时间为空，或距今已过 2.2 个系统周期，
+    则需要（重新）分析
     2. 如果属于不能抓取 comments 的 source，则只分析标题，确保只分析一次
     """
-    source_id = getattr(item, 'source_id', '')
-    analyzed_time: Optional[datetime] = getattr(item, 'analyzed_time', None)
+    source_id = item.source_id
+    analyzed_time: Optional[datetime] = item.analyzed_time
 
     if is_source_support_comments(source_id):
-        if not hasattr(item, 'comments') or not item.comments:
+        # if not hasattr(item, 'comments') or not item.comments:
+        if False: # 目前不强制要求必须有评论才分析，后续可以根据实际情况调整
             return False
     else:
         # 不支持评论的来源，只分析标题，确保只分析一次

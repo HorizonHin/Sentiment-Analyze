@@ -1,6 +1,7 @@
 import logging
 from pathlib import Path
 import time
+import asyncio
 from typing import Any, Dict, List
 
 import yaml
@@ -136,24 +137,35 @@ class DataFetcherAppService:
         if not incoming_items:
             return self.news_domain_service.add_news_items(incoming_items)
 
-        # 在保存前并行抓取评论
-        def fetch_comments_task(item: NewsItem):
+        # 在保存前抓取评论 (异步集成)
+        async def fetch_comments_task(item: NewsItem):
             try:
-                comments = self.fetcher.crawl_comments_dispatch(item.source_id, item.title)
+                # 获取 item 的 url，如果为空则尝试使用 mobile_url
+                fetch_url = item.url or item.mobile_url
+                comments = await self.fetcher.crawl_comments_dispatch(item.source_id, item.title, fetch_url)
                 if comments:
                     item.comments = comments
-                    logger.info(f"成功抓取到评论: {item.source_id} - {item.title} (count: {len(comments)})")
             except Exception as e:
                 logger.warning(f"抓取评论失败 {item.source_id} - {item.title}: {e}")
 
-        futures = [self.common_thread_pool.submit(fetch_comments_task, item) for item in incoming_items]
-        # 等待所有抓取任务完成
-        for future in futures:
+        # 使用 asyncio 运行单次任务 (目前代码中是调试用的单次任务)
+        try:
+            # 尝试获取当前线程的事件循环
             try:
-                future.result()
-            except Exception as e:
-                logger.error(f"评论抓取线程执行出错: {e}")
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
 
+            if loop.is_running():
+                # 如果当前有运行中的事件循环，使用 run_coroutine_threadsafe
+                asyncio.run_coroutine_threadsafe(fetch_comments_task(incoming_items[0]), loop).result()
+                asyncio.run_coroutine_threadsafe(self.fetcher.close(), loop).result()
+            else:
+                loop.run_until_complete(fetch_comments_task(incoming_items[0]))
+                loop.run_until_complete(self.fetcher.close())
+        except Exception as e:
+            logger.error(f"异步评论抓取执行出错: {e}")
         key_list = list({(item.source_id, item.title) for item in incoming_items if item.source_id and item.title})
         existing_items = self.news_domain_service.get_news_list_by_source_title_list(
             key_list,
@@ -197,7 +209,7 @@ class DataFetcherAppService:
                 raise RuntimeError("更新已存在新闻数据失败")
 
             # 缓存操作现已全部交给 sentimentAnalyzeAppsService 处理，以避免被覆盖丢失数据
-            
+            self.fetcher.close()  # 关闭浏览器，释放资源
             saved_items.extend(updated_items)
 
         if saved_items:
