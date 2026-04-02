@@ -150,6 +150,7 @@ class NewsItem:
             "source_name": self.source_name,
             "event_type": self.event_type,
             "summary": self.summary,
+            "comments": self.comments,
             "entities": [
                 {
                     "id": entity.id,
@@ -265,6 +266,7 @@ class NewsItem:
             source_name=data.get("source_name", ""),
             event_type=data.get("event_type", ""),
             summary=data.get("summary", ""),
+            comments=data.get("comments", []),
             entities=[
                 Entity(
                     id=int(item.get("id", -1) or -1),
@@ -833,6 +835,82 @@ class NewsDomainService:
             end_time=end_time,
         )
 
+    @staticmethod
+    def _normalize_search_text(value: Any) -> str:
+        return str(value or "").strip()
+
+    @staticmethod
+    def _matches_search_text(candidate: str, query: str) -> bool:
+        candidate_text = str(candidate or "").strip().lower()
+        query_text = str(query or "").strip().lower()
+        if not candidate_text or not query_text:
+            return False
+        return candidate_text == query_text or query_text in candidate_text or candidate_text in query_text
+
+    def get_keywords_by_terms(
+        self,
+        terms: List[str],
+        news_first_time: Optional[int] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> List[Keyword]:
+        """根据关键词文本搜索 Keyword 记录。"""
+        normalized_terms = {
+            self._normalize_search_text(term)
+            for term in terms
+            if self._normalize_search_text(term)
+        }
+        if not normalized_terms:
+            return []
+
+        if start_time is None:
+            start_time = 0
+        if end_time is None:
+            end_time = int(time.time())
+
+        keywords = self.get_keywords_by_time_range(
+            start_time=int(start_time),
+            end_time=int(end_time),
+            news_first_time=news_first_time,
+        )
+        return [
+            keyword
+            for keyword in keywords
+            if any(self._matches_search_text(keyword.term, term) for term in normalized_terms)
+        ]
+
+    def get_entities_by_names(
+        self,
+        names: List[str],
+        news_first_time: Optional[int] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> List[Entity]:
+        """根据实体名称搜索 Entity 记录。"""
+        normalized_names = {
+            self._normalize_search_text(name)
+            for name in names
+            if self._normalize_search_text(name)
+        }
+        if not normalized_names:
+            return []
+
+        if start_time is None:
+            start_time = 0
+        if end_time is None:
+            end_time = int(time.time())
+
+        entities = self.get_entities_by_time_range(
+            start_time=int(start_time),
+            end_time=int(end_time),
+            news_first_time=news_first_time,
+        )
+        return [
+            entity
+            for entity in entities
+            if any(self._matches_search_text(entity.name, name) for name in normalized_names)
+        ]
+
     def applyNewsField(self, src: NewsItem, target: NewsItem) -> NewsItem:
         if src.title not in (None, ""):
             target.title = src.title
@@ -844,6 +922,8 @@ class NewsDomainService:
             target.event_type = src.event_type
         if src.summary not in (None, ""):
             target.summary = src.summary
+        if src.comments:
+            target.comments = list(src.comments)
         if src.entities:
             target.entities = [
                 Entity(

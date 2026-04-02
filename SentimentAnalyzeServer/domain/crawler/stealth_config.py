@@ -22,7 +22,7 @@ async def create_stealth_browser(
     playwright = await async_playwright().start()
 
     launch_options = {
-        "headless": False,
+        "headless": True,
         "args": [
             "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
@@ -55,6 +55,11 @@ async def create_stealth_browser(
         context_options["proxy"] = {"server": proxy_url}
 
     context = await browser_instance.new_context(**context_options)
+
+    # 屏蔽视频、音频、字体等非必要媒体资源加载，节省 CPU 和带宽
+    await context.route("**/*.{mp4,webm,ogg,avi,flv,mp3,wav,woff,woff2,ttf,otf}", lambda route: route.abort())
+    # 针对 B 站等平台，直接拦截 media 类型的请求
+    await context.route(lambda url: "media" in url or "videoprocessing" in url, lambda route: route.abort())
 
     await context.add_init_script(
         """

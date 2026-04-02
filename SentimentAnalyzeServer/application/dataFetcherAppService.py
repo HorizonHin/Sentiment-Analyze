@@ -46,10 +46,32 @@ class DataFetcherAppService:
     def _serialize_news_items(self, items: List[NewsItem]) -> List[Dict[str, Any]]:
         return [item.to_dict() for item in items]
 
-    def _fetch_comments_by_platform(self, incoming_items: List[NewsItem]) -> None:
-        """
-        按照平台(source_id)分配并发任务，每个平台内的抓取任务在各自的协程中运行。
-        """
+    @staticmethod
+    def _news_item_key(item: NewsItem) -> tuple[str, str]:
+        return (str(item.source_id or "").strip(), str(item.title or "").strip())
+
+    def _rehydrate_runtime_comments(
+        self,
+        target_items: List[NewsItem],
+        source_items: List[NewsItem],
+    ) -> None:
+        """comments 不落库，需要在入库返回对象上回填运行时评论。"""
+        source_comment_map: Dict[tuple[str, str], List[str]] = {}
+        for item in source_items:
+            key = self._news_item_key(item)
+            if key == ("", ""):
+                continue
+            if item.comments:
+                source_comment_map[key] = list(item.comments)
+
+        for item in target_items:
+            key = self._news_item_key(item)
+            comments = source_comment_map.get(key)
+            if comments:
+                item.comments = list(comments)
+
+    def _run_comment_fetch_task(self, incoming_items: List[NewsItem]) -> None:
+        """执行评论抓取主任务（内部用 asyncio 做平台级并发）。"""
         if not incoming_items:
             return
 
@@ -72,7 +94,7 @@ class DataFetcherAppService:
         async def fetch_platform_group(items: List[NewsItem]):
             # 限制每个平台同时只能有一个新闻项在进行抓取任务
             semaphore = asyncio.Semaphore(1)
-            
+
             async def semaphore_wrapper(item: NewsItem):
                 async with semaphore:
                     await fetch_item_comments(item)
@@ -99,6 +121,16 @@ class DataFetcherAppService:
                 loop.run_until_complete(main_task())
         except Exception as e:
             logger.error(f"按平台异步抓取评论执行出错: {e}")
+
+    def _fetch_comments_by_platform(self, incoming_items: List[NewsItem]) -> None:
+        """
+        按照平台(source_id)分配并发任务，每个平台内的抓取任务在各自的协程中运行。
+        平台之间全并发；同一平台同一时间只执行一个抓取任务。
+        """
+        if not incoming_items:
+            return
+
+        self._run_comment_fetch_task(incoming_items)
 
     def _convert_crawl_results_to_news_data(
         self,
@@ -225,6 +257,7 @@ class DataFetcherAppService:
             added_items = self.news_domain_service.add_news_items(new_items)
             if not added_items:
                 raise RuntimeError("保存新增新闻数据失败")
+            self._rehydrate_runtime_comments(added_items, new_items)
             saved_items.extend(added_items)
 
         if merged_items:
@@ -234,6 +267,7 @@ class DataFetcherAppService:
             updated_items = self.news_domain_service.update_existing_crawled_titles(merged_items)
             if not updated_items:
                 raise RuntimeError("更新已存在新闻数据失败")
+            self._rehydrate_runtime_comments(updated_items, merged_items)
 
             # 缓存操作现已全部交给 sentimentAnalyzeAppsService 处理，以避免被覆盖丢失数据
             self.fetcher.close()  # 关闭浏览器，释放资源

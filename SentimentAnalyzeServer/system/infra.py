@@ -66,7 +66,22 @@ class CommonThreadPool:
 
     @classmethod
     def configure(cls, max_workers: int) -> None:
-        cls._configured_max_workers = max(1, int(max_workers))
+        configured = max(1, int(max_workers))
+        cls._configured_max_workers = configured
+
+        # 如果线程池已提前初始化，这里的配置不会影响已创建的 executor。
+        if cls._instance is not None and hasattr(cls._instance, "_executor"):
+            effective = int(getattr(cls._instance._executor, "_max_workers", configured))
+            if effective != configured:
+                logger.warning(
+                    "CommonThreadPool already initialized with %s workers; new configure value %s will not take effect until restart.",
+                    effective,
+                    configured,
+                )
+            else:
+                logger.info("CommonThreadPool configure called. workers=%s (already effective)", configured)
+        else:
+            logger.info("CommonThreadPool configured. workers=%s", configured)
 
     def __new__(cls) -> "CommonThreadPool":
         if cls._instance is None:
@@ -76,6 +91,10 @@ class CommonThreadPool:
                     cls._instance._executor = ThreadPoolExecutor(
                         max_workers=cls._configured_max_workers,
                         thread_name_prefix="common-worker",
+                    )
+                    logger.info(
+                        "CommonThreadPool initialized with %s workers.",
+                        cls._configured_max_workers,
                     )
         return cls._instance
 

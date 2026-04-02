@@ -47,7 +47,7 @@ class WorkflowEventSubscribers:
         saved_items = payload.get("saved_items", [])
         if not isinstance(saved_items, list) or not saved_items:
             return
-
+        logger.info("处理爬取保存成功事件，准备分析新闻项。总项数=%s", len(saved_items))
         valid_items: List[NewsItem] = [item for item in saved_items if isinstance(item, NewsItem)]
         if not valid_items:
             logger.info("Crawl saved event received but no valid news items found in payload.")

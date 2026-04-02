@@ -44,19 +44,19 @@ llm_executor:
   max_workers: 4
 
 scheduler:  
-  crawl_interval_minutes: 23       # 系统周期（原 CRAWL_INTERVAL_MINUTES）
+  crawl_interval_minutes: 27       # 系统周期（原 CRAWL_INTERVAL_MINUTES）
 
 sentiment:
   first_time_lookback_days: 3      # 查询分区键 first_time 默认回溯天数
   weibo:
-    max_comments: 20               # 微博评论爬取数量限制
+    max_comments: 10               # 评论爬取数量限制
     mobile_index_url: "https://m.weibo.cn"
   bilibili:
     search_url: "https://search.bilibili.com/all?keyword="
     comment_api_url: "https://api.bilibili.com/x/v2/reply?type=1&oid="
 
 common_thread_pool:
-  max_workers: 8
+  max_workers: 4
 
 llm:
   api_key: ""                      # 请填写通义千问 API Key ，不填则默认使用环境变量中的 API Key

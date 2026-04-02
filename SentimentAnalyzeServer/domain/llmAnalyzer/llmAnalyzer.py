@@ -170,12 +170,35 @@ class LLMTitleAnalyzer:
         if not isinstance(payload, dict):
             raise ValueError("LLM payload is not a JSON object")
 
+        event_type_raw = str(payload.get("event_type", "other")).strip()
+        event_type = EVENT_TYPE_MAP.get(event_type_raw, event_type_raw)
+        if event_type not in {
+            "business_competition",
+            "policy_change",
+            "product_launch",
+            "crisis_event",
+            "technology_breakthrough",
+            "other",
+        }:
+            event_type = "other"
+
         return {
             "entities": self._normalize_entities(payload.get("entities", [])),
-            "event_type": "other",  
+            "event_type": event_type,
             "summary": "无该来源评论抓取支持，仅分析标题实体和关键词",
             "keywords": payload.get("keywords", []),
-            "sentiment_analysis": self._normalize_sentiment({}),  # Default neutral sentiment
+            "sentiment_analysis": {
+                "polarity": "",
+                "positive_ratio": 0.0,
+                "negative_ratio": 0.0,
+                "neutral_ratio": 0.0,
+                "dimensions": {
+                    "optimism": 0.0,
+                    "trust": 0.0,
+                    "attention": 0.0,
+                    "controversy": 0.0,
+                },
+            },
         }
 
     @staticmethod

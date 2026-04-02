@@ -132,6 +132,178 @@ class TopicAppService:
 
     def close_topic_persist_queue(self):
         self._topic_persist_queue.close_and_wait()
+
+    @staticmethod
+    def _normalize_search_text(value: Any) -> str:
+        return str(value or "").strip()
+
+    @staticmethod
+    def _topic_name_matches(candidate: str, query: str) -> bool:
+        candidate_text = str(candidate or "").strip().lower()
+        query_text = str(query or "").strip().lower()
+        if not candidate_text or not query_text:
+            return False
+        return candidate_text == query_text or query_text in candidate_text or candidate_text in query_text
+
+    @staticmethod
+    def _keyword_dedup_score(item: Keyword) -> tuple[float, int]:
+        return (float(getattr(item, "weigh", 0.0) or 0.0), int(getattr(item, "last_time", 0) or 0))
+
+    @staticmethod
+    def _entity_dedup_score(item: Entity) -> tuple[float, int]:
+        return (float(getattr(item, "weigh", 0.0) or 0.0), int(getattr(item, "last_time", 0) or 0))
+
+    def search_keywords_by_query(
+        self,
+        query: str,
+        news_first_time: Optional[int] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 100,
+    ) -> List[Keyword]:
+        """按 query 在时间范围内模糊检索 Keyword，并按 term 去重。"""
+        normalized_query = self._normalize_search_text(query)
+        if not normalized_query:
+            return []
+
+        matched = self.news_domain_service.get_keywords_by_terms(
+            terms=[normalized_query],
+            news_first_time=news_first_time,
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        dedup_map: Dict[str, Keyword] = {}
+        for item in matched:
+            term_key = str(item.term or "").strip().lower()
+            if not term_key:
+                continue
+            existing = dedup_map.get(term_key)
+            if existing is None or self._keyword_dedup_score(item) >= self._keyword_dedup_score(existing):
+                dedup_map[term_key] = item
+
+        deduped = list(dedup_map.values())
+        deduped.sort(key=lambda x: self._keyword_dedup_score(x), reverse=True)
+        return deduped[: max(1, int(limit))]
+
+    def search_entities_by_query(
+        self,
+        query: str,
+        news_first_time: Optional[int] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 100,
+    ) -> List[Entity]:
+        """按 query 在时间范围内模糊检索 Entity，并按 name 去重。"""
+        normalized_query = self._normalize_search_text(query)
+        if not normalized_query:
+            return []
+
+        matched = self.news_domain_service.get_entities_by_names(
+            names=[normalized_query],
+            news_first_time=news_first_time,
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        dedup_map: Dict[str, Entity] = {}
+        for item in matched:
+            name_key = str(item.name or "").strip().lower()
+            if not name_key:
+                continue
+            existing = dedup_map.get(name_key)
+            if existing is None or self._entity_dedup_score(item) >= self._entity_dedup_score(existing):
+                dedup_map[name_key] = item
+
+        deduped = list(dedup_map.values())
+        deduped.sort(key=lambda x: self._entity_dedup_score(x), reverse=True)
+        return deduped[: max(1, int(limit))]
+
+    def _find_existing_topic_by_keyword(self, keyword: str) -> Optional[Topic]:
+        normalized_keyword = self._normalize_search_text(keyword)
+        if not normalized_keyword:
+            return None
+
+        for topic in self.topic_cache_manager.get_topics():
+            if self._topic_name_matches(topic.topic, normalized_keyword):
+                return topic
+
+        topic = self.topic_domain_service.find_recent_topic_by_name(
+            topic_name=normalized_keyword,
+            days_lookback=self.default_days_lookback,
+        )
+        if topic is not None and self._topic_name_matches(topic.topic, normalized_keyword):
+            return topic
+        return None
+
+    def get_topic_by_keyword_or_build(
+        self,
+        keyword: str,
+        news_first_time: Optional[int] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> Optional[Topic]:
+        """根据关键词返回现有 Topic，或基于匹配到的 Keyword/Entity 构建 Topic。"""
+        normalized_keyword = self._normalize_search_text(keyword)
+        if not normalized_keyword:
+            return None
+
+        existing_topic = self._find_existing_topic_by_keyword(normalized_keyword)
+        if existing_topic is not None:
+            return existing_topic
+
+        matched_keywords = self.news_domain_service.get_keywords_by_terms(
+            [normalized_keyword],
+            news_first_time=news_first_time,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        matched_entities = self.news_domain_service.get_entities_by_names(
+            [normalized_keyword],
+            news_first_time=news_first_time,
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        if not matched_keywords and not matched_entities:
+            return None
+
+        keyword_items = self.news_domain_service.get_news_list_by_keywords(
+            keywords=matched_keywords,
+            news_first_time=news_first_time,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        entity_items = self.news_domain_service.get_news_list_by_entities(
+            entities=matched_entities,
+            news_first_time=news_first_time,
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        combined_items: Dict[tuple[str, str], NewsItem] = {}
+        for item in [*keyword_items, *entity_items]:
+            if not isinstance(item, NewsItem):
+                continue
+            key = (str(item.source_id or "").strip(), str(item.title or "").strip())
+            if key == ("", ""):
+                continue
+            combined_items[key] = item
+
+        if not combined_items:
+            return None
+
+        topic_name = normalized_keyword
+        if matched_keywords:
+            topic_name = str(matched_keywords[0].term or normalized_keyword).strip() or normalized_keyword
+        elif matched_entities:
+            topic_name = str(matched_entities[0].name or normalized_keyword).strip() or normalized_keyword
+
+        return self.topic_domain_service.build_topic_from_news_items(
+            topic_name=topic_name,
+            news_items=list(combined_items.values()),
+        )
+
     def __init__(
         self,
         topic_domain_service: TopicDomainService,

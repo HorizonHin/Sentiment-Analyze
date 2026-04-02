@@ -73,7 +73,7 @@ class AsyncBrowserClient:
             self._playwright, self._browser, self._shared_context = await create_stealth_browser(
                 proxy_url=self.proxy_url
             )
-            self._shared_context.set_extra_http_headers(self.default_headers)
+            await self._shared_context.set_extra_http_headers(self.default_headers)
             self._started = True
 
     async def acquire_page(self):

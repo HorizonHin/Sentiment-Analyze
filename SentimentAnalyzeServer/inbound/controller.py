@@ -127,66 +127,85 @@ def create_external_controller(
 			logger.exception("Failed to execute /topic/backfill-llm-title")
 			return jsonify(Result.failure_result(str(exc)).to_dict())
 
-	@bp.get("/news/recommend-hot-terms")
-	def recommend_hot_terms_by_time_range() -> object:
+	@bp.get("/news/search-terms")
+	def search_terms_by_keyword() -> object:
 		"""
 		参数:
+		- keyword: str (必填，搜索词，如: 小米)
 		- start_time: int (秒级时间戳)
 		- end_time: int (秒级时间戳)
 		- news_first_time: int (可选，分区下界)
-		- top_n: int (可选，默认100)
+		- limit: int (可选，默认100)
 		"""
 		try:
+			keyword = str(request.args.get("keyword", "")).strip()
+			if not keyword:
+				return jsonify(Result.failure_result("参数 keyword 不能为空").to_dict())
+
 			start_time = parse_int_timestamp(request.args.get("start_time"))
 			end_time = parse_int_timestamp(request.args.get("end_time"))
 			news_first_time = parse_int_timestamp(request.args.get("news_first_time"))
-			top_n_raw = request.args.get("top_n")
+			limit_raw = request.args.get("limit")
 			try:
-				top_n = max(1, int(top_n_raw)) if top_n_raw is not None else 100
+				limit = max(1, int(limit_raw)) if limit_raw is not None else 100
 			except (TypeError, ValueError):
-				top_n = 100
+				limit = 100
 
 			if start_time is None or end_time is None:
 				return jsonify(Result.failure_result("参数 start_time 和 end_time 必须为有效的秒级时间戳").to_dict())
 
-			# 直接用 sentiment_app_service.news_domain_service
-			news_domain_service = sentiment_app_service.news_domain_service
-			kw_groups, entity_groups = news_domain_service.recommend_hot_terms_by_time_range(
+			keywords = topic_app_service.search_keywords_by_query(
+				query=keyword,
 				start_time=start_time,
 				end_time=end_time,
 				news_first_time=news_first_time,
-				top_n=top_n,
+				limit=limit,
 			)
-			# 返回格式：{"keywords": {...}, "entities": {...}}
+			entities = topic_app_service.search_entities_by_query(
+				query=keyword,
+				start_time=start_time,
+				end_time=end_time,
+				news_first_time=news_first_time,
+				limit=limit,
+			)
+
 			def key_or_enti_to_dict(obj):
 				return {slot: getattr(obj, slot) for slot in obj.__slots__ if hasattr(obj, slot)}
 
 			data = {
-				"keywords": {k: [key_or_enti_to_dict(kw) for kw in v] for k, v in kw_groups.items()},
-				"entities": {k: [key_or_enti_to_dict(e) for e in v] for k, v in entity_groups.items()},
+				"keyword": keyword,
+				"keywords": [key_or_enti_to_dict(kw) for kw in keywords],
+				"entities": [key_or_enti_to_dict(e) for e in entities],
 			}
 			return jsonify(Result.success_result(data).to_dict())
 		except Exception as exc:
-			logger.exception("Failed to execute /news/recommend-hot-terms")
+			logger.exception("Failed to execute /news/search-terms")
 			return jsonify(Result.failure_result(str(exc)).to_dict())
-		
-	@bp.get("/recommend_topics")
-	def recommend_topics() -> object:
-		"""推荐话题接口"""
-		try:
-			lookback_seconds = crawl_interval_seconds * _LATEST_RANKED_LOOKBACK_MULTIPLIER
-			end_time = int(time.time())
-			start_time = end_time - int(lookback_seconds)
 
-			result = topic_app_service.recommend_and_cache_topics(
+	@bp.get("/topics/by-keyword")
+	def get_topic_by_keyword() -> object:
+		try:
+			keyword = str(request.args.get("keyword", "")).strip()
+			if not keyword:
+				return jsonify(Result.failure_result("参数 keyword 不能为空").to_dict())
+
+			news_first_time = parse_int_timestamp(request.args.get("news_first_time"))
+			start_time = parse_int_timestamp(request.args.get("start_time"))
+			end_time = parse_int_timestamp(request.args.get("end_time"))
+
+			topic = topic_app_service.get_topic_by_keyword_or_build(
+				keyword=keyword,
+				news_first_time=news_first_time,
 				start_time=start_time,
 				end_time=end_time,
 			)
+			if topic is None:
+				return jsonify(Result.failure_result("未找到可返回或可构建的 Topic").to_dict())
 
-			return jsonify(Result.success_result(result).to_dict())
+			return jsonify(Result.success_result(topic.to_dict()).to_dict())
 		except Exception as exc:
-			logger.exception("recommend_and_cache_topics failed")
+			logger.exception("Failed to execute /topics/by-keyword")
 			return jsonify(Result.failure_result(str(exc)).to_dict())
-
+		
 
 	return bp
