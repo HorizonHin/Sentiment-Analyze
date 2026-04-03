@@ -93,15 +93,9 @@ class Scheduled:
             logger.error("[scheduler] sentiment_app_service 未配置")
             return {"success": False, "reason": "sentiment_service_not_configured"}
 
-        end_time = int(time.time()) - int(self.interval_seconds)
-        first_time = end_time - self.first_time_lookback_seconds
-        return self.sentiment_app_service.analyze_pending_items_by_latest_time(
-            first_time=first_time,
-            start_time=None,
-            end_time=end_time,
-        )
+        return self.sentiment_app_service.analyze_pending_items_by_latest_time()
 
-    def _read_last_completed_time(self) -> int | None:
+    def _read_last_started_time(self) -> int | None:
         if not self.last_run_file.exists():
             return None
 
@@ -124,21 +118,21 @@ class Scheduled:
         except ValueError:
             return None
 
-    def _write_last_completed_time(self, completed_at: int) -> None:
-        if not isinstance(completed_at, int):
-            raise TypeError(f"completed_at must be int timestamp, got {type(completed_at).__name__}")
-        text = time.strftime(_LOCAL_TIME_FORMAT, time.localtime(completed_at))
+    def _write_last_started_time(self, started_at: int) -> None:
+        if not isinstance(started_at, int):
+            raise TypeError(f"started_at must be int timestamp, got {type(started_at).__name__}")
+        text = time.strftime(_LOCAL_TIME_FORMAT, time.localtime(started_at))
         self.last_run_file.write_text(text, encoding="utf-8")
 
     def _wait_until_next_run(self) -> bool:
         """Return True when caller should stop loop, False when cycle can proceed."""
         now_ts = int(time.time())
-        last_completed = self._read_last_completed_time()
+        last_started = self._read_last_started_time()
 
-        if last_completed is None:
+        if last_started is None:
             return False
 
-        elapsed = float(now_ts - int(last_completed))
+        elapsed = float(now_ts - int(last_started))
         if elapsed >= self.interval_seconds:
             return False
 
@@ -159,6 +153,11 @@ class Scheduled:
 
             started_at = time.time()
             try:
+                self._write_last_started_time(int(started_at))
+            except OSError as exc:
+                logger.error(f"[scheduler] 写入上次启动时间失败: {exc}")
+
+            try:
                 self._run_in_common_pool(self.run_analyze_pending_once, "dataAnalyzer")
             except Exception as exc:
                 logger.error(f"[dataAnalyzer] 补分析任务执行失败: {exc}")
@@ -167,11 +166,6 @@ class Scheduled:
                 self._run_in_common_pool(self.fetch_and_store_news_data, "dataFetcher")
             except Exception as exc:
                 logger.error(f"[dataFetcher] 任务执行失败: {exc}")
-
-            try:
-                self._write_last_completed_time(int(time.time()))
-            except OSError as exc:
-                logger.error(f"[scheduler] 写入上次完成时间失败: {exc}")
 
             elapsed = time.time() - started_at
             wait_seconds = max(0, self.interval_seconds - elapsed)

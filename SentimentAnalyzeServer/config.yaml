@@ -44,7 +44,7 @@ llm_executor:
   max_workers: 4
 
 scheduler:  
-  crawl_interval_minutes: 27       # 系统周期（原 CRAWL_INTERVAL_MINUTES）
+  crawl_interval_minutes: 25       # 系统周期（原 CRAWL_INTERVAL_MINUTES）
 
 sentiment:
   first_time_lookback_days: 3      # 查询分区键 first_time 默认回溯天数

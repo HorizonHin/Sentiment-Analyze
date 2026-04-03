@@ -31,19 +31,7 @@ def create_external_controller(
 	@bp.get("/news/latest-ranked")
 	def get_latest_ranked_news() -> object:
 		try:
-			lookback_seconds = max(60, int(crawl_interval_seconds)) * _LATEST_RANKED_LOOKBACK_MULTIPLIER
-			default_end_time = int(time.time())
-			default_start_time = default_end_time - int(lookback_seconds*1.3)
-			default_first_time = default_end_time - max(60, int(first_time_lookback_seconds))
-			first_time = parse_int_timestamp(request.args.get("first_time")) or default_first_time
-			start_time = parse_int_timestamp(request.args.get("start_time")) or default_start_time
-			end_time = parse_int_timestamp(request.args.get("end_time")) or default_end_time
-
-			grouped = sentiment_app_service.get_analyzed_news_grouped_by_latest_time(
-				first_time=first_time,
-				start_time=start_time,
-				end_time=end_time,
-			)
+			grouped = sentiment_app_service.get_latest_analyzed_news_batch_grouped()
 			data = {
 				source_id: [item.to_dict() for item in items]
 				for source_id, items in grouped.items()

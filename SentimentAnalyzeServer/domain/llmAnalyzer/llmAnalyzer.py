@@ -27,6 +27,7 @@ EVENT_TYPE_MAP = {
 
 POLARITY_SET = {"positive", "negative", "neutral", "mixed"}
 ENTITY_TYPE_SET = {"company", "product", "person", "policy", "org", "unknown"}
+MAX_REPRESENTATIVE_ITEMS = 5
 
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,7 @@ class LLMTitleAnalyzer:
             return []
 
         output: list[dict[str, str]] = []
+        seen: set[str] = set()
         for item in entities:
             if isinstance(item, dict):
                 name = str(item.get("name", "")).strip()
@@ -101,7 +103,53 @@ class LLMTitleAnalyzer:
 
             if not name:
                 continue
+
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+
+            if e_type not in ENTITY_TYPE_SET:
+                e_type = "unknown"
+
             output.append({"name": name, "type": e_type})
+            if len(output) >= MAX_REPRESENTATIVE_ITEMS:
+                break
+        return output
+
+    def _normalize_keywords(self, keywords: Any) -> list[dict[str, Any]]:
+        if not isinstance(keywords, list):
+            return []
+
+        parsed_keywords: list[dict[str, Any]] = []
+        for item in keywords:
+            if isinstance(item, dict):
+                term = str(item.get("term", "")).strip()
+                importance = self._clamp(item.get("importance", 0.0), 0.0)
+            elif isinstance(item, str):
+                term = item.strip()
+                importance = 0.0
+            else:
+                continue
+
+            if not term:
+                continue
+
+            parsed_keywords.append({"term": term, "importance": importance})
+
+        # Keep the strongest keywords and drop duplicates by normalized term.
+        parsed_keywords.sort(key=lambda x: x["importance"], reverse=True)
+        output: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in parsed_keywords:
+            key = item["term"].lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(item)
+            if len(output) >= MAX_REPRESENTATIVE_ITEMS:
+                break
+
         return output
 
     def _normalize_sentiment(self, sentiment: Any) -> dict[str, Any]:
@@ -162,7 +210,7 @@ class LLMTitleAnalyzer:
             "entities": self._normalize_entities(payload.get("entities", [])),
             "event_type": event_type,
             "summary": summary,
-            "keywords": payload.get("keywords", []),
+            "keywords": self._normalize_keywords(payload.get("keywords", [])),
             "sentiment_analysis": self._normalize_sentiment(payload.get("sentiment_analysis", {})),
         }
 
@@ -186,7 +234,7 @@ class LLMTitleAnalyzer:
             "entities": self._normalize_entities(payload.get("entities", [])),
             "event_type": event_type,
             "summary": "无该来源评论抓取支持，仅分析标题实体和关键词",
-            "keywords": payload.get("keywords", []),
+            "keywords": self._normalize_keywords(payload.get("keywords", [])),
             "sentiment_analysis": {
                 "polarity": "",
                 "positive_ratio": 0.0,
@@ -251,7 +299,9 @@ class LLMTitleAnalyzer:
                     {
                         "role": "user",
                         "content": (
-                            "请分析以下新闻标题及公众评论并输出 json。仅输出 json，不要输出任何解释。"
+                            "请分析以下新闻标题及公众评论并输出 json。"
+                            "其中 entities 和 keywords 各只保留最具代表性的 3-5 项。"
+                            "仅输出 json，不要输出任何解释。"
                             f"\n新闻标题：{title}"
                             f"\n公众评论：\n{comments_text}"
                         ),

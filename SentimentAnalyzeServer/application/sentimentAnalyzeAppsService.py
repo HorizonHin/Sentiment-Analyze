@@ -185,14 +185,18 @@ class SentimentAnalyzeAppService:
 				if item.last_time is not None and item.last_time >= recent_threshold
 			]
 			if recent_items:
+				logger.debug("Caching %d recent analyzed items (< %d sec)", len(recent_items), self.recent_window_seconds)
 				self.common_thread_pool.submit(self._cache_recent_analyzed_news, recent_items)
 
-			# 取所有最终属于"不强制再次分析(含刚分析完的 title_only 或者其他不需要再次分析)"的items放入这个专门的缓存
+			# 仅存储真正不需要再次分析的项
+			# 逻辑修正：应该只存储真正不需要分析的 (not is_item_analysis_pending)
+			# 而不是 "not pending" OR "not support comments" 这样的 OR 逻辑
 			latest_not_need_analysis = [
 				item for item in final_items
-				if not is_item_analysis_pending(item) or not is_source_support_comments(item.source_id or "")
+				if not is_item_analysis_pending(item)
 			]
 			if latest_not_need_analysis:
+				logger.debug("Caching %d items as not-needing-analysis", len(latest_not_need_analysis))
 				self.common_thread_pool.submit(self._cache_latest_not_need_analysis_items, latest_not_need_analysis)
 
 		self.event_manager.publish(
@@ -303,17 +307,17 @@ class SentimentAnalyzeAppService:
   
 	def analyze_pending_items_by_latest_time(
 		self,
-		first_time: Optional[int] = None,
-		start_time: Optional[int] = None,
-		end_time: Optional[int] = None,
 	) -> dict[str, Any]:
-		resolved_first_time = int(first_time) if first_time is not None else int(time.time()) - self.first_time_lookback_seconds
-		latest_items = self.news_domain_service.get_news_list_by_latest_crawl_range(
+		"""获取最新一批未分析的新闻并执行分析。"""
+		resolved_first_time = int(time.time()) - self.first_time_lookback_seconds
+		latest_items = self.news_domain_service.get_news_list_by_latest_batch(
 			isAnalyzed=False,
 			first_time=resolved_first_time,
-			start_time=start_time,
-			end_time=end_time,
 		)
+		if not latest_items:
+			logger.info("[Analyze_pending] 无可分析的数据")
+			return {"success": True, "item_count": 0}
+		
 		pending_items = self.filter_news_items_not_analyzed(latest_items)
 		if not pending_items:
 			logger.info("[Analyze_pending] 无可分析的数据")
@@ -324,14 +328,17 @@ class SentimentAnalyzeAppService:
 		analyzed_count = len(pending_items) if saved else 0
 		return {"success": True, "item_count": analyzed_count}
 
-	def get_analyzed_news_grouped_by_latest_time(
-		self,
-		first_time: Optional[int] = None,
-		start_time: Optional[int] = None,
-		end_time: Optional[int] = None,
-	) -> Dict[str, List[NewsItem]]:
-		"""按 last_time 范围获取已分析新闻，并按 source_id 分组。"""
-		resolved_first_time = int(first_time) if first_time is not None else int(time.time()) - self.first_time_lookback_seconds
+	def get_latest_analyzed_news_batch_grouped(self) -> Dict[str, List[NewsItem]]:
+		"""获取最新一批已分析的新闻，按 source_id 分组。
+		
+		返回流程：
+		1. 优先尝试 Redis 缓存（30分钟内的最新分析数据 + 已无需分析的数据）
+		2. 缓存为空或被过滤后，查询数据库获取 TOP 500 最新已分析新闻
+		3. Domain 层进一步过滤确保数据完整性
+		"""
+		resolved_first_time = int(time.time()) - self.first_time_lookback_seconds
+		
+		# 尝试从 Redis 缓存读取最新数据
 		cached_payload_map = self.redis.get_many(
 			[
 				REDIS_KEY_LATEST_NOT_NEED_ANALYSIS_NEWS,
@@ -344,23 +351,33 @@ class SentimentAnalyzeAppService:
 				cached_items.extend(self._deserialize_news_items(payload))
 
 			if cached_items:
+				initial_count = len(cached_items)
 				cached_items = self._deduplicate_news_items(cached_items)
-				# 强化过滤：不仅检查时间范围，还要确保缓存中的数据是不需要分析的（即已分析完成或不支持分析）
+				dedup_count = len(cached_items)
+				
+				# 过滤：确保所有缓存数据都是已分析或不需要分析的
 				cached_items = [
 					item
 					for item in cached_items
-					if (item.first_time is not None and item.first_time >= resolved_first_time)
-					and (not is_item_analysis_pending(item))
+					if not is_item_analysis_pending(item)
 				]
-				cached_items = self._filter_items_by_last_time_range(cached_items, start_time, end_time)
+				after_filter = len(cached_items)
+				
+				logger.debug(
+					"Redis cache: initial=%d items, dedup=%d items, after analysis check=%d items",
+					initial_count, dedup_count, after_filter
+				)
+				
 				if cached_items:
+					logger.info("Returning %d latest analyzed items from Redis cache", len(cached_items))
 					return self.news_domain_service.group_news_items_by_platform(cached_items)
+				else:
+					logger.warning("Redis cache exists but filtered to empty; falling back to DB query")
 
-		grouped = self.news_domain_service.get_group_news_by_latest_crawl_range(
-			isAnalyzed=True,
-			first_time=resolved_first_time,
-			start_time=start_time,
-			end_time=end_time,
+		# 后备：查询数据库获取最新已分析的新闻
+		logger.info("Querying database for latest analyzed news")
+		grouped = self.news_domain_service.get_latest_analyzed_news_batch_grouped_by_source(
+			first_time=resolved_first_time
 		)
 		return grouped or {}
 	

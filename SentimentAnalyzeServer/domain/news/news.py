@@ -518,12 +518,10 @@ class NewsItemRepository(ABC):
         return []
 
     @abstractmethod
-    def get_news_list_by_latest_crawl_range(
+    def get_news_list_by_latest_batch(
         self,
         isAnalyzed: bool,
         first_time: int,
-        start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
     ) -> Optional[List[NewsItem]]:
         pass
 
@@ -1145,35 +1143,43 @@ class NewsDomainService:
             return False
         return self.storage.update_news_list([item])
 
-    def get_group_news_by_latest_crawl_range(
+    def get_latest_analyzed_news_batch_grouped_by_source(
         self,
-        isAnalyzed: bool,
         first_time: int,
-        start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
     ) -> Optional[Dict[str, List[NewsItem]]]:
-        news_items = self.get_news_list_by_latest_crawl_range(
-            isAnalyzed=isAnalyzed,
+        """获取最新一批已分析的新闻，按 source_id 分组。
+        
+        Args:
+            first_time: 分区键（下界），用于查询分区
+        
+        Returns:
+            按 source_id 分组的已分析新闻字典，按 last_time 降序排列（TOP 500）
+        """
+        news_items = self.get_news_list_by_latest_batch(
+            isAnalyzed=True,
             first_time=first_time,
-            start_time=start_time,
-            end_time=end_time,
         )
         if news_items is None:
             return None
         result = self.group_news_items_by_platform(news_items)
         return result
     
-    def get_news_list_by_latest_crawl_range(
+    def get_news_list_by_latest_batch(
         self,
         isAnalyzed: bool,
         first_time: int,
-        start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
     ) -> Optional[List[NewsItem]]:
-        return self.storage.get_news_list_by_latest_crawl_range(
+        """获取最新一批已分析（或未分析）的新闻。
+        
+        Args:
+            isAnalyzed: 是否已分析
+            first_time: 分区键（下界），用于查询分区
+        
+        Returns:
+            已按 last_time 降序排列的新闻列表（TOP 500）
+        """
+        return self.storage.get_news_list_by_latest_batch(
             isAnalyzed=isAnalyzed,
             first_time=first_time,
-            start_time=start_time,
-            end_time=end_time,
         )
 

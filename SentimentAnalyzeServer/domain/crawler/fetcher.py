@@ -30,8 +30,8 @@ class DataFetcher:
     # 默认 API 地址
     DEFAULT_API_URL = "https://newsnow.busiyi.world/api/s"
     
-    # 支持抓取评论的平台集合。"bilibili" "douyin" , "weibo"评论反爬较强，暂不支持启动。
-    SUPPORTED_COMMENT_PLATFORMS = {"baidu", "toutiao", 
+    # 支持抓取评论的平台集合。"bilibili","douyin" , "weibo"评论反爬较强，暂不支持启动。
+    SUPPORTED_COMMENT_PLATFORMS = {"baidu", "toutiao","bilibili","douyin" , 
                                    "zhihu", "tieba", "thepaper", "hupu", "tencent-hot"}
 
     # 默认请求头
@@ -60,7 +60,7 @@ class DataFetcher:
         self.proxy_url = proxy_url
         self.api_url = api_url or self.DEFAULT_API_URL
         self.max_comments = max_comments
-        self._browser_client: Optional[AsyncBrowserClient] = None
+        self._browser_clients_by_loop: Dict[int, AsyncBrowserClient] = {}
         
         # 确保截图保存目录存在
         self.screenshot_dir = "screenshots"
@@ -82,23 +82,40 @@ class DataFetcher:
         return {}
 
     async def _get_browser_client(self) -> AsyncBrowserClient:
-        if self._browser_client is None:
-            self._browser_client = await AsyncBrowserClient.get_instance(
+        loop = asyncio.get_running_loop()
+        loop_key = id(loop)
+
+        if loop_key not in self._browser_clients_by_loop:
+            self._browser_clients_by_loop[loop_key] = await AsyncBrowserClient.get_instance(
                 proxy_url=self.proxy_url,
                 headers_config=self.headers_config,
                 default_headers=self.DEFAULT_HEADERS,
                 max_comments=self.max_comments,
                 max_concurrent_pages=5,
             )
-        return self._browser_client
+        return self._browser_clients_by_loop[loop_key]
 
     async def close(self):
         """
         关闭异步浏览器客户端 (异步)
         """
-        if self._browser_client:
-            await self._browser_client.close()
-            self._browser_client = None
+        if not self._browser_clients_by_loop:
+            return
+
+        loop = asyncio.get_running_loop()
+        loop_key = id(loop)
+        client = self._browser_clients_by_loop.pop(loop_key, None)
+        if client:
+            await client.close()
+
+    async def _wait_locator_visible(self, page, selector: str, timeout: int = 10000) -> bool:
+        """Wait for the first matching locator to become visible."""
+        locator = page.locator(selector).first
+        try:
+            await locator.wait_for(state="visible", timeout=timeout)
+            return True
+        except Exception:
+            return False
 
     def fetch_data(
         self,
@@ -244,10 +261,10 @@ class DataFetcher:
             return await self.crawl_baidu_comments_opyimized(title, url)
         # elif "weibo" in source_id.lower():
         #     return await self.crawl_weibo_comments(title)
-        # elif "bilibili" in source_id.lower():
-        #     return await self.crawl_bilibili_comments_optimized(title, url)  
-        # elif "douyin" in source_id.lower():
-        #     return await self.crawl_douyin_comments(title, url)                  
+        elif "bilibili" in source_id.lower():
+            return await self.crawl_bilibili_comments_optimized(title, url)  
+        elif "douyin" in source_id.lower():
+            return await self.crawl_douyin_comments(title, url)                  
         elif "toutiao" in source_id.lower():
             return await self.crawl_toutiao_comments(title, url)
         elif "zhihu" in source_id.lower():
@@ -508,6 +525,8 @@ class DataFetcher:
             browser_client = await self._get_browser_client()
             page = await browser_client.acquire_page()
 
+            got_comments_event = asyncio.Event()
+
             async def handle_response(response):
                 try:
                     if "douyin.com/aweme/v1/web/comment/list" in response.url and response.status == 200:
@@ -516,27 +535,31 @@ class DataFetcher:
                             text = comment.get("text", "")
                             if text and text not in comments:
                                 comments.append(text)
+                                got_comments_event.set()
                 except Exception:
                     pass
 
             page.on("response", handle_response)
-            # 抖音的页面加载较慢，因此等待模式改成 "load"
             await page.goto(url, wait_until="load", timeout=30000)
-            
-            # 等待主要的视频或内容容器加载
-            try:
-                # 等待评论加载，或者视频外层容器
-                await page.wait_for_selector('div[data-e2e="video-comment-more"], .video-detail-container, .main-container', timeout=15000)
-            except:
-                pass
 
-            # 模拟用户滚动行为，触发异步评论加载
-            for _ in range(3):
-                await page.evaluate("window.scrollBy(0, 500)")
-                await asyncio.sleep(1)
-            
-            # 最终额外等待，确保 response 监听器捕获到数据
-            await asyncio.sleep(3)
+            # 通过 locator 自动等待页面关键容器可见
+            await self._wait_locator_visible(
+                page,
+                'div[data-e2e="video-comment-more"], .video-detail-container, .main-container',
+                timeout=15000,
+            )
+
+            # 触发评论异步加载
+            await page.evaluate("window.scrollBy(0, 800)")
+
+            # 优先等待评论接口返回，失败时回退 networkidle
+            try:
+                await asyncio.wait_for(got_comments_event.wait(), timeout=4)
+            except TimeoutError:
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=4000)
+                except Exception:
+                    pass
             
             if not comments:
                 # 仅在失败且没有拿到评论时记录日志
@@ -556,6 +579,8 @@ class DataFetcher:
             browser_client = await self._get_browser_client()
             page = await browser_client.acquire_page()
 
+            got_comments_event = asyncio.Event()
+
             async def handle_response(response):
                 try:
                     if ("tab_comments" in response.url or "v2/comment/list" in response.url) and response.status == 200:
@@ -569,14 +594,24 @@ class DataFetcher:
                             text = comment_obj.get("text", "")
                             if text and text not in comments:
                                 comments.append(text)
+                                got_comments_event.set()
                 except Exception:
                     pass
 
             page.on("response", handle_response)
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            # 等待评论区容器出现
-            await page.wait_for_selector('div.comment-info', timeout=10000)
-            await asyncio.sleep(3)
+
+            # Locator API 自动等待评论区容器
+            await self._wait_locator_visible(page, "div.comment-info", timeout=10000)
+
+            try:
+                await asyncio.wait_for(got_comments_event.wait(), timeout=3)
+            except TimeoutError:
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=3000)
+                except Exception:
+                    pass
+
             if not comments:
                 logger.info(f"Playwright 为标题 '{title}' 抓获到 0 条头条评论")
         except Exception as e:
@@ -645,13 +680,16 @@ class DataFetcher:
             await page.goto(url, wait_until="domcontentloaded", timeout=20000)
             await page.screenshot(path="screenshots/zhihu_debug_page_loaded.png")
 
-            content_blocks = await page.query_selector_all(".RichContent-inner")
-            for block in content_blocks:
-                content_span = await block.query_selector('xpath=.//*[@id="content"]/span[1]')
-                if not content_span:
-                    continue
+            rich_contents = page.locator(".RichContent-inner")
+            try:
+                await rich_contents.first.wait_for(state="visible", timeout=10000)
+            except Exception:
+                pass
 
-                text = (await content_span.inner_text()).strip()
+            content_count = await rich_contents.count()
+            for index in range(content_count):
+                block = rich_contents.nth(index)
+                text = (await block.text_content() or "").strip()
                 if not text:
                     continue
 

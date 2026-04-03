@@ -63,7 +63,7 @@ def is_item_analysis_pending(item: NewsItem) -> bool:
     1. 如果支持抓取评论的源：
        - 若尚未分析过 (analyzed_time 为空)，则需要分析。
        - 若已分析过，但上次只有标题分析 (无 summary 或特定标记)，且本次抓取到了评论，则需要立即重新分析以提升质量。
-       - 若已分析过且已有 summary，但距今已过 2.2 个系统周期，则需要定期更新。
+       - 若已分析过且已有 summary，但距今已过 3.2 个系统周期，则需要定期更新。
        - 特殊风险：如果本次没抓到评论，且上次已经有 summary 了，则不应分析（避免用仅标题的结果覆盖高质量的结果）。
     2. 如果不支持评论的源：
        - 只分析一次标题即可。
@@ -88,7 +88,7 @@ def is_item_analysis_pending(item: NewsItem) -> bool:
             
         # 即使有结果，如果过了很久，也需要更新
         interval_seconds = get_interval_seconds()
-        lookback_threshold = int(time.time()) - int(2.2 * interval_seconds)
+        lookback_threshold = int(time.time()) - int(3.2 * interval_seconds)
         if int(analyzed_time.timestamp()) < lookback_threshold:
             return True
             

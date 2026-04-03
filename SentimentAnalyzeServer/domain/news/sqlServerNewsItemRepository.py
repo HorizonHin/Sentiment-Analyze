@@ -905,15 +905,22 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         items = self._load_filtered_data(where_sql=where_sql, params=params)
         return items if items is not None else []
 
-    def _load_filtered_data(self, where_sql: str, params: List) -> Optional[List[NewsItem]]:
+    def _load_filtered_data(
+        self,
+        where_sql: str,
+        params: List,
+        order_by: str = "news_date ASC, last_time ASC, source_id, latest_rank ASC",
+        top_n: Optional[int] = None,
+    ) -> Optional[List[NewsItem]]:
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
+            top_clause = f"TOP ({int(top_n)}) " if top_n is not None else ""
             cursor.execute(
                 f"""
-                SELECT {self._NEWSITEM_SELECT_COLUMNS} FROM NewsItem
+                SELECT {top_clause}{self._NEWSITEM_SELECT_COLUMNS} FROM NewsItem
                 WHERE {where_sql}
-                ORDER BY news_date ASC, last_time ASC, source_id, latest_rank ASC
+                ORDER BY {order_by}
                 """,
                 *params,
             )
@@ -1051,33 +1058,35 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         finally:
             conn.close()
 
-    def get_news_list_by_latest_crawl_range(
+    def get_news_list_by_latest_batch(
         self,
         isAnalyzed: bool,
         first_time: int,
-        start_time: Optional[int] = None,
-        end_time: Optional[int] = None,
     ) -> Optional[List[NewsItem]]:
+        """获取最新一批已分析（或未分析）的新闻，按 last_time DESC 排序，返回 TOP 500。
+        
+        Args:
+            isAnalyzed: 是否已分析
+            first_time: 分区键（下界），用于过滤分区
+        
+        Returns:
+            按 last_time 降序排列的最新新闻，最多 500 条
+        """
         partition_first_time = self._to_timestamp(first_time)
         if partition_first_time is None:
             raise ValueError("first_time is required for partition filtering")
+        
+        analyzed_filter = "analyzed_time IS NOT NULL" if isAnalyzed else "analyzed_time IS NULL"
+        where_sql = f"first_time >= ? AND {analyzed_filter}"
+        params = [partition_first_time]
 
-        time_where_sql, params = self._build_datetime_range_clause(
-            column_name="last_time",
-            start_time=start_time,
-            end_time=end_time,
+        # 按 last_time 降序，返回最新的 500 条
+        return self._load_filtered_data(
+            where_sql=where_sql,
+            params=params,
+            order_by="last_time DESC, id DESC",
+            top_n=500,
         )
-
-        where_clauses: List[str] = []
-        where_clauses.append("first_time >= ?")
-        params = [partition_first_time] + params
-        if time_where_sql != "1=1":
-            where_clauses.append(time_where_sql)
-
-        where_clauses.append("analyzed_time IS NOT NULL" if isAnalyzed else "analyzed_time IS NULL")
-
-        where_sql = " AND ".join(where_clauses)
-        return self._load_filtered_data(where_sql, params)
 
     def get_news_list_by_first_time_range(
         self,

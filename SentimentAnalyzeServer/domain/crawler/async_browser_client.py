@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Dict, Optional
 
 from SentimentAnalyzeServer.domain.crawler.stealth_config import create_stealth_browser
@@ -17,8 +18,8 @@ logger = logging.getLogger(__name__)
 class AsyncBrowserClient:
     """单实例、多页面并发的浏览器客户端。"""
 
-    _instance: Optional["AsyncBrowserClient"] = None
-    _instance_lock = asyncio.Lock()
+    _instances_by_loop: Dict[int, "AsyncBrowserClient"] = {}
+    _instances_lock = threading.Lock()
 
     def __init__(
         self,
@@ -49,16 +50,21 @@ class AsyncBrowserClient:
         max_comments: int,
         max_concurrent_pages: int = 5,
     ) -> "AsyncBrowserClient":
-        async with cls._instance_lock:
-            if cls._instance is None:
-                cls._instance = cls(
+        loop = asyncio.get_running_loop()
+        loop_key = id(loop)
+
+        with cls._instances_lock:
+            instance = cls._instances_by_loop.get(loop_key)
+            if instance is None:
+                instance = cls(
                     proxy_url=proxy_url,
                     headers_config=headers_config,
                     default_headers=default_headers,
                     max_comments=max_comments,
                     max_concurrent_pages=max_concurrent_pages,
                 )
-            return cls._instance
+                cls._instances_by_loop[loop_key] = instance
+            return instance
 
     def get_headers(self, method_name: str) -> Dict[str, str]:
         return self.headers_config.get(method_name, self.default_headers).copy()
@@ -104,5 +110,9 @@ class AsyncBrowserClient:
                 await self._playwright.stop()
                 self._playwright = None
             self._started = False
+
+            loop = asyncio.get_running_loop()
+            with self.__class__._instances_lock:
+                self.__class__._instances_by_loop.pop(id(loop), None)
         except Exception as e:
             logger.warning(f"关闭浏览器实例失败: {e}")
