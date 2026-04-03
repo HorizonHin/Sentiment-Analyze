@@ -69,28 +69,31 @@ class SentimentAnalyzeAppService:
 		payload = self._serialize_news_items(items)
 		self.redis.set(REDIS_KEY_LATEST_NOT_NEED_ANALYSIS_NEWS, payload)
 
-	def _deduplicate_news_items(self, items: List[NewsItem]) -> List[NewsItem]:
-		def _score(news_item: NewsItem) -> int:
-			if news_item.analyzed_time is not None:
-				return int(news_item.analyzed_time.timestamp())
-			return int(news_item.last_time or 0)
-
-		key_to_item: Dict[tuple[str, str], NewsItem] = {}
+	def _generate_latest_rank_board(self, items: List[NewsItem]) -> List[NewsItem]:
+		# key is latest_rank, value is NewsItem
+		rank_to_item: Dict[int, NewsItem] = {}
+		
 		for item in items:
-			key = (item.source_id or "", item.title or "")
-			if key == ("", ""):
+			rank = item.latest_rank
+			if rank <= 0:
 				continue
-			existing = key_to_item.get(key)
+				
+			existing = rank_to_item.get(rank)
 			if existing is None:
-				key_to_item[key] = item
+				rank_to_item[rank] = item
 				continue
 
-			existing_ts = _score(existing)
-			incoming_ts = _score(item)
-			if incoming_ts >= existing_ts:
-				key_to_item[key] = item
+			# 如果 rank 相同，保留时间戳（last_time 或 analyzed_time）更新的
+			def _get_ts(ni: NewsItem) -> int:
+				ts = int(ni.last_time or 0)
+				if ni.analyzed_time:
+					ts = max(ts, int(ni.analyzed_time.timestamp()))
+				return ts
 
-		return list(key_to_item.values())
+			if _get_ts(item) >= _get_ts(existing):
+				rank_to_item[rank] = item
+
+		return list(rank_to_item.values())
 
 	def _filter_items_by_last_time_range(
 		self,
@@ -352,7 +355,7 @@ class SentimentAnalyzeAppService:
 
 			if cached_items:
 				initial_count = len(cached_items)
-				cached_items = self._deduplicate_news_items(cached_items)
+				cached_items = self._generate_latest_rank_board(cached_items)
 				dedup_count = len(cached_items)
 				
 				# 过滤：确保所有缓存数据都是已分析或不需要分析的
@@ -379,6 +382,13 @@ class SentimentAnalyzeAppService:
 		grouped = self.news_domain_service.get_latest_analyzed_news_batch_grouped_by_source(
 			first_time=resolved_first_time
 		)
-		return grouped or {}
+		if not grouped:
+			return {}
+
+		# 再次去重，确保每个平台 (source_id + title) 唯一且是最新 (last_time DESC)
+		for source_id, items in grouped.items():
+			grouped[source_id] = self._generate_latest_rank_board(items)
+
+		return grouped
 	
 	

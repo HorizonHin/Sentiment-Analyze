@@ -31,7 +31,7 @@ class DataFetcher:
     DEFAULT_API_URL = "https://newsnow.busiyi.world/api/s"
     
     # 支持抓取评论的平台集合。"bilibili","douyin" , "weibo"评论反爬较强，暂不支持启动。
-    SUPPORTED_COMMENT_PLATFORMS = {"baidu", "toutiao","bilibili","douyin" , 
+    SUPPORTED_COMMENT_PLATFORMS = {"baidu", "toutiao","douyin" , "bilibili","weibo",
                                    "zhihu", "tieba", "thepaper", "hupu", "tencent-hot"}
 
     # 默认请求头
@@ -69,6 +69,10 @@ class DataFetcher:
             logger.info(f"创建截图目录: {self.screenshot_dir}")
 
         self.headers_config = self._load_headers_config()
+        # 记录各平台连续抓取到 0 条评论的次数
+        self._consecutive_empty_counts: Dict[str, int] = {}
+        # 熔断阈值：连续 N 次抓到 0 条则暂时封禁该平台的一个爬取周期（或本次运行）
+        self._circuit_break_threshold = 7
 
     def _load_headers_config(self) -> Dict:
         """加载 headers.yaml 配置文件"""
@@ -265,29 +269,48 @@ class DataFetcher:
         """
         根据 source_id 分发到不同的评论爬取方法 (异步)
         """
-        if "baidu" in source_id.lower():
-            return await self.crawl_baidu_comments_opyimized(title, url)
-        # elif "weibo" in source_id.lower():
-        #     return await self.crawl_weibo_comments(title)
-        elif "bilibili" in source_id.lower():
-            return await self.crawl_bilibili_comments_optimized(title, url)  
-        elif "douyin" in source_id.lower():
-            return await self.crawl_douyin_comments(title, url)                  
-        elif "toutiao" in source_id.lower():
-            return await self.crawl_toutiao_comments(title, url)
-        elif "zhihu" in source_id.lower():
-            return await self.crawl_zhihu_comments(title, url)
-        elif "tieba" in source_id.lower():
-            return await self.crawl_tieba_comments(title, url)
-        elif "thepaper" in source_id.lower() or "pengpai" in source_id.lower():
-            return await self.crawl_thepaper_comments(title, url)
-        elif "hupu" in source_id.lower():
-            return await self.crawl_hupu_comments(title, url)
-        elif "tencent-hot" in source_id.lower():
-            return await self.crawl_tencent_hot_comments(title, url)
+        platform_key = source_id.lower()
+        
+        # 检查熔断状态
+        if self._consecutive_empty_counts.get(platform_key, 0) >= self._circuit_break_threshold:
+            logger.warning(f"熔断机制触发：平台 {source_id} 最近连续 {self._consecutive_empty_counts[platform_key]} 次未抓取到评论，本次跳过执行。")
+            return []
+
+        comments = []
+        if "baidu" in platform_key:
+            comments = await self.crawl_baidu_comments_opyimized(title, url)
+        elif "weibo" in platform_key:
+            comments = await self.crawl_weibo_comments(title)
+        elif "bilibili" in platform_key:
+            comments = await self.crawl_bilibili_comments_optimized(title, url)  
+        elif "douyin" in platform_key:
+            comments = await self.crawl_douyin_comments(title, url)                  
+        elif "toutiao" in platform_key:
+            comments = await self.crawl_toutiao_comments(title, url)
+        elif "zhihu" in platform_key:
+            comments = await self.crawl_zhihu_comments(title, url)
+        elif "tieba" in platform_key:
+            comments = await self.crawl_tieba_comments(title, url)
+        elif "thepaper" in platform_key or "pengpai" in platform_key:
+            comments = await self.crawl_thepaper_comments(title, url)
+        elif "hupu" in platform_key:
+            comments = await self.crawl_hupu_comments(title, url)
+        elif "tencent-hot" in platform_key:
+            comments = await self.crawl_tencent_hot_comments(title, url)
         else:
             logger.warning(f" {source_id} 暂不支持抓取评论")
             return []
+
+        # 更新连续为空的计数器
+        if not comments:
+            self._consecutive_empty_counts[platform_key] = self._consecutive_empty_counts.get(platform_key, 0) + 1
+            if self._consecutive_empty_counts[platform_key] >= self._circuit_break_threshold:
+                logger.error(f"严重警告：平台 {source_id} 已连续 {self._consecutive_empty_counts[platform_key]} 次抓取失败，已进入熔断状态。")
+        else:
+            # 只要抓到一次有效评论，就重置计数器
+            self._consecutive_empty_counts[platform_key] = 0
+            
+        return comments
            
     async def crawl_baidu_comments_opyimized(self, title: str, url: str) -> List[str]:
         search_url = url
@@ -301,7 +324,7 @@ class DataFetcher:
             page = await browser_client.acquire_page()
             
             # 1. 使用 Playwright 访问百度搜索列表页
-            await page.goto(search_url, wait_until="load", timeout=20000)
+            await page.goto(search_url, wait_until="load", timeout=25*1000)
             
             # 2. 定位首条搜索结果链接
             link_selector = 'div[class*="title_1WDM0"] a'
@@ -309,6 +332,8 @@ class DataFetcher:
             
             if not first_link_handle:
                 logger.warning(f"Playwright 无法定位到百度搜索首条链接: {title}")
+                if page:
+                    await page.screenshot(path=f"{self.screenshot_dir}/baidu_no_link_{int(time.time())}.png")
                 return []
 
             href = await first_link_handle.get_attribute("href")
@@ -337,6 +362,11 @@ class DataFetcher:
                 logger.info(f"Playwright 为标题 '{title}' 抓取到 0 条百度评论")
         except Exception as e:
             logger.warning(f"crawl_baidu_comments_opyimized 整体失败: {e}")
+            if page:
+                try:
+                    await page.screenshot(path=f"{self.screenshot_dir}/baidu_fatal_{int(time.time())}.png")
+                except:
+                    pass
             return []
         finally:
             if page:
@@ -422,7 +452,7 @@ class DataFetcher:
                 await context.close()
         return comments
 
-    # 监听response的方式比直接在页面上定位评论元素更稳定
+    # 风控频繁，先停用。监听response的方式比直接在页面上定位评论元素更稳定
     async def crawl_bilibili_comments_optimized(self, title: str, url: str) -> List[str]:
         comments: List[str] = []
         video_urls: List[str] = []
@@ -456,6 +486,7 @@ class DataFetcher:
             page = await browser_client.acquire_page()
 
             for video_url in video_urls:
+                await asyncio.sleep(random.uniform(2.0, 4.0))  # 视频间随机等待，模拟人类行为
                 if len(comments) >= self.max_comments:
                     break
                 try:
@@ -464,13 +495,17 @@ class DataFetcher:
                             "bilibili.com/x/v2/reply/wbi/main" in response.url
                             and response.status == 200
                         ),
-                        timeout=20 * 1000,
+                        timeout=15 * 1000,
                     ) as response_info:
                         await page.goto(video_url, wait_until="domcontentloaded", timeout=20 * 1000)
                         await page.evaluate("window.scrollBy(0, 800)")
 
                     response = await response_info.value
-                    payload_text = await response.text()
+                    try:
+                        payload_text = await response.text()
+                    except Exception as read_error:
+                        logger.warning(f"Playwright 读取 B站评论响应失败 {video_url}: {read_error}")
+                        continue
                     payload = json.loads(payload_text) if payload_text.strip() else {}
                     if not isinstance(payload, dict) or int(payload.get("code", -1)) != 0:
                         continue
@@ -553,7 +588,12 @@ class DataFetcher:
                         await page.evaluate(f"window.scrollBy(0, {800 + attempt * 400})")
 
                     response = await response_info.value
-                    payload_text = await response.text()
+                    try:
+                        payload_text = await response.text()
+                    except Exception as read_error:
+                        if attempt > 0:
+                            logger.warning(f"Playwright 读取抖音评论响应失败: {title}, attempt={attempt}, error={read_error}")
+                        continue
                     if not payload_text.strip():
                         if attempt == 0:
                             continue
@@ -577,6 +617,11 @@ class DataFetcher:
             if not comments:
                 # 仅在失败且没有拿到评论时记录日志
                 logger.info(f"Playwright 为标题 '{title}' 抓取到 0 条抖音评论")
+            if page:
+                try:
+                    await page.screenshot(path=f"{self.screenshot_dir}/douyin_fatal_{int(time.time())}.png")
+                except:
+                    pass
         except Exception as e:
             logger.warning(f"crawl_douyin_comments 整体失败: {e}")
         finally:
@@ -789,6 +834,7 @@ class DataFetcher:
                 await browser_client.release_page(page)
         return comments[: self.max_comments]
 
+    # 直接调用澎湃的评论 API，绕过页面复杂的反爬机制。适用于澎湃等平台。
     async def crawl_thepaper_comments(self, title: str, url: str) -> List[str]:
         """爬取澎湃新闻评论。"""
         comments: List[str] = []
@@ -799,7 +845,6 @@ class DataFetcher:
             match = re.search(r"newsDetail_forward_(\d+)", url or "")
             if match:
                 cont_id = match.group(1)
-            else:
                 # 兜底：尝试从 URL 中提取连续数字
                 fallback = re.search(r"(\d{6,})", url or "")
                 if fallback:
@@ -819,8 +864,8 @@ class DataFetcher:
                 payload = {
                     "contId": str(cont_id),
                     "pageSize": page_size,
-                    "commentSort": 2,
-                    "contType": 2,
+                    "commentSort": 1,
+                    "contType": 1,
                     "pageNum": page_num,
                 }
 

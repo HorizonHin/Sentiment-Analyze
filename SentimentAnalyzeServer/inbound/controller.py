@@ -56,6 +56,49 @@ def create_external_controller(
 			print(exc)
 			return jsonify(Result.failure_result(str(exc)).to_dict())
 
+	@bp.get("/news/recommend-hot-terms")
+	def recommend_hot_terms_by_time_range() -> object:
+		"""
+		参数:
+		- start_time: int (秒级时间戳)
+		- end_time: int (秒级时间戳)
+		- news_first_time: int (可选，分区下界)
+		- top_n: int (可选，默认100)
+		"""
+		try:
+			start_time = parse_int_timestamp(request.args.get("start_time"))
+			end_time = parse_int_timestamp(request.args.get("end_time"))
+			news_first_time = parse_int_timestamp(request.args.get("news_first_time"))
+			top_n_raw = request.args.get("top_n")
+			try:
+				top_n = max(1, int(top_n_raw)) if top_n_raw is not None else 100
+			except (TypeError, ValueError):
+				top_n = 100
+
+			if start_time is None or end_time is None:
+				return jsonify(Result.failure_result("参数 start_time 和 end_time 必须为有效的秒级时间戳").to_dict())
+
+			# 直接用 sentiment_app_service.news_domain_service
+			news_domain_service = sentiment_app_service.news_domain_service
+			kw_groups, entity_groups = news_domain_service.recommend_hot_terms_by_time_range(
+				start_time=start_time,
+				end_time=end_time,
+				news_first_time=news_first_time,
+				top_n=top_n,
+			)
+			# 返回格式：{"keywords": {...}, "entities": {...}}
+			def key_or_enti_to_dict(obj):
+				return {slot: getattr(obj, slot) for slot in obj.__slots__ if hasattr(obj, slot)}
+
+			data = {
+				"keywords": {k: [key_or_enti_to_dict(kw) for kw in v] for k, v in kw_groups.items()},
+				"entities": {k: [key_or_enti_to_dict(e) for e in v] for k, v in entity_groups.items()},
+			}
+			return jsonify(Result.success_result(data).to_dict())
+		except Exception as exc:
+			logger.exception("Failed to execute /news/recommend-hot-terms")
+			return jsonify(Result.failure_result(str(exc)).to_dict())
+	
 	@bp.get("/topics/snapshot-detail")
 	def get_topic_snapshot_detail() -> object:
 		try:
@@ -92,27 +135,6 @@ def create_external_controller(
 		except ValueError as exc:
 			return jsonify(Result.failure_result(str(exc)).to_dict())
 		except Exception as exc:
-			return jsonify(Result.failure_result(str(exc)).to_dict())
-
-	@bp.route("/topic/backfill-llm-title", methods=["POST", "GET"])
-	def backfill_topic_llm_title() -> object:
-		try:
-			raw_limit = request.args.get("limit")
-			if raw_limit is None:
-				payload = request.get_json(silent=True) or {}
-				raw_limit = payload.get("limit") if isinstance(payload, dict) else None
-
-			try:
-				limit = max(1, min(200, int(raw_limit))) if raw_limit is not None else 50
-			except (TypeError, ValueError):
-				return jsonify(Result.failure_result("参数 limit 无效，必须是 1-200 的整数").to_dict())
-
-			result = topic_app_service.backfill_missing_llm_titles(limit=limit)
-			if bool(result.get("success", False)):
-				return jsonify(Result.success_result(result).to_dict())
-			return jsonify(Result.failure_result(str(result.get("reason", "backfill_failed"))).to_dict())
-		except Exception as exc:
-			logger.exception("Failed to execute /topic/backfill-llm-title")
 			return jsonify(Result.failure_result(str(exc)).to_dict())
 
 	@bp.get("/news/search-terms")
@@ -194,6 +216,6 @@ def create_external_controller(
 		except Exception as exc:
 			logger.exception("Failed to execute /topics/by-keyword")
 			return jsonify(Result.failure_result(str(exc)).to_dict())
-		
+
 
 	return bp

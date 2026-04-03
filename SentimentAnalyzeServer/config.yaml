@@ -50,10 +50,6 @@ sentiment:
   first_time_lookback_days: 3      # 查询分区键 first_time 默认回溯天数
   weibo:
     max_comments: 10               # 评论爬取数量限制
-    mobile_index_url: "https://m.weibo.cn"
-  bilibili:
-    search_url: "https://search.bilibili.com/all?keyword="
-    comment_api_url: "https://api.bilibili.com/x/v2/reply?type=1&oid="
 
 common_thread_pool:
   max_workers: 4

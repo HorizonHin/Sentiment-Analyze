@@ -38,6 +38,8 @@ class AsyncBrowserClient:
         self._browser = None
         self._shared_context = None
         self._started = False
+        self._closing = False
+        self._state_lock = threading.RLock()
         self._startup_lock = asyncio.Lock()
         self._page_semaphore = asyncio.Semaphore(max_concurrent_pages)
 
@@ -69,22 +71,40 @@ class AsyncBrowserClient:
     def get_headers(self, method_name: str) -> Dict[str, str]:
         return self.headers_config.get(method_name, self.default_headers).copy()
 
+    def _raise_if_closing(self) -> None:
+        with self._state_lock:
+            if self._closing:
+                raise RuntimeError("AsyncBrowserClient is closing or closed")
+
     async def ensure_started(self):
+        self._raise_if_closing()
         if self._started:
             return
 
         async with self._startup_lock:
+            self._raise_if_closing()
             if self._started:
                 return
             self._playwright, self._browser, self._shared_context = await create_stealth_browser(
                 proxy_url=self.proxy_url
             )
             await self._shared_context.set_extra_http_headers(self.default_headers)
-            self._started = True
+            with self._state_lock:
+                if self._closing:
+                    await self._shared_context.close()
+                    await self._browser.close()
+                    await self._playwright.stop()
+                    self._playwright = None
+                    self._browser = None
+                    self._shared_context = None
+                    self._started = False
+                    raise RuntimeError("AsyncBrowserClient is closing or closed")
+                self._started = True
 
     async def acquire_page(self):
         await self.ensure_started()
         await self._page_semaphore.acquire()
+        self._raise_if_closing()
         page = await self._shared_context.new_page()
         return page
 
@@ -100,6 +120,11 @@ class AsyncBrowserClient:
 
     async def close(self):
         try:
+            with self._state_lock:
+                if self._closing:
+                    return
+                self._closing = True
+
             if self._shared_context:
                 await self._shared_context.close()
                 self._shared_context = None
@@ -109,10 +134,14 @@ class AsyncBrowserClient:
             if self._playwright:
                 await self._playwright.stop()
                 self._playwright = None
-            self._started = False
+            with self._state_lock:
+                self._started = False
+                self._closing = False
 
             loop = asyncio.get_running_loop()
             with self.__class__._instances_lock:
                 self.__class__._instances_by_loop.pop(id(loop), None)
         except Exception as e:
+            with self._state_lock:
+                self._closing = False
             logger.warning(f"关闭浏览器实例失败: {e}")

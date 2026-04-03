@@ -5,6 +5,7 @@ import logging
 from queue import Queue
 import threading
 import time
+import uuid
 from typing import Any, Callable, Dict, List, Optional, Set
 
 EVENT_CRAWL_SAVED = "crawl.saved"
@@ -214,6 +215,33 @@ class MyRedis:
     def delete(self, key: str) -> None:
         with self._lock:
             self._cache.pop(key, None)
+
+    def acquire_lock(self, key: str, ttl_seconds: int) -> str | None:
+        token = str(uuid.uuid4())
+        lock_value = {
+            "token": token,
+            "acquired_at": int(time.time()),
+        }
+
+        if self.set(key, lock_value, ttl_seconds=ttl_seconds, nx=True):
+            return token
+        return None
+
+    def release_lock(self, key: str, token: str | None) -> bool:
+        if not token:
+            return False
+
+        with self._lock:
+            current_value = self._cache.get(key)
+            if not current_value:
+                return False
+
+            stored_value = current_value.get("value")
+            if isinstance(stored_value, dict) and stored_value.get("token") == token:
+                self._cache.pop(key, None)
+                return True
+
+        return False
 
 class EventManager:
     _instance: "EventManager | None" = None
