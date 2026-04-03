@@ -72,7 +72,7 @@ class DataFetcher:
         # 记录各平台连续抓取到 0 条评论的次数
         self._consecutive_empty_counts: Dict[str, int] = {}
         # 熔断阈值：连续 N 次抓到 0 条则暂时封禁该平台的一个爬取周期（或本次运行）
-        self._circuit_break_threshold = 7
+        self._circuit_break_threshold = 5
 
     def _load_headers_config(self) -> Dict:
         """加载 headers.yaml 配置文件"""
@@ -457,6 +457,10 @@ class DataFetcher:
         comments: List[str] = []
         video_urls: List[str] = []
         page = None
+        response_timeout_count = 0
+        max_response_timeouts = 3
+        successful_video_fetches = 0
+        max_successful_videos = 3
 
         search_url = url or f"https://search.bilibili.com/all?keyword={requests.utils.quote(title)}"
         try:
@@ -486,7 +490,7 @@ class DataFetcher:
             page = await browser_client.acquire_page()
 
             for video_url in video_urls:
-                await asyncio.sleep(random.uniform(2.0, 4.0))  # 视频间随机等待，模拟人类行为
+                await asyncio.sleep(random.uniform(2.0, 4.6))  # 视频间随机等待，模拟人类行为
                 if len(comments) >= self.max_comments:
                     break
                 try:
@@ -515,6 +519,8 @@ class DataFetcher:
                     if not isinstance(replies, list):
                         continue
 
+                    successful_video_fetches += 1
+
                     for reply in replies:
                         if not isinstance(reply, dict):
                             continue
@@ -539,9 +545,39 @@ class DataFetcher:
 
                         if len(comments) >= self.max_comments:
                             return comments[: self.max_comments]
+
+                    if successful_video_fetches >= max_successful_videos:
+                        logger.info(
+                            "B站评论抓取已成功处理%d个视频，提前返回。title=%s, comments=%d",
+                            max_successful_videos,
+                            title,
+                            len(comments),
+                        )
+                        return comments[: self.max_comments]
                 except TimeoutError:
+                    response_timeout_count += 1
                     logger.warning(f"Playwright 获取 B站视频 {video_url} 评论超时")
+                    if response_timeout_count > max_response_timeouts:
+                        logger.warning(
+                            "B站评论抓取超时超过%d次，直接返回空结果。title=%s",
+                            max_response_timeouts,
+                            title,
+                        )
+                        return comments[: self.max_comments]
                 except Exception as video_e:
+                    error_text = str(video_e)
+                    if (
+                        "Timeout" in error_text
+                        and "waiting for event \"response\"" in error_text
+                    ):
+                        response_timeout_count += 1
+                        if response_timeout_count > max_response_timeouts:
+                            logger.warning(
+                                "B站评论抓取响应超时超过%d次，直接返回空结果。title=%s",
+                                max_response_timeouts,
+                                title,
+                            )
+                            return comments[: self.max_comments]
                     logger.warning(f"处理 B站单个视频 {video_url} 报错: {video_e}")
                     continue
 
@@ -857,49 +893,33 @@ class DataFetcher:
             api_url = "https://api.thepaper.cn/comment/news/comment/talkList"
             proxies = {"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None
 
-            page_num = 1
-            page_size = 20
+            payload = {
+                "contId": str(cont_id),
+                "commentSort": 1,
+                "contType": 1,
+            }
+            await asyncio.sleep(random.uniform(1.5, 3.0))  # 随机等待，降低请求频率
+            # 使用 loop.run_in_executor 包装同步的 requests 调用，避免阻塞协程
+            loop = asyncio.get_event_loop()
+            def fetch_page():
+                return requests.post(
+                    api_url,
+                    json=payload,
+                    headers=self.DEFAULT_HEADERS,
+                    proxies=proxies,
+                    timeout=15,
+                )
+            
+            resp = await loop.run_in_executor(None, fetch_page)
+            resp.raise_for_status()
 
-            while len(comments) < self.max_comments:
-                payload = {
-                    "contId": str(cont_id),
-                    "pageSize": page_size,
-                    "commentSort": 1,
-                    "contType": 1,
-                    "pageNum": page_num,
-                }
+            data = resp.json() if resp.text else {}
+            items = data.get("data", {}).get("list", [])
 
-                # 使用 loop.run_in_executor 包装同步的 requests 调用，避免阻塞协程
-                loop = asyncio.get_event_loop()
-                def fetch_page():
-                    return requests.post(
-                        api_url,
-                        json=payload,
-                        headers=self.DEFAULT_HEADERS,
-                        proxies=proxies,
-                        timeout=15,
-                    )
-                
-                resp = await loop.run_in_executor(None, fetch_page)
-                resp.raise_for_status()
-
-                data = resp.json() if resp.text else {}
-                items = data.get("data", {}).get("list", [])
-                has_next = bool(data.get("data", {}).get("hasNext", False))
-
-                if not items:
-                    break
-
-                for item in items:
-                    text = str(item.get("content", "")).strip()
-                    if text and self._append_comment(comments, text):
-                        return comments[: self.max_comments]
-
-                if not has_next:
-                    break
-
-                page_num += 1
-                await asyncio.sleep(random.uniform(2, 3))
+            for item in items:
+                text = str(item.get("content", "")).strip()
+                if text and self._append_comment(comments, text):
+                    return comments[: self.max_comments]
 
             if not comments:
                 logger.info(f"为澎湃标题 '{title}' 抓取到 0 条评论")

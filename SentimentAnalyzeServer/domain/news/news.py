@@ -576,6 +576,21 @@ class NewsItemRepository(ABC):
         """根据 entity 列表查询 NewsItem（优先使用 news_item_id+news_first_time 联合键）。"""
         pass
 
+    @abstractmethod
+    def add_followed_keyword(self, keyword_term: str) -> bool:
+        """添加用户关注关键词。若已存在则返回 False。"""
+        pass
+
+    @abstractmethod
+    def delete_followed_keyword(self, keyword_term: str) -> bool:
+        """删除用户关注关键词。若不存在则返回 False。"""
+        pass
+
+    @abstractmethod
+    def list_followed_keywords(self, limit: int = 1000) -> List[str]:
+        """获取用户关注关键词列表。"""
+        pass
+
 
 class NewsDomainService:
     def __init__(self, storage: NewsItemRepository) -> None:
@@ -839,11 +854,11 @@ class NewsDomainService:
 
     @staticmethod
     def _matches_search_text(candidate: str, query: str) -> bool:
-        candidate_text = str(candidate or "").strip().lower()
-        query_text = str(query or "").strip().lower()
+        candidate_text = str(candidate or "").strip()
+        query_text = str(query or "").strip()
         if not candidate_text or not query_text:
             return False
-        return candidate_text == query_text or query_text in candidate_text or candidate_text in query_text
+        return candidate_text == query_text
 
     def get_keywords_by_terms(
         self,
@@ -1086,6 +1101,22 @@ class NewsDomainService:
             start_time=start_time,
             end_time=end_time,
         )
+
+    def add_followed_keyword(self, keyword_term: str) -> bool:
+        term = str(keyword_term or "").strip()
+        if not term:
+            return False
+        return self.storage.add_followed_keyword(term)
+
+    def delete_followed_keyword(self, keyword_term: str) -> bool:
+        term = str(keyword_term or "").strip()
+        if not term:
+            return False
+        return self.storage.delete_followed_keyword(term)
+
+    def list_followed_keywords(self, limit: int = 1000) -> List[str]:
+        safe_limit = max(1, int(limit or 1000))
+        return self.storage.list_followed_keywords(limit=safe_limit)
     
     def update_existing_crawled_titles(self, news_list: List[NewsItem]) -> List[NewsItem]:
         if not news_list:

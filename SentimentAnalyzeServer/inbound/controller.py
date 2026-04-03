@@ -217,5 +217,62 @@ def create_external_controller(
 			logger.exception("Failed to execute /topics/by-keyword")
 			return jsonify(Result.failure_result(str(exc)).to_dict())
 
+	@bp.post("/keywords/followed/add")
+	def add_followed_keyword() -> object:
+		try:
+			payload = request.get_json(silent=True) or {}
+			keyword_term = str(payload.get("keyword_term", "")).strip()
+			if not keyword_term:
+				keyword_term = str(request.args.get("keyword_term", "")).strip()
+			if not keyword_term:
+				return jsonify(Result.failure_result("参数 keyword_term 不能为空").to_dict())
+
+			added = sentiment_app_service.news_domain_service.add_followed_keyword(keyword_term)
+			if not added:
+				return jsonify(Result.failure_result("关键词已关注或添加失败").to_dict())
+
+			return jsonify(
+				Result.success_result({"keyword_term": keyword_term, "added": True}).to_dict()
+			)
+		except Exception as exc:
+			logger.exception("Failed to execute /keywords/followed/add")
+			return jsonify(Result.failure_result(str(exc)).to_dict())
+
+	@bp.delete("/keywords/followed/delete")
+	def delete_followed_keyword() -> object:
+		try:
+			keyword_term = str(request.args.get("keyword_term", "")).strip()
+			if not keyword_term:
+				payload = request.get_json(silent=True) or {}
+				keyword_term = str(payload.get("keyword_term", "")).strip()
+			if not keyword_term:
+				return jsonify(Result.failure_result("参数 keyword_term 不能为空").to_dict())
+
+			deleted = sentiment_app_service.news_domain_service.delete_followed_keyword(keyword_term)
+			if not deleted:
+				return jsonify(Result.failure_result("关键词未关注或删除失败").to_dict())
+
+			return jsonify(
+				Result.success_result({"keyword_term": keyword_term, "deleted": True}).to_dict()
+			)
+		except Exception as exc:
+			logger.exception("Failed to execute /keywords/followed/delete")
+			return jsonify(Result.failure_result(str(exc)).to_dict())
+
+	@bp.get("/keywords/followed/list")
+	def list_followed_keywords() -> object:
+		try:
+			limit_raw = request.args.get("limit")
+			try:
+				limit = max(1, int(limit_raw)) if limit_raw is not None else 1000
+			except (TypeError, ValueError):
+				limit = 1000
+
+			keywords = sentiment_app_service.news_domain_service.list_followed_keywords(limit=limit)
+			return jsonify(Result.success_result({"keywords": keywords}).to_dict())
+		except Exception as exc:
+			logger.exception("Failed to execute /keywords/followed/list")
+			return jsonify(Result.failure_result(str(exc)).to_dict())
+
 
 	return bp

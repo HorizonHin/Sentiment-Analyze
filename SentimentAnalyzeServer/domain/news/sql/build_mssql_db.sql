@@ -127,3 +127,16 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_entity_last_time' AND
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_timeline_news' AND object_id = OBJECT_ID('rank_timeline'))
     CREATE INDEX idx_timeline_news ON rank_timeline(news_first_time, news_item_id, timeline_time);
+
+-- 创建 Followed_Keywords 表（用户关注关键词）
+IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Followed_Keywords')
+CREATE TABLE Followed_Keywords (
+    id INT IDENTITY(1,1) NOT NULL,
+    keyword_term NVARCHAR(500) NOT NULL,
+    created_at BIGINT DEFAULT DATEDIFF_BIG(SECOND, '1970-01-01', SYSUTCDATETIME()),
+    CONSTRAINT PK_Followed_Keywords PRIMARY KEY CLUSTERED (id),
+    CONSTRAINT UX_Followed_Keywords_keyword_term UNIQUE(keyword_term)
+);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_followed_keyword_term' AND object_id = OBJECT_ID('Followed_Keywords'))
+    CREATE INDEX idx_followed_keyword_term ON Followed_Keywords(keyword_term);

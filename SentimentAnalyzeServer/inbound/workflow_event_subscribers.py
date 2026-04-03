@@ -74,6 +74,7 @@ class WorkflowEventSubscribers:
 
     def _on_topic_rank_updated(self, payload: Dict[str, Any]) -> None:
         raw_limit = payload.get("cache_limit", 50)
+        logger.info("处理话题排名更新事件，触发LLM分析话题标题。raw_limit=%s", raw_limit)
         try:
             limit = max(1, min(200, int(raw_limit)))
         except (TypeError, ValueError):

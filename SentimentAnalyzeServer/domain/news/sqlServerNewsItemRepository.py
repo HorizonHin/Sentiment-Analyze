@@ -625,6 +625,59 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             end_time=end_time,
         )
 
+    def add_followed_keyword(self, keyword_term: str) -> bool:
+        term = str(keyword_term or "").strip()
+        if not term:
+            return False
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "INSERT INTO Followed_Keywords(keyword_term, created_at) VALUES (?, ?)",
+                term,
+                int(time.time()),
+            )
+            conn.commit()
+            return True
+        except pyodbc.Error as e:
+            conn.rollback()
+            if self._is_unique_violation(e):
+                return False
+            raise
+        finally:
+            conn.close()
+
+    def delete_followed_keyword(self, keyword_term: str) -> bool:
+        term = str(keyword_term or "").strip()
+        if not term:
+            return False
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "DELETE FROM Followed_Keywords WHERE keyword_term = ?",
+                term,
+            )
+            conn.commit()
+            return bool(cursor.rowcount and int(cursor.rowcount) > 0)
+        finally:
+            conn.close()
+
+    def list_followed_keywords(self, limit: int = 1000) -> List[str]:
+        safe_limit = max(1, int(limit or 1000))
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT TOP (?) keyword_term FROM Followed_Keywords ORDER BY created_at DESC, id DESC",
+                safe_limit,
+            )
+            return [str(row[0]).strip() for row in cursor.fetchall() if row and row[0]]
+        finally:
+            conn.close()
+
     def add_news_items(self, news_list: List[NewsItem]) -> List[NewsItem]:
         unique_items_by_key: Dict[Tuple[str, str], NewsItem] = {}
         for item in news_list:

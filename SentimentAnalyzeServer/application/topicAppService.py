@@ -139,11 +139,11 @@ class TopicAppService:
 
     @staticmethod
     def _topic_name_matches(candidate: str, query: str) -> bool:
-        candidate_text = str(candidate or "").strip().lower()
-        query_text = str(query or "").strip().lower()
+        candidate_text = str(candidate or "").strip()
+        query_text = str(query or "").strip()
         if not candidate_text or not query_text:
             return False
-        return candidate_text == query_text or query_text in candidate_text or candidate_text in query_text
+        return candidate_text == query_text
 
     @staticmethod
     def _keyword_dedup_score(item: Keyword) -> tuple[float, int]:
