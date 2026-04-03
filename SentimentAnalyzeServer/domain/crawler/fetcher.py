@@ -117,6 +117,14 @@ class DataFetcher:
         except Exception:
             return False
 
+    def _append_comment(self, comments: List[str], comment: str) -> bool:
+        comment = re.sub(r"\s+", " ", str(comment).strip())
+        if not comment or comment in comments:
+            return len(comments) >= self.max_comments
+
+        comments.append(comment)
+        return len(comments) >= self.max_comments
+
     def fetch_data(
         self,
         id_info: Union[str, Tuple[str, str]],
@@ -287,13 +295,13 @@ class DataFetcher:
         page = None
 
         try:
-            await asyncio.sleep(random.uniform(3.5, 5.5))
+            await asyncio.sleep(random.uniform(2.5, 3.5))
 
             browser_client = await self._get_browser_client()
             page = await browser_client.acquire_page()
             
             # 1. 使用 Playwright 访问百度搜索列表页
-            await page.goto(search_url, wait_until="load", timeout=30000)
+            await page.goto(search_url, wait_until="load", timeout=20000)
             
             # 2. 定位首条搜索结果链接
             link_selector = 'div[class*="title_1WDM0"] a, div[class*="result"] h3 a, a.c-showurl'
@@ -312,7 +320,7 @@ class DataFetcher:
                 href = f"https://www.baidu.com{href}"
 
             # 3. 跳转到详细页
-            await page.goto(href, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(href, wait_until="domcontentloaded", timeout=20000)
 
             comment_selector = 'span[class*="type-text"]'
             await page.wait_for_selector(comment_selector, timeout=10000)
@@ -320,7 +328,8 @@ class DataFetcher:
             for el in comment_elements:
                 text = (await el.inner_text()).strip()
                 if text:
-                    comments.append(text)
+                    if self._append_comment(comments, text):
+                        return comments[: self.max_comments]
                 if len(comments) >= self.max_comments:
                     break
 
@@ -392,9 +401,7 @@ class DataFetcher:
                     for c in raw_comments:
                         text = c.get("text", "")
                         clean_text = re.sub(r"<[^>]+>", "", text).strip()
-                        if clean_text and clean_text not in comments:
-                            comments.append(clean_text)
-                        if len(comments) >= self.max_comments:
+                        if self._append_comment(comments, clean_text):
                             break
                     if len(comments) >= self.max_comments:
                         break
@@ -446,69 +453,66 @@ class DataFetcher:
         try:
             browser_client = await self._get_browser_client()
             page = await browser_client.acquire_page()
+
             for video_url in video_urls:
                 if len(comments) >= self.max_comments:
                     break
                 try:
-                    # 获取前清理页面状态，防止上一个导航干扰
-                    try:
-                        await page.evaluate("window.stop()")
-                    except:
-                        pass
-                    await asyncio.sleep(random.uniform(0.5, 1.0))
+                    async with page.expect_response(
+                        lambda response: (
+                            "bilibili.com/x/v2/reply/wbi/main" in response.url
+                            and response.status == 200
+                        ),
+                        timeout=20 * 1000,
+                    ) as response_info:
+                        await page.goto(video_url, wait_until="domcontentloaded", timeout=20 * 1000)
+                        await page.evaluate("window.scrollBy(0, 800)")
 
-                    await page.goto(video_url, wait_until="domcontentloaded", timeout=30000)
-                    await page.evaluate("window.scrollBy(0, 800)")
-                    await asyncio.sleep(2.5)
+                    response = await response_info.value
+                    payload_text = await response.text()
+                    payload = json.loads(payload_text) if payload_text.strip() else {}
+                    if not isinstance(payload, dict) or int(payload.get("code", -1)) != 0:
+                        continue
 
-                    comments_script = """
-                    () => {
-                        const results = [];
-                        const commentsApp = document.querySelector("#commentapp > bili-comments");
-                        if (!commentsApp || !commentsApp.shadowRoot) return results;
-                        const threads = commentsApp.shadowRoot.querySelectorAll("#feed > bili-comment-thread-renderer");
-                        for (const thread of threads) {
-                            if (!thread.shadowRoot) continue;
-                            const commentNode = thread.shadowRoot.querySelector("#comment");
-                            if (commentNode && commentNode.shadowRoot) {
-                                const richText = commentNode.shadowRoot.querySelector("#content > bili-rich-text");
-                                if (richText && richText.shadowRoot) {
-                                    const textSpan = richText.shadowRoot.querySelector("#contents > span");
-                                    if (textSpan && textSpan.innerText.trim()) {
-                                        results.push(textSpan.innerText.trim());
-                                    }
-                                }
-                            }
-                            const repliesRenderer = thread.shadowRoot.querySelector("#replies > bili-comment-replies-renderer");
-                            if (repliesRenderer && repliesRenderer.shadowRoot) {
-                                const firstReply = repliesRenderer.shadowRoot.querySelector("#expander-contents > bili-comment-reply-renderer");
-                                if (firstReply && firstReply.shadowRoot) {
-                                    const replyRichText = firstReply.shadowRoot.querySelector("#main > bili-rich-text");
-                                    if (replyRichText && replyRichText.shadowRoot) {
-                                        const replySpan = replyRichText.shadowRoot.querySelector("#contents > span");
-                                        if (replySpan && replySpan.innerText.trim()) {
-                                            results.push(replySpan.innerText.trim());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        return results;
-                    }
-                    """
+                    data = payload.get("data", {})
+                    replies = data.get("replies", []) if isinstance(data, dict) else []
+                    if not isinstance(replies, list):
+                        continue
 
-                    extracted_texts = await page.evaluate(comments_script)
-                    for text in extracted_texts:
-                        if text and text not in comments:
-                            comments.append(text)
+                    for reply in replies:
+                        if not isinstance(reply, dict):
+                            continue
+
+                        # 每条顶层 content 抓一条
+                        top_content = reply.get("content", {})
+                        if isinstance(top_content, dict):
+                            top_text = str(top_content.get("message", "")).strip()
+                            if top_text and self._append_comment(comments, top_text):
+                                return comments[: self.max_comments]
+
+                        # 每条顶层的 replies 抓一条（取第一条）
+                        nested_replies = reply.get("replies", [])
+                        if isinstance(nested_replies, list) and nested_replies:
+                            first_nested = nested_replies[0]
+                            if isinstance(first_nested, dict):
+                                nested_content = first_nested.get("content", {})
+                                if isinstance(nested_content, dict):
+                                    nested_text = str(nested_content.get("message", "")).strip()
+                                    if nested_text and self._append_comment(comments, nested_text):
+                                        return comments[: self.max_comments]
+
                         if len(comments) >= self.max_comments:
-                            break
+                            return comments[: self.max_comments]
+                except TimeoutError:
+                    logger.warning(f"Playwright 获取 B站视频 {video_url} 评论超时")
                 except Exception as video_e:
                     logger.warning(f"处理 B站单个视频 {video_url} 报错: {video_e}")
                     continue
 
             if not comments:
                 logger.info(f"Playwright 最终为 B站标题 '{title}' 抓取到 0 条评论")
+        except TimeoutError:
+            logger.warning(f"Playwright 获取 B站评论超时: {title}")
         except Exception as e:
             logger.warning(f"crawl_bilibili_comments_optimized 获取评论阶段失败: {e}")
             return []
@@ -524,42 +528,49 @@ class DataFetcher:
         try:
             browser_client = await self._get_browser_client()
             page = await browser_client.acquire_page()
-
-            got_comments_event = asyncio.Event()
-
-            async def handle_response(response):
+            await page.goto(url, wait_until="load", timeout=20*1000)
+            for attempt in range(2):
                 try:
-                    if "douyin.com/aweme/v1/web/comment/list" in response.url and response.status == 200:
-                        data = await response.json()
-                        for comment in data.get("comments", []):
-                            text = comment.get("text", "")
-                            if text and text not in comments:
-                                comments.append(text)
-                                got_comments_event.set()
-                except Exception:
-                    pass
+                    async with page.expect_response(
+                        lambda response: (
+                            "douyin.com/aweme/v1/web/comment/list" in response.url
+                            and response.status == 200
+                        ),
+                        timeout=20 * 1000,
+                    ) as response_info:
+                        if attempt == 0:
 
-            page.on("response", handle_response)
-            await page.goto(url, wait_until="load", timeout=30000)
+                            # 通过 locator 自动等待页面关键容器可见
+                            await self._wait_locator_visible(
+                                page,
+                                'div[data-e2e="video-comment-more"], .video-detail-container, .main-container',
+                                timeout=15000,
+                            )
 
-            # 通过 locator 自动等待页面关键容器可见
-            await self._wait_locator_visible(
-                page,
-                'div[data-e2e="video-comment-more"], .video-detail-container, .main-container',
-                timeout=15000,
-            )
+                        # 触发评论异步加载；第二次尝试会再滚一次，等真正的数据响应
+                        await page.evaluate(f"window.scrollBy(0, {800 + attempt * 400})")
 
-            # 触发评论异步加载
-            await page.evaluate("window.scrollBy(0, 800)")
+                    response = await response_info.value
+                    payload_text = await response.text()
+                    if not payload_text.strip():
+                        if attempt == 0:
+                            continue
+                        logger.info(f"Playwright 为标题 '{title}' 抓取到空的抖音评论响应")
+                        continue
 
-            # 优先等待评论接口返回，失败时回退 networkidle
-            try:
-                await asyncio.wait_for(got_comments_event.wait(), timeout=4)
-            except TimeoutError:
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=4000)
-                except Exception:
-                    pass
+                    data = json.loads(payload_text)
+                    for comment in data.get("comments", []):
+                        text = comment.get("text", "")
+                        if text and self._append_comment(comments, text):
+                            return comments[: self.max_comments]
+
+                    if comments:
+                        break
+                except TimeoutError:
+                    if attempt == 0:
+                        continue
+                    logger.warning(f"Playwright 获取抖音评论超时: {title}")
+                    continue
             
             if not comments:
                 # 仅在失败且没有拿到评论时记录日志
@@ -579,38 +590,34 @@ class DataFetcher:
             browser_client = await self._get_browser_client()
             page = await browser_client.acquire_page()
 
-            got_comments_event = asyncio.Event()
-
-            async def handle_response(response):
-                try:
-                    if ("tab_comments" in response.url or "v2/comment/list" in response.url) and response.status == 200:
-                        data = await response.json()
-                        items = data.get("data", [])
-                        if not isinstance(items, list):
-                            items = data.get("data", {}).get("comments", [])
-
-                        for item in items:
-                            comment_obj = item if "text" in item else item.get("comment", {})
-                            text = comment_obj.get("text", "")
-                            if text and text not in comments:
-                                comments.append(text)
-                                got_comments_event.set()
-                except Exception:
-                    pass
-
-            page.on("response", handle_response)
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-
-            # Locator API 自动等待评论区容器
-            await self._wait_locator_visible(page, "div.comment-info", timeout=10000)
-
             try:
-                await asyncio.wait_for(got_comments_event.wait(), timeout=3)
+                async with page.expect_response(
+                    lambda response: (
+                        ("tab_comments" in response.url or "v2/comment/list" in response.url)
+                        and response.status == 200
+                    ),
+                    timeout=15 * 1000,
+                ) as response_info:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+                    # Locator API 自动等待评论区容器
+                    await self._wait_locator_visible(page, "div.comment-info", timeout=10000)
+
+                response = await response_info.value
+                payload_text = await response.text()
+                data = json.loads(payload_text) if payload_text.strip() else {}
+                items = data.get("data", [])
+                if not isinstance(items, list):
+                    items = data.get("data", {}).get("comments", [])
+
+                for item in items:
+                    comment_obj = item if "text" in item else item.get("comment", {})
+                    text = comment_obj.get("text", "")
+                    if text and self._append_comment(comments, text):
+                        return comments[: self.max_comments]
             except TimeoutError:
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=3000)
-                except Exception:
-                    pass
+                logger.warning(f"Playwright 获取头条评论超时: {title}")
+                pass
 
             if not comments:
                 logger.info(f"Playwright 为标题 '{title}' 抓获到 0 条头条评论")
@@ -632,32 +639,54 @@ class DataFetcher:
         comments: List[str] = []
         page = None
         try:
-            await asyncio.sleep(random.uniform(2.0, 3.0))
             browser_client = await self._get_browser_client()
             page = await browser_client.acquire_page()
-            await page.goto(url, wait_until="domcontentloaded", timeout=8*1000)
-            await asyncio.sleep(2)
 
-            thread_items = await page.query_selector_all("li.thread-item")
-            for item in thread_items:
-                title_el = await item.query_selector(".track-thread-title")
-                if title_el:
-                    title_text = (await title_el.inner_text()).strip()
-                    if title_text and title_text not in comments:
-                        comments.append(title_text)
-                if len(comments) >= self.max_comments:
-                    break
+            try:
+                async with page.expect_response(
+                    lambda response: (
+                        "tieba.baidu.com/hottopic/browse/getTopicRelateThread" in response.url
+                        and response.status == 200
+                    ),
+                    timeout=8 * 1000,
+                ) as response_info:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=12 * 1000)
 
-                content_el = await item.query_selector("p.content")
-                if content_el:
-                    content_text = (await content_el.inner_text()).strip()
-                    if content_text and content_text not in comments:
-                        comments.append(content_text)
-                if len(comments) >= self.max_comments:
-                    break
+                response = await response_info.value
+                payload_text = await response.text()
+                payload = json.loads(payload_text) if payload_text.strip() else {}
+                if isinstance(payload, dict):
+                    data = payload.get("data", {})
+                    thread_list = data.get("thread_list", []) if isinstance(data, dict) else []
+                    if isinstance(thread_list, list):
+                        # 按浏览量从高到低排序后抓取
+                        sorted_threads = sorted(
+                            thread_list,
+                            key=lambda x: int(x.get("view_num", 0) or 0) if isinstance(x, dict) else 0,
+                            reverse=True,
+                        )
+
+                        for thread in sorted_threads:
+                            if not isinstance(thread, dict):
+                                continue
+
+                            title_text = re.sub(r"\s+", " ", str(thread.get("title", "")).strip())
+                            abstract_text = re.sub(r"\s+", " ", str(thread.get("abstract", "")).strip())
+
+                            for text in (title_text, abstract_text):
+                                if text and self._append_comment(comments, text):
+                                    return comments[: self.max_comments]
+
+                            if len(comments) >= self.max_comments:
+                                return comments[: self.max_comments]
+            except TimeoutError:
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=3000)
+                except Exception:
+                    pass
 
             if not comments:
-                logger.info(f"Playwright 从贴吧热议/列表页直接抓取到 0 条（标题+预览）内容")
+                logger.info(f"Playwright 从贴吧热议/列表页直接抓取到 0 条（{title}+预览）内容")
         except Exception as e:
             try:
                 if page:
@@ -697,10 +726,8 @@ class DataFetcher:
                 if text == "阅读全文":
                     continue
 
-                if text not in comments:
-                    comments.append(text)
-                    if len(comments) >= self.max_comments:
-                        break
+                if self._append_comment(comments, text):
+                    return comments[: self.max_comments]
 
             if not comments:
                 logger.info(f"Playwright 从知乎链接 '{url}' 直接抓取到 0 条内容")
@@ -775,10 +802,8 @@ class DataFetcher:
 
                 for item in items:
                     text = str(item.get("content", "")).strip()
-                    if text and text not in comments:
-                        comments.append(text)
-                        if len(comments) >= self.max_comments:
-                            break
+                    if text and self._append_comment(comments, text):
+                        return comments[: self.max_comments]
 
                 if not has_next:
                     break
@@ -831,10 +856,8 @@ class DataFetcher:
                     text = re.sub(r"\s+", " ", text).strip()
                     if not text:
                         continue
-                    if text not in comments:
-                        comments.append(text)
-                        if len(comments) >= self.max_comments:
-                            break
+                    if self._append_comment(comments, text):
+                        return comments[: self.max_comments]
 
                 if len(comments) >= self.max_comments:
                     break
@@ -847,10 +870,8 @@ class DataFetcher:
                         text = re.sub(r"\s+", " ", text).strip()
                         if not text:
                             continue
-                        if text not in comments:
-                            comments.append(text)
-                            if len(comments) >= self.max_comments:
-                                break
+                        if self._append_comment(comments, text):
+                            return comments[: self.max_comments]
 
                     if len(comments) >= self.max_comments:
                         break
@@ -914,13 +935,16 @@ class DataFetcher:
                     text = str(node.get("reply_content") or node.get("content") or "").strip()
                     if text:
                         text = re.sub(r"\s+", " ", text)
-                        if text not in comments:
-                            comments.append(text)
+                        if self._append_comment(comments, text):
+                            return True
                     for v in node.values():
-                        walk_nodes(v)
+                        if walk_nodes(v):
+                            return True
                 elif isinstance(node, list):
                     for item in node:
-                        walk_nodes(item)
+                        if walk_nodes(item):
+                            return True
+                return len(comments) >= self.max_comments
 
             walk_nodes(comments_obj.get("new", []))
             if len(comments) < self.max_comments:
