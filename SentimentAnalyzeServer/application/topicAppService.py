@@ -153,6 +153,18 @@ class TopicAppService:
     def _entity_dedup_score(item: Entity) -> tuple[float, int]:
         return (float(getattr(item, "weigh", 0.0) or 0.0), int(getattr(item, "last_time", 0) or 0))
 
+    @staticmethod
+    def _fuzzy_text_match(candidate: str, query: str) -> bool:
+        candidate_text = str(candidate or "").strip().lower()
+        query_text = str(query or "").strip().lower()
+        if not candidate_text or not query_text:
+            return False
+        return (
+            candidate_text == query_text
+            or query_text in candidate_text
+            or candidate_text in query_text
+        )
+
     def search_keywords_by_query(
         self,
         query: str,
@@ -166,11 +178,16 @@ class TopicAppService:
         if not normalized_query:
             return []
 
-        matched = self.news_domain_service.get_keywords_by_terms(
-            terms=[normalized_query],
+        if start_time is None:
+            start_time = 0
+        if end_time is None:
+            end_time = int(time.time())
+
+        matched = self.news_domain_service.get_keywords_by_fuzzy_term(
+            term_query=normalized_query,
             news_first_time=news_first_time,
-            start_time=start_time,
-            end_time=end_time,
+            start_time=int(start_time),
+            end_time=int(end_time),
         )
 
         dedup_map: Dict[str, Keyword] = {}
@@ -199,11 +216,16 @@ class TopicAppService:
         if not normalized_query:
             return []
 
-        matched = self.news_domain_service.get_entities_by_names(
-            names=[normalized_query],
+        if start_time is None:
+            start_time = 0
+        if end_time is None:
+            end_time = int(time.time())
+
+        matched = self.news_domain_service.get_entities_by_fuzzy_name(
+            name_query=normalized_query,
             news_first_time=news_first_time,
-            start_time=start_time,
-            end_time=end_time,
+            start_time=int(start_time),
+            end_time=int(end_time),
         )
 
         dedup_map: Dict[str, Entity] = {}

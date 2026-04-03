@@ -660,12 +660,12 @@ class NewsDomainService:
         - 返回 (term_to_keywords, name_to_entities)
         - top_n 表示按 term/name 聚合后的最热门数量
         """
-        keywords = self.get_keywords_by_time_range(
+        keywords = self.get_keywords_by_last_time_range(
             start_time=start_time,
             end_time=end_time,
             news_first_time=news_first_time,
         )
-        entities = self.get_entities_by_time_range(
+        entities = self.get_entities_by_last_time_range(
             start_time=start_time,
             end_time=end_time,
             news_first_time=news_first_time,
@@ -1048,7 +1048,7 @@ class NewsDomainService:
             items[item.source_id].append(item)
         return items
 
-    def get_keywords_by_time_range(
+    def get_keywords_by_last_time_range(
         self,
         start_time: int,
         end_time: int,
@@ -1061,7 +1061,36 @@ class NewsDomainService:
             end_time=end_time,
         )
 
-    def get_entities_by_time_range(
+    def get_keywords_by_fuzzy_term(
+        self,
+        term_query: str,
+        start_time: int,
+        end_time: int,
+        news_first_time: Optional[int] = None,
+    ) -> List[Keyword]:
+        """按 term 模糊匹配，且在时间范围内检索 Keywords。"""
+        if not term_query:
+            return []
+        
+        # 1. 先查时间范围内所有的候选词
+        all_keywords = self.get_keywords_by_last_time_range(
+            start_time=start_time,
+            end_time=end_time,
+            news_first_time=news_first_time
+        )
+        
+        # 2. 手动进行模糊过滤
+        q = term_query.strip().lower()
+        matched = []
+        for kw in all_keywords:
+            term = str(kw.term or "").strip().lower()
+            if not term:
+                continue
+            if q == term or q in term or term in q:
+                matched.append(kw)
+        return matched
+
+    def get_entities_by_last_time_range(
         self,
         start_time: int,
         end_time: int,
@@ -1073,6 +1102,35 @@ class NewsDomainService:
             start_time=start_time,
             end_time=end_time,
         )
+
+    def get_entities_by_fuzzy_name(
+        self,
+        name_query: str,
+        start_time: int,
+        end_time: int,
+        news_first_time: Optional[int] = None,
+    ) -> List[Entity]:
+        """按 name 模糊匹配，且在时间范围内检索 Entities。"""
+        if not name_query:
+            return []
+            
+        # 1. 先查时间范围内所有的候选实体
+        all_entities = self.get_entities_by_last_time_range(
+            start_time=start_time,
+            end_time=end_time,
+            news_first_time=news_first_time
+        )
+        
+        # 2. 手动进行模糊过滤
+        q = name_query.strip().lower()
+        matched = []
+        for en in all_entities:
+            name = str(en.name or "").strip().lower()
+            if not name:
+                continue
+            if q == name or q in name or name in q:
+                matched.append(en)
+        return matched
 
     def get_news_list_by_keywords(
         self,

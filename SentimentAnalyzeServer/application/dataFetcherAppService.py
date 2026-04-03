@@ -40,6 +40,10 @@ class DataFetcherAppService:
         sentiment_config = config.get("sentiment") or {}
         max_comments = int(sentiment_config.get("weibo", {}).get("max_comments", 30))
         
+        # 线程池配置：默认4个worker，每个worker处理3个平台
+        self._comment_worker_count = 4
+        self._platforms_per_worker = 3
+
         self.fetcher = DataFetcher(max_comments=max_comments)
         self.news_domain_service = NewsDomainService(storage)
         self.event_manager = EventManager()
@@ -74,50 +78,60 @@ class DataFetcherAppService:
                 item.comments = list(comments)
 
     def _run_comment_fetch_task(self, incoming_items: List[NewsItem]) -> None:
-        """执行评论抓取主任务（内部用 asyncio 做平台级并发）。"""
+        """执行评论抓取主任务（使用线程池并发，每3个平台分一组）。"""
         if not incoming_items:
             return
 
-        # 按平台分组
+        # 1. 按平台分组
         platform_groups: Dict[str, List[NewsItem]] = {}
         for item in incoming_items:
             platform_groups.setdefault(item.source_id, []).append(item)
 
-        async def fetch_item_comments(item: NewsItem):
+        # 2. 将平台分组切片，每 3 个平台一组任务
+        platforms = list(platform_groups.keys())
+        chunks = [
+            platforms[i : i + self._platforms_per_worker]
+            for i in range(0, len(platforms), self._platforms_per_worker)
+        ]
+
+        def _worker_process_chunk(p_ids: List[str]):
+            """线程执行：管理本线程的 EventLoop 和 3 个平台的抓取。"""
+            async def fetch_item_comments(item: NewsItem):
+                try:
+                    fetch_url = item.url or item.mobile_url
+                    if not fetch_url:
+                        return
+                    comments = await self.fetcher.crawl_comments_dispatch(item.source_id, item.title, fetch_url)
+                    if comments:
+                        item.comments = comments
+                except Exception as e:
+                    logger.warning(f"Worker抓取评论失败 {item.source_id} - {item.title}: {e}")
+
+            async def fetch_platform_group(items: List[NewsItem]):
+                # 平台内串行：Semaphore(1)
+                semaphore = asyncio.Semaphore(1)
+                async def semaphore_wrapper(item: NewsItem):
+                    async with semaphore:
+                        await fetch_item_comments(item)
+                await asyncio.gather(*(semaphore_wrapper(item) for item in items))
+
+            async def main_async_loop():
+                try:
+                    tasks = [fetch_platform_group(platform_groups[pid]) for pid in p_ids]
+                    await asyncio.gather(*tasks)
+                finally:
+                    # 每个线程关闭自己 loop 关联的渲染客户端
+                    await self.fetcher.close()
+
             try:
-                fetch_url = item.url or item.mobile_url
-                if not fetch_url:
-                    return
-                comments = await self.fetcher.crawl_comments_dispatch(item.source_id, item.title, fetch_url)
-                if comments:
-                    item.comments = comments
+                asyncio.run(main_async_loop())
             except Exception as e:
-                logger.warning(f"抓取评论失败 {item.source_id} - {item.title}: {e}")
+                logger.error(f"线程池 worker 运行出错: {e}")
 
-        async def fetch_platform_group(items: List[NewsItem]):
-            # 限制每个平台同时只能有一个新闻项在进行抓取任务
-            semaphore = asyncio.Semaphore(1)
-
-            async def semaphore_wrapper(item: NewsItem):
-                async with semaphore:
-                    await fetch_item_comments(item)
-
-            await asyncio.gather(*(semaphore_wrapper(item) for item in items))
-
-        async def main_task():
-            try:
-                # 为每个平台创建一个并发任务
-                tasks = [fetch_platform_group(items) for items in platform_groups.values()]
-                await asyncio.gather(*tasks)
-            finally:
-                await self.fetcher.close()
-
-        try:
-            asyncio.run(main_task())
-        except RuntimeError as e:
-            logger.error(f"按平台异步抓取评论执行出错: {e}")
-        except Exception as e:
-            logger.error(f"按平台异步抓取评论执行出错: {e}")
+        # 3. 提交到线程池并同步等待所有完成
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=self._comment_worker_count) as executor:
+            executor.map(_worker_process_chunk, chunks)
 
     def _fetch_comments_by_platform(self, incoming_items: List[NewsItem]) -> None:
         """

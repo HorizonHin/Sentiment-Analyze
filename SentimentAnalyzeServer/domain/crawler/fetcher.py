@@ -275,7 +275,6 @@ class DataFetcher:
         if self._consecutive_empty_counts.get(platform_key, 0) >= self._circuit_break_threshold:
             logger.warning(f"熔断机制触发：平台 {source_id} 最近连续 {self._consecutive_empty_counts[platform_key]} 次未抓取到评论，本次跳过执行。")
             return []
-
         comments = []
         if "baidu" in platform_key:
             comments = await self.crawl_baidu_comments_opyimized(title, url)
@@ -324,7 +323,7 @@ class DataFetcher:
             page = await browser_client.acquire_page()
             
             # 1. 使用 Playwright 访问百度搜索列表页
-            await page.goto(search_url, wait_until="load", timeout=25*1000)
+            await page.goto(search_url, wait_until="load", timeout=10*1000)
             
             # 2. 定位首条搜索结果链接
             link_selector = 'div[class*="title_1WDM0"] a'
@@ -345,7 +344,7 @@ class DataFetcher:
                 href = f"https://www.baidu.com{href}"
 
             # 3. 跳转到详细页
-            await page.goto(href, wait_until="domcontentloaded", timeout=20000)
+            await page.goto(href, wait_until="domcontentloaded", timeout=10000)
 
             comment_selector = 'span[class*="type-text"]'
             await page.wait_for_selector(comment_selector, timeout=10000)
@@ -382,11 +381,16 @@ class DataFetcher:
         await asyncio.sleep(random.uniform(1.0, 3.0))  # 抓取前随机等待，模拟人类行为
         try:
             browser_client = await self._get_browser_client()
-            mobile_ua = (
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 "
-                "Mobile/15E148 Safari/604.1"
-            )
+            
+            # 定义 iPhone 动态 User-Agent 列表
+            iphone_uas = [
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 15_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6.3 Mobile/15E148 Safari/604.1",
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 14_8 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1",
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1"
+            ]
+            mobile_ua = random.choice(iphone_uas)
+            
             context = await browser_client.new_isolated_context(user_agent=mobile_ua)
             await context.set_extra_http_headers(browser_client.get_headers("crawl_weibo_comments"))
             page = await context.new_page()
@@ -460,7 +464,7 @@ class DataFetcher:
         response_timeout_count = 0
         max_response_timeouts = 3
         successful_video_fetches = 0
-        max_successful_videos = 3
+        max_successful_videos = 1 # 网速太慢了，先限制只成功抓取1个视频的评论就返回
 
         search_url = url or f"https://search.bilibili.com/all?keyword={requests.utils.quote(title)}"
         try:
@@ -490,7 +494,7 @@ class DataFetcher:
             page = await browser_client.acquire_page()
 
             for video_url in video_urls:
-                await asyncio.sleep(random.uniform(2.0, 4.6))  # 视频间随机等待，模拟人类行为
+                await asyncio.sleep(random.uniform(1.0, 3.6))  # 视频间随机等待，模拟人类行为
                 if len(comments) >= self.max_comments:
                     break
                 try:
@@ -501,7 +505,7 @@ class DataFetcher:
                         ),
                         timeout=15 * 1000,
                     ) as response_info:
-                        await page.goto(video_url, wait_until="domcontentloaded", timeout=20 * 1000)
+                        await page.goto(video_url, wait_until="domcontentloaded", timeout=15 * 1000)
                         await page.evaluate("window.scrollBy(0, 800)")
 
                     response = await response_info.value
@@ -598,72 +602,57 @@ class DataFetcher:
     async def crawl_douyin_comments(self, title: str, url: str) -> List[str]:
         comments: List[str] = []
         page = None
+        found_valid_data = asyncio.get_running_loop().create_future()
+        # 内部处理函数：从特定响应中提取评论
+        async def handle_response(response):
+            if "douyin.com/aweme/v1/web/comment/list" in response.url and response.status == 200:
+                try:
+                    payload_text = await response.text()
+                    if payload_text.strip():
+                        data = json.loads(payload_text)
+                        for comment in data.get("comments", []):
+                            text = comment.get("text", "")
+                            if text:
+                                self._append_comment(comments, text)
+                        if comments and not found_valid_data.done():
+                            found_valid_data.set_result(True)  # 一旦找到评论，立即通知主流程继续
+                except Exception as e:
+                    if not found_valid_data.done():
+                        logger.warning(f"解析抖音评论响应失败: {e}")
+
         try:
             browser_client = await self._get_browser_client()
             page = await browser_client.acquire_page()
-            await page.goto(url, wait_until="load", timeout=20*1000)
-            for attempt in range(2):
-                try:
-                    async with page.expect_response(
-                        lambda response: (
-                            "douyin.com/aweme/v1/web/comment/list" in response.url
-                            and response.status == 200
-                        ),
-                        timeout=20 * 1000,
-                    ) as response_info:
-                        if attempt == 0:
-
-                            # 通过 locator 自动等待页面关键容器可见
-                            await self._wait_locator_visible(
-                                page,
-                                'div[data-e2e="video-comment-more"], .video-detail-container, .main-container',
-                                timeout=15000,
-                            )
-
-                        # 触发评论异步加载；第二次尝试会再滚一次，等真正的数据响应
-                        await page.evaluate(f"window.scrollBy(0, {800 + attempt * 400})")
-
-                    response = await response_info.value
-                    try:
-                        payload_text = await response.text()
-                    except Exception as read_error:
-                        if attempt > 0:
-                            logger.warning(f"Playwright 读取抖音评论响应失败: {title}, attempt={attempt}, error={read_error}")
-                        continue
-                    if not payload_text.strip():
-                        if attempt == 0:
-                            continue
-                        logger.info(f"Playwright 为标题 '{title}' 抓取到空的抖音评论响应")
-                        continue
-
-                    data = json.loads(payload_text)
-                    for comment in data.get("comments", []):
-                        text = comment.get("text", "")
-                        if text and self._append_comment(comments, text):
-                            return comments[: self.max_comments]
-
-                    if comments:
-                        break
-                except TimeoutError:
-                    if attempt == 0:
-                        continue
-                    logger.warning(f"Playwright 获取抖音评论超时: {title}")
-                    continue
             
-            if not comments:
-                # 仅在失败且没有拿到评论时记录日志
-                logger.info(f"Playwright 为标题 '{title}' 抓取到 0 条抖音评论")
+            # 使用 page.on 注册监听器
+            page.on("response", handle_response)
+            
+            await page.goto(url, wait_until="domcontentloaded", timeout=15*1000)
+            # 增加一点评论加载的触发动作
+            await page.evaluate("window.scrollBy(0, 1200)")
+            
+            # 等待数据，如果 10s 没拿到任何评论也继续，不作为异常抛出
+            try:
+                await asyncio.wait_for(found_valid_data, timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.info(f"crawl_douyin_comments 等待数据超时，已抓取 {len(comments)} 条评论")
+        except Exception as e:
+            logger.warning(f"crawl_douyin_comments 流程异常: {e}")
             if page:
                 try:
                     await page.screenshot(path=f"{self.screenshot_dir}/douyin_fatal_{int(time.time())}.png")
                 except:
                     pass
-        except Exception as e:
-            logger.warning(f"crawl_douyin_comments 整体失败: {e}")
         finally:
             if page:
+                # 移除监听器防止影响后续使用同一个 page 的任务
+                try:
+                    page.remove_listener("response", handle_response)
+                except:
+                    pass
                 browser_client = await self._get_browser_client()
                 await browser_client.release_page(page)
+                
         return comments[: self.max_comments]
     
     # 监听response
@@ -682,10 +671,7 @@ class DataFetcher:
                     ),
                     timeout=15 * 1000,
                 ) as response_info:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-
-                    # Locator API 自动等待评论区容器
-                    await self._wait_locator_visible(page, "div.comment-info", timeout=10000)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=15 * 1000)
 
                 response = await response_info.value
                 payload_text = await response.text()
@@ -841,7 +827,7 @@ class DataFetcher:
         try:
             browser_client = await self._get_browser_client()
             page = await browser_client.acquire_page()
-            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=15*1000)
 
             # 先等目标 script 出现，再直接读取它的文本内容。
             script_locator = page.locator('script#js-initialData[type="text/json"]').first
