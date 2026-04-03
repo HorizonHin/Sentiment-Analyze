@@ -33,12 +33,13 @@ class DataFetcherAppService:
     def __init__(self, config_path: str | Path, storage: object) -> None:
         self.config_path = Path(config_path)
         
-        # 从配置中读取最大评论数
+        # 从配置中读取最大评论数和回溯天数
         with self.config_path.open("r", encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
         
         sentiment_config = config.get("sentiment") or {}
         max_comments = int(sentiment_config.get("weibo", {}).get("max_comments", 30))
+        self._first_time_lookback_days = int(sentiment_config.get("first_time_lookback_days", 3))
         
         # 线程池配置：默认4个worker，每个worker处理3个平台
         self._comment_worker_count = 4
@@ -50,30 +51,34 @@ class DataFetcherAppService:
         self.redis = MyRedis()
         self.common_thread_pool = CommonThreadPool()
 
-    def _serialize_news_items(self, items: List[NewsItem]) -> List[Dict[str, Any]]:
-        return [item.to_dict() for item in items]
-
-    @staticmethod
-    def _news_item_key(item: NewsItem) -> tuple[str, str]:
-        return (str(item.source_id or "").strip(), str(item.title or "").strip())
-
     def _rehydrate_runtime_comments(
         self,
         target_items: List[NewsItem],
         source_items: List[NewsItem],
     ) -> None:
         """comments 不落库，需要在入库返回对象上回填运行时评论。"""
-        source_comment_map: Dict[tuple[str, str], List[str]] = {}
+        # 分别按 (source_id, title) 和 url 建立映射，实现“或”关系的匹配
+        source_st_map: Dict[tuple[str, str], List[str]] = {}
+        source_url_map: Dict[str, List[str]] = {}
+
         for item in source_items:
-            key = self._news_item_key(item)
-            if key == ("", ""):
+            if not item.comments:
                 continue
-            if item.comments:
-                source_comment_map[key] = list(item.comments)
+            
+            st_key = (str(item.source_id or "").strip(), str(item.title or "").strip())
+            if st_key != ("", ""):
+                source_st_map[st_key] = list(item.comments)
+            
+            url_key = str(item.url or "").strip()
+            if url_key:
+                source_url_map[url_key] = list(item.comments)
 
         for item in target_items:
-            key = self._news_item_key(item)
-            comments = source_comment_map.get(key)
+            # 优先按标题匹配，其次按 URL 匹配
+            st_key = (str(item.source_id or "").strip(), str(item.title or "").strip())
+            url_key = str(item.url or "").strip()
+            
+            comments = source_st_map.get(st_key) or source_url_map.get(url_key)
             if comments:
                 item.comments = list(comments)
 
@@ -234,16 +239,43 @@ class DataFetcherAppService:
             return self.news_domain_service.add_news_items(incoming_items)
 
         # 1. 调整顺序：先查数据库，判断哪些新闻是已存在的
-        key_list = list({(item.source_id, item.title) for item in incoming_items if item.source_id and item.title})
-        existing_items = self.news_domain_service.get_news_list_by_source_title_list(
-            key_list,
-            0,
-        )
-        existing_item_map = {(item.source_id, item.title): item for item in existing_items}
+        source_title_list = list({(item.source_id, item.title) for item in incoming_items if item.source_id and item.title})
+        url_list = list({item.url for item in incoming_items if item.url})
+        mobile_url_list = list({item.mobile_url for item in incoming_items if item.mobile_url})
+        all_urls = list(set(url_list + mobile_url_list))
+
+        # 根据配置的回溯天数计算查询的起始时间戳
+        lookback_seconds = self._first_time_lookback_days * 86400
+        query_start_time = int(time.time()) - lookback_seconds
+
+        existing_items_by_st = self.news_domain_service.get_news_list_by_source_title_list(source_title_list, query_start_time)
+        existing_items_by_url = self.news_domain_service.get_news_list_by_url(all_urls, query_start_time)
+
+        existing_item_map: Dict[tuple[str, str], NewsItem] = {}
+        existing_url_map: Dict[str, NewsItem] = {}
+
+        for item in existing_items_by_st:
+            existing_item_map[(item.source_id, item.title)] = item
+            if item.url:
+                existing_url_map[item.url] = item
+            if item.mobile_url:
+                existing_url_map[item.mobile_url] = item
+
+        for item in existing_items_by_url:
+            existing_item_map[(item.source_id, item.title)] = item
+            if item.url:
+                existing_url_map[item.url] = item
+            if item.mobile_url:
+                existing_url_map[item.mobile_url] = item
 
         # 2. 所有新闻都抓评论；仅调整顺序：优先处理尚未具备完整分析结果的新闻。
         def _comment_priority(item: NewsItem) -> int:
             existing = existing_item_map.get((item.source_id, item.title))
+            if not existing and item.url:
+                existing = existing_url_map.get(item.url)
+            if not existing and item.mobile_url:
+                existing = existing_url_map.get(item.mobile_url)
+
             if existing and existing.sentiment_polarity and existing.positive_ratio > 0:
                 return 1
             return 0
@@ -255,16 +287,20 @@ class DataFetcherAppService:
             
         new_items_by_source: Dict[str, List[NewsItem]] = {}
         merged_items: List[NewsItem] = []
-        for source_id, news_list in current_data.items.items():
+        for source_id_from_dict, news_list in current_data.items.items():
             for item in news_list:
-                key = (item.source_id, item.title)
-                if key in existing_item_map:
+                existing_item = existing_item_map.get((item.source_id, item.title))
+                if not existing_item and item.url:
+                    existing_item = existing_url_map.get(item.url)
+                if not existing_item and item.mobile_url:
+                    existing_item = existing_url_map.get(item.mobile_url)
+
+                if existing_item:
                     # 用新数据更新既存项
-                    existing_item = existing_item_map[key]
                     self.news_domain_service.applyNewsField(item, existing_item)
                     merged_items.append(existing_item)
                 else:
-                    new_items_by_source.setdefault(source_id, []).append(item)
+                    new_items_by_source.setdefault(source_id_from_dict, []).append(item)
 
         saved_items: List[NewsItem] = []
 

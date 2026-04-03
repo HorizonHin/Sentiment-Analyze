@@ -189,7 +189,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 point.id = int(inserted[0])
 
     def _replace_keyword_and_entity(self, conn: pyodbc.Connection, valid_news: List[NewsItem]) -> None:
-        """插入新数据；已有数据仅更新业务字段，不回写 first_time。"""
+        """覆盖式更新关键字和实体：先删除旧关联，再插入新关联。"""
         cursor = conn.cursor()
 
         for item in valid_news:
@@ -197,113 +197,61 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 continue
             news_first_time = self._to_timestamp(item.first_time) or self._to_timestamp(item.last_time, fallback_now=True)
             item_last_time = self._to_timestamp(item.last_time, fallback_now=True)
+            
+            # 1. 覆盖式更新：先删除该新闻项下已有的所有关键词
+            cursor.execute(
+                "DELETE FROM Keyword WHERE news_item_id = ? AND news_first_time = ?",
+                int(item.id),
+                news_first_time
+            )
+            
+            # 2. 插入当前最新的关键词列表
             for keyword in item.keywords:
                 term = str(keyword.term or "").strip()
                 if not term:
                     continue
                 keyword_weigh = float(keyword.weigh if keyword.weigh is not None else item.total_weigh)
-                if keyword.id and int(keyword.id) > 0:
-                    cursor.execute(
-                        "UPDATE Keyword SET weigh = ?, last_time = ? WHERE id = ? AND news_item_id = ? AND news_first_time = ?",
-                        keyword_weigh,
-                        item_last_time,
-                        int(keyword.id),
-                        int(item.id),
-                        news_first_time,
-                    )
-                    continue
-
+                
                 cursor.execute(
-                    "UPDATE Keyword SET importance = ?, weigh = ?, last_time = ? WHERE news_item_id = ? AND news_first_time = ? AND term = ?",
-                    keyword.importance,
-                    keyword_weigh,
-                    item_last_time,
+                    "INSERT INTO Keyword(news_item_id, news_first_time, last_time, term, importance, weigh) VALUES (?, ?, ?, ?, ?, ?)",
                     int(item.id),
                     news_first_time,
+                    item_last_time,
                     term,
+                    keyword.importance,
+                    keyword_weigh,
                 )
-                if cursor.rowcount and int(cursor.rowcount) > 0:
-                    continue
-
-                try:
-                    cursor.execute(
-                        "INSERT INTO Keyword(news_item_id, news_first_time, last_time, term, importance, weigh) VALUES (?, ?, ?, ?, ?, ?)",
-                        int(item.id),
-                        news_first_time,
-                        item_last_time,
-                        term,
-                        keyword.importance,
-                        keyword_weigh,
-                    )
-                except pyodbc.Error as keyword_error:
-                    if not self._is_unique_violation(keyword_error):
-                        raise
-                    cursor.execute(
-                        "UPDATE Keyword SET importance = ?, weigh = ?, last_time = ? WHERE news_item_id = ? AND news_first_time = ? AND term = ?",
-                        keyword.importance,
-                        keyword_weigh,
-                        item_last_time,
-                        int(item.id),
-                        news_first_time,
-                        term,
-                    )
 
         for item in valid_news:
             if item.id is None or int(item.id) <= 0:
                 continue
             news_first_time = self._to_timestamp(item.first_time) or self._to_timestamp(item.last_time, fallback_now=True)
             item_last_time = self._to_timestamp(item.last_time, fallback_now=True)
+            
+            # 1. 覆盖式更新：先删除该新闻项下已有的所有实体
+            cursor.execute(
+                "DELETE FROM Entity WHERE news_item_id = ? AND news_first_time = ?",
+                int(item.id),
+                news_first_time
+            )
+            
+            # 2. 插入当前最新的实体列表
             for entity in item.entities:
                 entity_name = str(entity.name or "").strip()
                 entity_type = str(entity.type or "").strip()
                 if not entity_name or not entity_type:
                     continue
                 entity_weigh = float(entity.weigh if entity.weigh is not None else item.total_weigh)
-                if entity.id and int(entity.id) > 0:
-                    cursor.execute(
-                        "UPDATE Entity SET weigh = ?, last_time = ? WHERE id = ? AND news_item_id = ? AND news_first_time = ?",
-                        entity_weigh,
-                        item_last_time,
-                        int(entity.id),
-                        int(item.id),
-                        news_first_time,
-                    )
-                    continue
 
                 cursor.execute(
-                    "UPDATE Entity SET weigh = ?, last_time = ? WHERE news_item_id = ? AND news_first_time = ? AND name = ? AND entity_type = ?",
-                    entity_weigh,
-                    item_last_time,
+                    "INSERT INTO Entity(news_item_id, news_first_time, last_time, name, entity_type, weigh) VALUES (?, ?, ?, ?, ?, ?)",
                     int(item.id),
                     news_first_time,
+                    item_last_time,
                     entity_name,
                     entity_type,
+                    entity_weigh,
                 )
-                if cursor.rowcount and int(cursor.rowcount) > 0:
-                    continue
-
-                try:
-                    cursor.execute(
-                        "INSERT INTO Entity(news_item_id, news_first_time, last_time, name, entity_type, weigh) VALUES (?, ?, ?, ?, ?, ?)",
-                        int(item.id),
-                        news_first_time,
-                        item_last_time,
-                        entity_name,
-                        entity_type,
-                        entity_weigh,
-                    )
-                except pyodbc.Error as entity_error:
-                    if not self._is_unique_violation(entity_error):
-                        raise
-                    cursor.execute(
-                        "UPDATE Entity SET weigh = ?, last_time = ? WHERE news_item_id = ? AND news_first_time = ? AND name = ? AND entity_type = ?",
-                        entity_weigh,
-                        item_last_time,
-                        int(item.id),
-                        news_first_time,
-                        entity_name,
-                        entity_type,
-                    )
 
     def _build_datetime_range_clause(
         self,
@@ -949,6 +897,30 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 continue
             where_conditions.append("(source_id = ? AND title = ?)")
             params.extend([source_id, title])
+
+        if not where_conditions:
+            return []
+
+        where_sql = f"({' OR '.join(where_conditions)}) AND first_time >= ?"
+        params.append(first_time_ts)
+        items = self._load_filtered_data(where_sql=where_sql, params=params)
+        return items if items is not None else []
+
+    def get_news_items_by_url(self, url_list: List[str], first_time: int) -> List[NewsItem]:
+        if not url_list:
+            return []
+
+        first_time_ts = self._to_timestamp(first_time)
+        if first_time_ts is None:
+            return []
+
+        where_conditions = []
+        params = []
+        for url in url_list:
+            if not url or not url.strip():
+                continue
+            where_conditions.append("(url = ? OR mobile_url = ?)")
+            params.extend([url, url])
 
         if not where_conditions:
             return []

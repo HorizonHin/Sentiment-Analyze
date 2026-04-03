@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 EVENT_CRAWL_SAVED = "crawl.saved"
 EVENT_SENTIMENT_ANALYZED = "sentiment.analyzed"
 EVENT_TOPIC_RANK_UPDATED = "topic.rank_updated"
+EVENT_TOPIC_TITLE_SUMMARY_BLOCKED = "topic.title_summary_blocked"
 REDIS_KEY_LATEST_NOT_NEED_ANALYSIS_NEWS = "news:latest_not_need_analysis"
 REDIS_KEY_RECENT_30M_ANALYZED_NEWS = "news:recent_30m_analyzed"
 

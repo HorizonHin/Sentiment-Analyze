@@ -19,6 +19,8 @@ from SentimentAnalyzeServer.application.topicAppService import TopicAppService
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import NewsDomainService
 from SentimentAnalyzeServer.domain.news.sqlServerNewsItemRepository import SqlServerNewsItemRepository
+from SentimentAnalyzeServer.domain.risk.risk import RiskWarningDomainService
+from SentimentAnalyzeServer.domain.risk.sqlServerRiskWarningRepository import SqlServerRiskWarningRepository
 from SentimentAnalyzeServer.domain.topic.topic import TopicDomainService
 from SentimentAnalyzeServer.domain.topic.sqlServerTopicRepository import SqlServerTopicRepository
 from SentimentAnalyzeServer.inbound.controller import create_external_controller
@@ -132,6 +134,17 @@ def create_app() -> Flask:
         password=mssql_password,
         driver=mssql_driver,
     )
+    risk_warning_repository = SqlServerRiskWarningRepository(
+        server=mssql_server,
+        database=mssql_database,
+        username=mssql_username,
+        password=mssql_password,
+        driver=mssql_driver,
+    )
+    risk_warning_domain_service = RiskWarningDomainService(
+        risk_warning_repository=risk_warning_repository,
+        risk_config=(config.get("risk_warning") or {}),
+    )
     llm_title_analyzer = LLMTitleAnalyzer(api_key=llm_api_key)
     sentiment_app_service = SentimentAnalyzeAppService(
         storage=storage,
@@ -154,6 +167,7 @@ def create_app() -> Flask:
     workflow_subscribers = WorkflowEventSubscribers(
         sentiment_app_service=sentiment_app_service,
         topic_app_service=topic_app_service,
+        risk_warning_domain_service=risk_warning_domain_service,
         crawl_interval_seconds=interval_seconds,
     )
     workflow_subscribers.register()
@@ -162,6 +176,7 @@ def create_app() -> Flask:
         create_external_controller(
             sentiment_app_service=sentiment_app_service,
             topic_app_service=topic_app_service,
+            risk_warning_domain_service=risk_warning_domain_service,
             crawl_interval_seconds=interval_seconds,
             first_time_lookback_seconds=first_time_lookback_seconds,
         )

@@ -468,6 +468,11 @@ class NewsItemRepository(ABC):
         pass
 
     @abstractmethod
+    def get_news_items_by_url(self, url_list: List[str], first_time: int) -> List[NewsItem]:
+        """根据 URL 列表（url 或 mobile_url）查询新闻数据。"""
+        pass
+
+    @abstractmethod
     def is_first_crawl_today(self, date: Optional[int] = None) -> bool:
         """
         检查是否是当天第一次抓取
@@ -1196,6 +1201,16 @@ class NewsDomainService:
         first_time: int,
     ) -> List[NewsItem]:
         return self.storage.get_news_list_by_source_title_list(source_title_list, first_time)
+
+    def get_news_list_by_url(
+        self,
+        url_list: List[str],
+        first_time: int,
+    ) -> List[NewsItem]:
+        """根据 URL 列表查询新闻数据。"""
+        if not url_list:
+            return []
+        return self.storage.get_news_items_by_url(url_list, first_time)
 
     def update_news_list(self, news_list: List[NewsItem]) -> bool:
         if not news_list:

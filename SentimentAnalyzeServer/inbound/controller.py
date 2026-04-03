@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 def create_external_controller(
 	sentiment_app_service: SentimentAnalyzeAppService,
 	topic_app_service: TopicAppService,
+    risk_warning_domain_service: Any,
 	crawl_interval_seconds: int,
 	first_time_lookback_seconds: int,
 ) -> Blueprint:
@@ -217,6 +218,35 @@ def create_external_controller(
 			logger.exception("Failed to execute /topics/by-keyword")
 			return jsonify(Result.failure_result(str(exc)).to_dict())
 
+	@bp.post("/topics/batch-get")
+	def batch_get_topics() -> object:
+		"""批量拉取话题详细信息
+		Payload: { "keys": [ [created_at, topic_id], ... ] }
+		"""
+		try:
+			payload = request.get_json(silent=True) or {}
+			keys_raw = payload.get("keys", [])
+			if not keys_raw:
+				return jsonify(Result.failure_result("参数 keys 不能为空且必须是列表").to_dict())
+			
+			# Ensure it's a list of tuples/lists [int, int]
+			keys = []
+			for k in keys_raw:
+				if isinstance(k, (list, tuple)) and len(k) >= 2:
+					try:
+						keys.append((int(k[0]), int(k[1])))
+					except (TypeError, ValueError):
+						continue
+			
+			if not keys:
+				return jsonify(Result.failure_result("未提供有效的 (created_at, topic_id) 组合").to_dict())
+
+			result = topic_app_service.get_topics_by_composite_keys(keys)
+			return jsonify(result.to_dict())
+		except Exception as exc:
+			logger.exception("Failed to execute /topics/batch-get")
+			return jsonify(Result.failure_result(str(exc)).to_dict())
+
 	@bp.post("/keywords/followed/add")
 	def add_followed_keyword() -> object:
 		try:
@@ -272,6 +302,81 @@ def create_external_controller(
 			return jsonify(Result.success_result({"keywords": keywords}).to_dict())
 		except Exception as exc:
 			logger.exception("Failed to execute /keywords/followed/list")
+			return jsonify(Result.failure_result(str(exc)).to_dict())
+
+	@bp.get("/risk/topic-warnings")
+	def get_topic_risk_warnings() -> object:
+		try:
+			topic_created_at = parse_int_timestamp(request.args.get("topic_created_at"))
+			topic_id_raw = request.args.get("topic_id")
+			topic_id = int(topic_id_raw) if topic_id_raw else None
+			start_time = parse_int_timestamp(request.args.get("start_time"))
+			end_time = parse_int_timestamp(request.args.get("end_time"))
+			risk_level = request.args.get("risk_level")
+			limit = max(1, int(request.args.get("limit", 100)))
+
+			warnings = risk_warning_domain_service.get_topic_risk_warnings(
+				topic_created_at=topic_created_at,
+				topic_id=topic_id,
+				start_time=start_time,
+				end_time=end_time,
+				risk_level=risk_level,
+				limit=limit,
+			)
+			data = [
+				{
+					"topic_created_at": w.topic_created_at,
+					"topic_id": w.topic_id,
+					"topic_name": w.topic_name,
+					"risk_type": w.risk_type,
+					"risk_level": w.risk_level,
+					"risk_score": w.risk_score,
+					"reason": w.reason,
+					"metrics": w.metrics,
+					"detected_by_event": w.detected_by_event,
+					"occurred_at": w.occurred_at,
+				}
+				for w in warnings
+			]
+			return jsonify(Result.success_result(data).to_dict())
+		except Exception as exc:
+			logger.exception("Failed to execute /risk/topic-warnings")
+			return jsonify(Result.failure_result(str(exc)).to_dict())
+
+	@bp.get("/risk/sensitive-title-audit")
+	def get_sensitive_title_records() -> object:
+		try:
+			topic_created_at = parse_int_timestamp(request.args.get("topic_created_at"))
+			topic_id_raw = request.args.get("topic_id")
+			topic_id = int(topic_id_raw) if topic_id_raw else None
+			start_time = parse_int_timestamp(request.args.get("start_time"))
+			end_time = parse_int_timestamp(request.args.get("end_time"))
+			limit = max(1, int(request.args.get("limit", 100)))
+
+			records = risk_warning_domain_service.get_sensitive_title_records(
+				topic_created_at=topic_created_at,
+				topic_id=topic_id,
+				start_time=start_time,
+				end_time=end_time,
+				limit=limit,
+			)
+			data = [
+				{
+					"topic_created_at": r.topic_created_at,
+					"topic_id": r.topic_id,
+					"topic_name": r.topic_name,
+					"old_topic": r.old_topic,
+					"candidate_titles": r.candidate_titles,
+					"reason": r.reason,
+					"risk_level": r.risk_level,
+					"occurred_at": r.occurred_at,
+					"context": r.context,
+				}
+				for r in records
+			]
+			return jsonify(Result.success_result(data).to_dict())
+		except Exception as exc:
+			logger.exception("Failed to execute /risk/sensitive-title-audit")
 			return jsonify(Result.failure_result(str(exc)).to_dict())
 
 

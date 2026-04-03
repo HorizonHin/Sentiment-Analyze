@@ -70,30 +70,48 @@ class SentimentAnalyzeAppService:
 		self.redis.set(REDIS_KEY_LATEST_NOT_NEED_ANALYSIS_NEWS, payload)
 
 	def _generate_latest_rank_board(self, items: List[NewsItem]) -> List[NewsItem]:
-		# key is latest_rank, value is NewsItem
-		rank_to_item: Dict[int, NewsItem] = {}
+		# 使用 (source_id, latest_rank) 作为唯一键，确保每个平台每个排名只有一个条目
+		# 如果没有排名（latest_rank 为 None），则使用 title 作为降级唯一键
+		# 对于重复项，保留时间戳（last_time 或 analyzed_time）更新的
+		identity_to_item: Dict[tuple[str, Any], NewsItem] = {}
 		
 		for item in items:
-			rank = item.latest_rank
-			if rank <= 0:
+			source_id = str(item.source_id or "").strip()
+			if not source_id:
 				continue
 				
-			existing = rank_to_item.get(rank)
+			rank = item.latest_rank
+			if rank is not None:
+				# 针对有排名的，以排名为准
+				key = (source_id, f"rank_{rank}")
+			else:
+				# 针对无排名的（比如某些增量新闻），以标题作为降级 key
+				title = str(item.title or "").strip()
+				if not title:
+					continue
+				key = (source_id, f"title_{title}")
+
+			existing = identity_to_item.get(key)
 			if existing is None:
-				rank_to_item[rank] = item
+				identity_to_item[key] = item
 				continue
 
-			# 如果 rank 相同，保留时间戳（last_time 或 analyzed_time）更新的
 			def _get_ts(ni: NewsItem) -> int:
 				ts = int(ni.last_time or 0)
+				# 如果有分析时间，优先使用分析时间作为新鲜度判断依据
 				if ni.analyzed_time:
 					ts = max(ts, int(ni.analyzed_time.timestamp()))
 				return ts
 
-			if _get_ts(item) >= _get_ts(existing):
-				rank_to_item[rank] = item
+			# 如果新条目的时间戳更新，或者时间戳相同但内容更完整（已有 summary），则替换
+			if _get_ts(item) > _get_ts(existing):
+				identity_to_item[key] = item
+			elif _get_ts(item) == _get_ts(existing):
+				# 如果时间也一致，优先保留有 summary 的（防止被刚爬下来还没分析的覆盖）
+				if (item.summary or item.analyzed_time) and not (existing.summary or existing.analyzed_time):
+					identity_to_item[key] = item
 
-		return list(rank_to_item.values())
+		return list(identity_to_item.values())
 
 	def _filter_items_by_last_time_range(
 		self,
@@ -188,19 +206,18 @@ class SentimentAnalyzeAppService:
 				if item.last_time is not None and item.last_time >= recent_threshold
 			]
 			if recent_items:
-				logger.debug("Caching %d recent analyzed items (< %d sec)", len(recent_items), self.recent_window_seconds)
+				logger.debug("Caching %d recent items (< %d sec)", len(recent_items), self.recent_window_seconds)
 				self.common_thread_pool.submit(self._cache_recent_analyzed_news, recent_items)
 
-			# 仅存储真正不需要再次分析的项
-			# 逻辑修正：应该只存储真正不需要分析的 (not is_item_analysis_pending)
-			# 而不是 "not pending" OR "not support comments" 这样的 OR 逻辑
-			latest_not_need_analysis = [
+			# 存储最新“当前已分析”项，无论是否支持重分析
+			# 只要 analyzed_time 不为空（有过 LLM 返回），就属于最新分析看板的后备
+			latest_analyzed = [
 				item for item in final_items
-				if not is_item_analysis_pending(item)
+				if item.analyzed_time or item.summary
 			]
-			if latest_not_need_analysis:
-				logger.debug("Caching %d items as not-needing-analysis", len(latest_not_need_analysis))
-				self.common_thread_pool.submit(self._cache_latest_not_need_analysis_items, latest_not_need_analysis)
+			if latest_analyzed:
+				logger.debug("Caching %d items as latest-analyzed results", len(latest_analyzed))
+				self.common_thread_pool.submit(self._cache_latest_not_need_analysis_items, latest_analyzed)
 
 		self.event_manager.publish(
 			EVENT_SENTIMENT_ANALYZED,
@@ -358,11 +375,13 @@ class SentimentAnalyzeAppService:
 				cached_items = self._generate_latest_rank_board(cached_items)
 				dedup_count = len(cached_items)
 				
-				# 过滤：确保所有缓存数据都是已分析或不需要分析的
+				# 过滤及排序：保留所有至少有初步分析结果的项（含 pending 重分析的）
+				# 如果某平台在缓存中完全没有已分析数据，则保留所有。
+				# is_item_analysis_pending 为 True 表示“建议重分析”，但通常已有 summary
 				cached_items = [
 					item
 					for item in cached_items
-					if not is_item_analysis_pending(item)
+					if item.analyzed_time or item.summary  # 只要有过分析结果就返回
 				]
 				after_filter = len(cached_items)
 				

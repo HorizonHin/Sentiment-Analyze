@@ -551,12 +551,6 @@ class DataFetcher:
                             return comments[: self.max_comments]
 
                     if successful_video_fetches >= max_successful_videos:
-                        logger.info(
-                            "B站评论抓取已成功处理%d个视频，提前返回。title=%s, comments=%d",
-                            max_successful_videos,
-                            title,
-                            len(comments),
-                        )
                         return comments[: self.max_comments]
                 except TimeoutError:
                     response_timeout_count += 1
@@ -631,9 +625,9 @@ class DataFetcher:
             # 增加一点评论加载的触发动作
             await page.evaluate("window.scrollBy(0, 1200)")
             
-            # 等待数据，如果 10s 没拿到任何评论也继续，不作为异常抛出
+            # 等待数据，如果 20s 没拿到任何评论也继续，不作为异常抛出
             try:
-                await asyncio.wait_for(found_valid_data, timeout=10.0)
+                await asyncio.wait_for(found_valid_data, timeout=20.0)
             except asyncio.TimeoutError:
                 logger.info(f"crawl_douyin_comments 等待数据超时，已抓取 {len(comments)} 条评论")
         except Exception as e:

@@ -6,6 +6,7 @@ import time
 from typing import Any, List
 
 from openai import BadRequestError, OpenAI, RateLimitError
+from SentimentAnalyzeServer.system.infra import EventManager, EVENT_TOPIC_TITLE_SUMMARY_BLOCKED
 from SentimentAnalyzeServer.system.rate_limiter import SlidingWindowRateLimiter
 
 
@@ -55,6 +56,7 @@ class LLMTitleAnalyzer:
         
         # 滑动窗口速率限制：每分钟最大 120 个请求 (针对通义千问免费版/基础版)
         self._rate_limiter = SlidingWindowRateLimiter(window_seconds=60, max_requests=120)
+        self.event_manager = EventManager()
 
     def _get_analyze_title_prompt(self) -> str:
         with open(self.prompt_file, "r", encoding="utf-8") as f:
@@ -387,7 +389,7 @@ class LLMTitleAnalyzer:
                 error_code = self._extract_error_code(e)
                 if error_code == "data_inspection_failed":
                     logger.warning(
-                        "LLM 内容审核拦截标题分析，返回空结果。title=%s, code=%s",
+                        "LLM 内容审核拦截NewsItem标题分析，返回空结果。title=%s, code=%s",
                         title, error_code,
                     )
                     return self._build_empty_result()
@@ -408,7 +410,7 @@ class LLMTitleAnalyzer:
                 logger.exception("LLM 仅分析标题异常。title=%s", title)
                 raise
 
-    def summarize_topic_title(self, old_topic: str, titles: list[str]) -> str:
+    def summarize_topic_title(self, old_topic: str, titles: list[str], topic: Any = None) -> str:
         cleaned_titles = [str(title).strip() for title in (titles or []) if str(title).strip()]
         if not str(old_topic or "").strip() or not cleaned_titles:
             return ""
@@ -452,6 +454,23 @@ class LLMTitleAnalyzer:
                     logger.warning(
                         "LLM 话题标题总结被内容审核拦截，返回空字符串。old_topic=%s",
                         old_topic,
+                    )
+                    self.event_manager.publish(
+                        EVENT_TOPIC_TITLE_SUMMARY_BLOCKED,
+                        {
+                            "topic_created_at": 0,
+                            "topic_id": -1,
+                            "topic": topic,
+                            "topic_name": str(old_topic or "").strip(),
+                            "old_topic": str(old_topic or "").strip(),
+                            "candidate_titles": cleaned_titles[:50],
+                            "reason": "data_inspection_failed",
+                            "error_code": "data_inspection_failed",
+                            "risk_level": "high",
+                            "blocked": True,
+                            "detected_by_event": EVENT_TOPIC_TITLE_SUMMARY_BLOCKED,
+                            "occurred_at": int(time.time()),
+                        },
                     )
                     return ""
 

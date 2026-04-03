@@ -38,6 +38,10 @@ class TopicCacheManager(ABC):
     def get_topic_by_composite_key(self, topic_created_at: int, topic_id: int) -> Optional[Topic]:
         pass
 
+    @abstractmethod
+    def get_topic_by_composite_keys(self, keys: List[tuple[int, int]]) -> List[Topic]:
+        pass
+
 class TopicCacheManager_Memory(TopicCacheManager):
     def __init__(self) -> None:
         self._topics: List[Topic] = []
@@ -95,12 +99,15 @@ class TopicCacheManager_Memory(TopicCacheManager):
         return list(self._topics)
 
     def get_topic_by_composite_key(self, topic_created_at: int, topic_id: int) -> Optional[Topic]:
-        created_at = int(topic_created_at)
-        target_id = int(topic_id)
+        return self.get_topic_by_composite_keys([(topic_created_at, topic_id)])[0] if self.get_topic_by_composite_keys([(topic_created_at, topic_id)]) else None
+
+    def get_topic_by_composite_keys(self, keys: List[tuple[int, int]]) -> List[Topic]:
+        results = []
+        key_set = set(keys)
         for topic in self._topics:
-            if int(getattr(topic, "created_at", 0) or 0) == created_at and int(getattr(topic, "id", -1) or -1) == target_id:
-                return topic
-        return None
+            if (int(getattr(topic, "created_at", 0) or 0), int(getattr(topic, "id", -1) or -1)) in key_set:
+                results.append(topic)
+        return results
     
     def get_topic_by_name(self, topic_name: str) -> Optional[Topic]:
         name = str(topic_name or "").strip()
@@ -575,6 +582,7 @@ class TopicAppService:
             EVENT_TOPIC_RANK_UPDATED,
             {
                 "topic_count": len(updated_topics),
+                "topics": list(updated_topics),
                 "top_n": int(top_n),
                 "cache_limit": int(cache_limit),
                 "start_time": int(resolved_start_time),
@@ -646,6 +654,31 @@ class TopicAppService:
             self.common_thread_pool.submit(self.recommend_and_cache_topics)
             return Result.failure_result("没有找到热门话题，系统正在重新计算")
 
+    def get_topics_by_composite_keys(self, keys: List[tuple[int, int]]) -> Result:
+        if not keys:
+            return Result.success_result([])
+            
+        # 1. Try cache
+        cached = self.topic_cache_manager.get_topic_by_composite_keys(keys)
+        results = { (int(item.created_at), int(item.id)): item for item in cached }
+        
+        missing_keys = [k for k in keys if k not in results]
+        
+        # 2. Try DB for missing
+        if missing_keys:
+            for created_at, topic_id in missing_keys:
+                topic = self.topic_domain_service.get_topic_timeline_and_latest(created_at, topic_id, history_limit=1)
+                if topic:
+                    results[(int(topic[0].created_at), int(topic[0].id))] = topic[0]
+        
+        # Keep original order
+        final_list = []
+        for key in keys:
+            if key in results:
+                final_list.append(results[key])
+                
+        return Result.success_result(final_list)
+
     @staticmethod
     def _is_blank_text(value: Optional[str]) -> bool:
         return not str(value or "").strip()
@@ -674,7 +707,7 @@ class TopicAppService:
         titles = self._extract_topic_titles(topic)
         if not titles:
             return ""
-        return str(self.llm_title_analyzer.summarize_topic_title(topic.topic, titles) or "").strip()
+        return str(self.llm_title_analyzer.summarize_topic_title(topic.topic, titles, topic=topic) or "").strip()
 
     def backfill_missing_llm_titles(self, limit: int = 50) -> Dict[str, Any]:
         if self.llm_title_analyzer is None:

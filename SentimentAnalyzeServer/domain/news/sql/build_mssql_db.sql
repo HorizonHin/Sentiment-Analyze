@@ -104,6 +104,12 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_news_date_last' AND o
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ux_news_source_title' AND object_id = OBJECT_ID('NewsItem'))
     CREATE UNIQUE INDEX ux_news_source_title ON NewsItem(source_id, title) ON [PRIMARY];
 
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_news_url' AND object_id = OBJECT_ID('NewsItem'))
+    CREATE INDEX idx_news_url ON NewsItem(url);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ux_news_url' AND object_id = OBJECT_ID('NewsItem'))
+    CREATE UNIQUE INDEX ux_news_url ON NewsItem(url) WHERE url IS NOT NULL AND url <> '' ON [PRIMARY];
+
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_news_source' AND object_id = OBJECT_ID('NewsItem'))
     CREATE INDEX idx_news_source ON NewsItem(source_id);
 
