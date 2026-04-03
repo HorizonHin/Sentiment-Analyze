@@ -304,7 +304,7 @@ class DataFetcher:
             await page.goto(search_url, wait_until="load", timeout=20000)
             
             # 2. 定位首条搜索结果链接
-            link_selector = 'div[class*="title_1WDM0"] a, div[class*="result"] h3 a, a.c-showurl'
+            link_selector = 'div[class*="title_1WDM0"] a'
             first_link_handle = await page.query_selector(link_selector)
             
             if not first_link_handle:
@@ -422,6 +422,7 @@ class DataFetcher:
                 await context.close()
         return comments
 
+    # 监听response的方式比直接在页面上定位评论元素更稳定
     async def crawl_bilibili_comments_optimized(self, title: str, url: str) -> List[str]:
         comments: List[str] = []
         video_urls: List[str] = []
@@ -522,6 +523,7 @@ class DataFetcher:
                 await browser_client.release_page(page)
         return comments
 
+    # 监听response
     async def crawl_douyin_comments(self, title: str, url: str) -> List[str]:
         comments: List[str] = []
         page = None
@@ -583,6 +585,7 @@ class DataFetcher:
                 await browser_client.release_page(page)
         return comments[: self.max_comments]
     
+    # 监听response
     async def crawl_toutiao_comments(self, title: str, url: str) -> List[str]:
         comments: List[str] = []
         page = None
@@ -634,6 +637,7 @@ class DataFetcher:
                 await browser_client.release_page(page)
         return comments[: self.max_comments]
 
+    # 监听response
     # 贴吧的反爬机制较强，虽然流程正确，但是经常被验证码拦住，停用
     async def crawl_tieba_comments(self, title: str, url: str) -> List[str]:
         comments: List[str] = []
@@ -648,7 +652,7 @@ class DataFetcher:
                         "tieba.baidu.com/hottopic/browse/getTopicRelateThread" in response.url
                         and response.status == 200
                     ),
-                    timeout=8 * 1000,
+                    timeout=15 * 1000,
                 ) as response_info:
                     await page.goto(url, wait_until="domcontentloaded", timeout=12 * 1000)
 
@@ -680,10 +684,8 @@ class DataFetcher:
                             if len(comments) >= self.max_comments:
                                 return comments[: self.max_comments]
             except TimeoutError:
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=3000)
-                except Exception:
-                    pass
+                logger.warning(f"Playwright 获取贴吧评论超时: {title}")
+                pass
 
             if not comments:
                 logger.info(f"Playwright 从贴吧热议/列表页直接抓取到 0 条（{title}+预览）内容")
@@ -699,38 +701,81 @@ class DataFetcher:
                 browser_client = await self._get_browser_client()
                 await browser_client.release_page(page)
         return comments
- 
+    
+    # 直接从页面 HTML 里解析 js-initialData，绕过复杂的 DOM 定位和反爬机制。适用于知乎等平台。
     async def crawl_zhihu_comments(self, title: str, url: str) -> List[str]:
+        """从知乎页面的 js-initialData 中直接提取内容。"""
+
+        def extract_initial_data(script_text: str) -> Optional[Dict]:
+            # 直接读取 script 标签里的 JSON 内容，避免解析整页 HTML。
+            payload = (script_text or "").strip()
+            if not payload:
+                return None
+
+            try:
+                data = json.loads(payload)
+                return data if isinstance(data, dict) else None
+            except Exception as e:
+                logger.warning(f"解析知乎 js-initialData 失败: {e}")
+                return None
+
+        def append_html_field(comments_list: List[str], html_text: str) -> bool:
+            # 先把 HTML 标签清掉，再走统一的去重和长度控制。
+            if not html_text:
+                return len(comments_list) >= self.max_comments
+
+            text = BeautifulSoup(str(html_text), "html.parser").get_text(" ", strip=True)
+            text = re.sub(r"\s+", " ", text).strip()
+            if not text or text == "阅读全文":
+                return len(comments_list) >= self.max_comments
+            return self._append_comment(comments_list, text)
+
+        def collect_comments(data: Dict) -> List[str]:
+            # 优先抓热评，再补回答正文，尽量覆盖页面里最有信息量的内容。
+            collected: List[str] = []
+            entities = (data or {}).get("initialState", {}).get("entities", {})
+            answers = entities.get("answers", {}) if isinstance(entities, dict) else {}
+            if not isinstance(answers, dict):
+                return collected
+
+            for answer in answers.values():
+                if not isinstance(answer, dict):
+                    continue
+
+                hot_comments = answer.get("hotComment", [])
+                if isinstance(hot_comments, list):
+                    for item in hot_comments:
+                        if not isinstance(item, dict):
+                            continue
+                        if append_html_field(collected, item.get("content", "")):
+                            return collected[: self.max_comments]
+
+                if append_html_field(collected, answer.get("content", "")):
+                    return collected[: self.max_comments]
+
+            return collected[: self.max_comments]
+
         comments: List[str] = []
         page = None
         try:
             browser_client = await self._get_browser_client()
             page = await browser_client.acquire_page()
             await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-            await page.screenshot(path="screenshots/zhihu_debug_page_loaded.png")
 
-            rich_contents = page.locator(".RichContent-inner")
+            # 先等目标 script 出现，再直接读取它的文本内容。
+            script_locator = page.locator('script#js-initialData[type="text/json"]').first
             try:
-                await rich_contents.first.wait_for(state="visible", timeout=10000)
+                await script_locator.wait_for(state="attached", timeout=10000)
             except Exception:
                 pass
 
-            content_count = await rich_contents.count()
-            for index in range(content_count):
-                block = rich_contents.nth(index)
-                text = (await block.text_content() or "").strip()
-                if not text:
-                    continue
-
-                text = re.sub(r"\s+", " ", text).strip()
-                if text == "阅读全文":
-                    continue
-
-                if self._append_comment(comments, text):
-                    return comments[: self.max_comments]
+            script_text = await script_locator.text_content()
+            initial_data = extract_initial_data(script_text or "")
+            if initial_data:
+                comments = collect_comments(initial_data)
 
             if not comments:
-                logger.info(f"Playwright 从知乎链接 '{url}' 直接抓取到 0 条内容")
+                logger.info(f"Playwright 从知乎链接 '{url}' 的 js-initialData 中抓取到 0 条内容")
         except Exception as e:
             try:
                 if page:
@@ -742,8 +787,8 @@ class DataFetcher:
             if page:
                 browser_client = await self._get_browser_client()
                 await browser_client.release_page(page)
-        return comments
-        
+        return comments[: self.max_comments]
+
     async def crawl_thepaper_comments(self, title: str, url: str) -> List[str]:
         """爬取澎湃新闻评论。"""
         comments: List[str] = []
@@ -888,7 +933,7 @@ class DataFetcher:
         comments: List[str] = []
         try:
             # 随机等待，降低请求频率
-            await asyncio.sleep(random.uniform(1.0, 2.5))
+            await asyncio.sleep(random.uniform(2.0, 3.5))
 
             article_id = None
             # 示例: https://view.inews.qq.com/a/20260402A00UY000
