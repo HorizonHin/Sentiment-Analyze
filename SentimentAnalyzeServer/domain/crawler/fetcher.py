@@ -984,27 +984,43 @@ class DataFetcher:
         """爬取澎湃新闻评论。通过 Playwright 访问页面并提取 API 响应数据。"""
         comments: List[str] = []
         page = None
+        found_data = asyncio.get_running_loop().create_future()
+
+        async def handle_response(response):
+            api_url_fragment = "comment/news/comment/talkList"
+            if api_url_fragment in response.url and response.status == 200:
+                try:
+                    payload_text = await response.text()
+                    data = json.loads(payload_text) if payload_text.strip() else {}
+                    items = data.get("data", {}).get("list", [])
+                    for item in items:
+                        text = str(item.get("content", "")).strip()
+                        if text:
+                            self._append_comment(comments, text)
+                    if not found_data.done():
+                        found_data.set_result(True)
+                except Exception as e:
+                    logger.warning(f"解析澎湃评论响应失败: {e}")
+
         try:
             browser_client = await self._get_browser_client()
             page = await browser_client.acquire_page()
+            page.on("response", handle_response)
 
-            api_url_fragment = "comment/news/comment/talkList"
-            # 澎湃的评论是异步加载的，我们监听包含 talkList 的请求
-            async with page.expect_response(
-                lambda response: api_url_fragment in response.url and response.status == 200,
-                timeout=10 * 1000
-            ) as response_info:
-                await page.goto(url, wait_until="domcontentloaded", timeout=15 * 1000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=15 * 1000)
 
-            response = await response_info.value
-            payload_text = await response.text()
-            data = json.loads(payload_text) if payload_text.strip() else {}
-            items = data.get("data", {}).get("list", [])
+            # 模拟滑动以触发异步评论加载
+            await self._random_scroll_page(
+                page,
+                min_scrolls=2,
+                max_scrolls=5,
+                stop_condition=lambda: found_data.done()
+            )
 
-            for item in items:
-                text = str(item.get("content", "")).strip()
-                if text and self._append_comment(comments, text):
-                    return comments[: self.max_comments]
+            try:
+                await asyncio.wait_for(found_data, timeout=10.0)
+            except asyncio.TimeoutError:
+                pass
 
             if not comments:
                 logger.info(f"Playwright 为澎湃标题 '{title}' 抓取到 0 条评论")
@@ -1017,6 +1033,7 @@ class DataFetcher:
             logger.warning(f"crawl_thepaper_comments 整体失败: {e}")
         finally:
             if page:
+                page.remove_listener("response", handle_response)
                 browser_client = await self._get_browser_client()
                 await browser_client.release_page(page)
         return comments[: self.max_comments]
