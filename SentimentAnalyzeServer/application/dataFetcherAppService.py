@@ -82,8 +82,8 @@ class DataFetcherAppService:
             if comments:
                 item.comments = list(comments)
 
-    def _run_comment_fetch_task(self, incoming_items: List[NewsItem]) -> None:
-        """执行评论抓取主任务（使用线程池并发，每3个平台分一组）。"""
+    async def _run_comment_fetch_task(self, incoming_items: List[NewsItem]) -> None:
+        """执行评论抓取主任务（纯协程实现，平台间并发，平台内串行）。"""
         if not incoming_items:
             return
 
@@ -92,53 +92,31 @@ class DataFetcherAppService:
         for item in incoming_items:
             platform_groups.setdefault(item.source_id, []).append(item)
 
-        # 2. 将平台分组切片，每 3 个平台一组任务
-        platforms = list(platform_groups.keys())
-        chunks = [
-            platforms[i : i + self._platforms_per_worker]
-            for i in range(0, len(platforms), self._platforms_per_worker)
-        ]
-
-        def _worker_process_chunk(p_ids: List[str]):
-            """线程执行：管理本线程的 EventLoop 和 3 个平台的抓取。"""
-            async def fetch_item_comments(item: NewsItem):
-                try:
-                    fetch_url = item.url or item.mobile_url
-                    if not fetch_url:
-                        return
-                    comments = await self.fetcher.crawl_comments_dispatch(item.source_id, item.title, fetch_url)
-                    if comments:
-                        item.comments = comments
-                except Exception as e:
-                    logger.warning(f"Worker抓取评论失败 {item.source_id} - {item.title}: {e}")
-
-            async def fetch_platform_group(items: List[NewsItem]):
-                # 平台内串行：Semaphore(1)
-                semaphore = asyncio.Semaphore(1)
-                async def semaphore_wrapper(item: NewsItem):
-                    async with semaphore:
-                        await fetch_item_comments(item)
-                await asyncio.gather(*(semaphore_wrapper(item) for item in items))
-
-            async def main_async_loop():
-                try:
-                    tasks = [fetch_platform_group(platform_groups[pid]) for pid in p_ids]
-                    await asyncio.gather(*tasks)
-                finally:
-                    # 每个线程关闭自己 loop 关联的渲染客户端
-                    await self.fetcher.close()
-
+        async def fetch_item_comments(item: NewsItem):
             try:
-                asyncio.run(main_async_loop())
+                fetch_url = item.url or item.mobile_url
+                if not fetch_url:
+                    return
+                comments = await self.fetcher.crawl_comments_dispatch(item.source_id, item.title, fetch_url)
+                if comments:
+                    item.comments = comments
             except Exception as e:
-                logger.error(f"线程池 worker 运行出错: {e}")
+                logger.warning(f"抓取评论失败 {item.source_id} - {item.title}: {e}")
 
-        # 3. 提交到线程池并同步等待所有完成
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=self._comment_worker_count) as executor:
-            executor.map(_worker_process_chunk, chunks)
+        async def fetch_platform_group(items: List[NewsItem]):
+            # 平台内串行：同一时刻一个平台只抓取一个
+            for item in items:
+                await fetch_item_comments(item)
 
-    def _fetch_comments_by_platform(self, incoming_items: List[NewsItem]) -> None:
+        try:
+            # 2. 平台之间全并发
+            tasks = [fetch_platform_group(items) for items in platform_groups.values()]
+            await asyncio.gather(*tasks)
+        finally:
+            # 任务结束后关闭渲染客户端
+            await self.fetcher.close()
+
+    async def _fetch_comments_by_platform(self, incoming_items: List[NewsItem]) -> None:
         """
         按照平台(source_id)分配并发任务，每个平台内的抓取任务在各自的协程中运行。
         平台之间全并发；同一平台同一时间只执行一个抓取任务。
@@ -146,7 +124,7 @@ class DataFetcherAppService:
         if not incoming_items:
             return
 
-        self._run_comment_fetch_task(incoming_items)
+        await self._run_comment_fetch_task(incoming_items)
 
     def _convert_crawl_results_to_news_data(
         self,
@@ -283,7 +261,9 @@ class DataFetcherAppService:
         prioritized_items = sorted(incoming_items, key=_comment_priority)
 
         # 3. 执行评论抓取（不修改 NewsItem 结构，只按顺序调度）
-        self._fetch_comments_by_platform(prioritized_items)
+        async def run_fetch():
+            await self._fetch_comments_by_platform(prioritized_items)
+        asyncio.run(run_fetch())
             
         new_items_by_source: Dict[str, List[NewsItem]] = {}
         merged_items: List[NewsItem] = []
