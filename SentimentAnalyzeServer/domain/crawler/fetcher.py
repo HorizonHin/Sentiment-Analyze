@@ -279,7 +279,7 @@ class DataFetcher:
         if "baidu" in platform_key:
             comments = await self.crawl_baidu_comments_opyimized(title, url)
         elif "weibo" in platform_key:
-            comments = await self.crawl_weibo_comments(title)
+            comments = await self.crawl_weibo_comments(title, url)
         elif "bilibili" in platform_key:
             comments = await self.crawl_bilibili_comments_optimized(title, url)  
         elif "douyin" in platform_key:
@@ -374,7 +374,7 @@ class DataFetcher:
         return comments
        
     # 反爬虫机制较强的平台，完全使用 Playwright。
-    async def crawl_weibo_comments(self, title: str) -> List[str]:
+    async def crawl_weibo_comments(self, title: str, url: str) -> List[str]:
         comments: List[str] = []
         context = None
         page = None
@@ -394,62 +394,80 @@ class DataFetcher:
             context = await browser_client.new_isolated_context(user_agent=mobile_ua)
             await context.set_extra_http_headers(browser_client.get_headers("crawl_weibo_comments"))
             page = await context.new_page()
+            search_url = url
+            # 创建一个 Future 对象用于控制任务状态
+            crawl_future = asyncio.get_running_loop().create_future()
 
-            await page.goto("https://m.weibo.cn", wait_until="domcontentloaded", timeout=15000)
-            search_type = 60
-            search_url = (
-                "https://m.weibo.cn/api/container/getIndex?containerid=100103type="
-                f"{search_type}&q={requests.utils.quote(title)}&page_type=searchall"
-            )
-            await page.goto(search_url, wait_until="domcontentloaded", timeout=10000)
+            # 使用事件监听拦截 API 响应
+            async def handle_response(response):
+                # 如果已经完成（无论是成功还是超时），不再处理
+                if crawl_future.done():
+                    return
+                    
+                if "api/container/getIndex" in response.url:
+                    try:
+                        text = await response.text()
+                        if not text.strip().startswith("{"):
+                            return
+                        data = json.loads(text)
+                        cards = data.get("data", {}).get("cards", [])
+                        for card in cards:
+                            # 核心逻辑：直接从 card_type 9 的内容中提取微博正文作为“评论”
+                            if card.get("card_type") == 9 and card.get("mblog"):
+                                mblog = card.get("mblog", {})
+                                raw_text = mblog.get("text", "")
+                                # 清洗 HTML 标签
+                                clean_text = re.sub(r"<[^>]+>", "", raw_text).strip()
+                                if clean_text and clean_text not in comments:
+                                    comments.append(clean_text)
+                        
+                        # 如果拿到了足够的评论，标记 Future 为成功
+                        if len(comments) >= self.max_comments:
+                            if not crawl_future.done():
+                                crawl_future.set_result(True)
+                                
+                    except Exception as e:
+                        logger.warning(f"解析响应出错: {e}")
 
-            json_text = await page.evaluate("() => document.body.innerText")
-            search_data = json.loads(json_text)
-
-            cards = search_data.get("data", {}).get("cards", [])
-            mid_list = []
-            for card in cards:
-                if card.get("card_type") == 11:
-                    for item in card.get("card_group", []):
-                        if item.get("mblog"):
-                            mid_list.append(item.get("mblog", {}).get("id"))
-                elif card.get("card_type") == 9 and card.get("mblog"):
-                    mid_list.append(card.get("mblog", {}).get("id"))
-                if len(mid_list) >= self.max_comments:
-                    break
-
-            if not mid_list:
-                logger.warning(f"未找到任何微博 mid: {title}")
-                return []
-
-            for mid in mid_list:
+            page.on("response", handle_response)
+            
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=15*1000)
+            
+            # 启动一个异步任务来循环滑动页面
+            async def scroll_task():
                 try:
-                    comments_url = f"https://m.weibo.cn/comments/hotflow?id={mid}&mid={mid}&max_id_type=0"
-                    await page.goto(comments_url, wait_until="networkidle", timeout=10000)
-                    comments_json_text = await page.evaluate("() => document.body.innerText")
-                    if not comments_json_text or not comments_json_text.strip().startswith("{"):
-                        continue
-
-                    comments_data = json.loads(comments_json_text)
-                    raw_comments = comments_data.get("data", {}).get("data", [])
-                    for c in raw_comments:
-                        text = c.get("text", "")
-                        clean_text = re.sub(r"<[^>]+>", "", text).strip()
-                        if self._append_comment(comments, clean_text):
+                    max_scroll_attempts = 6
+                    for i in range(max_scroll_attempts):
+                        if crawl_future.done():
                             break
-                    if len(comments) >= self.max_comments:
-                        break
-                    await asyncio.sleep(random.uniform(1.5, 3.0))  # 每条评论间随机等待，模拟人类行为
-                except Exception as loop_e:
-                    logger.warning(f"获取 mid={mid} 的评论时出错: {loop_e}")
-                    continue
+                        # 滚动到底部
+                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        # 等待数据加载
+                        await asyncio.sleep(random.uniform(0.5, 2.0))
+             
+                    # 如果循环结束还没满足数量，但也拿到了数据，也算某种程度的成功
+                    if not crawl_future.done():
+                        crawl_future.set_result(True)
+                except Exception as e:
+                    if not crawl_future.done():
+                        crawl_future.set_exception(e)
+
+            # 将滑动任务跑在后台
+            scroller = asyncio.create_task(scroll_task())
+            
+            try:
+                # 等待 Future 完成，设置总超时时间
+                await asyncio.wait_for(crawl_future, timeout=15.0)
+            except (asyncio.TimeoutError, TimeoutError):
+                logger.warning(f"微博爬取任务超时，当前收集到 {len(comments)} 条内容")
 
             if not comments:
-                logger.info(f"Playwright 为标题 '{title}' 抓取到 0 条微博评论")
+                logger.info(f"Playwright 为标题 '{title}' 抓取到 0 条微博内容")
         except Exception as e:
             logger.warning(f"crawl_weibo_comments 整体失败: {e}")
-            return []
         finally:
+            if scroller and not scroller.done():
+                scroller.cancel()
             if page:
                 await page.close()
             if context:

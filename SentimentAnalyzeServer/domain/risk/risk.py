@@ -126,7 +126,9 @@ class RiskWarningDomainService:
 
     @staticmethod
     def _platform_sentiment_score(platform_stat: TopicPlatformStats) -> float:
-        sentiment = str(platform_stat.sentiment or "").strip().lower()
+        sentiment = str(platform_stat.sentiment or "").strip().lower()        
+        if sentiment in {"unknown", "neutral", "","mixed"}:
+            return 0.0        
         ratio = float(platform_stat.ratio or 0.0)
         if sentiment == "positive":
             base = 1.0
@@ -176,8 +178,8 @@ class RiskWarningDomainService:
             risk_level=self._score_to_level(score),
             risk_score=score,
             reason=(
-                f"negative_ratio={negative_ratio:.3f} >= {self.negative_ratio_threshold:.2f} "
-                f"and news_count={news_count} >= {self.negative_news_count_threshold}"
+                f"负面舆情占比过高: {negative_ratio:.1%} (阈值: {self.negative_ratio_threshold:.0%})，"
+                f"且负面新闻数量达到 {news_count} 篇 (起征点: {self.negative_news_count_threshold})"
             ),
             metrics={
                 "negative_ratio": negative_ratio,
@@ -199,6 +201,10 @@ class RiskWarningDomainService:
 
         score = int(min(100, 50 + (heat_change_percent - self.burst_heat_change_threshold) * 0.8 + (10 if stage == "Climax" else 0)))
         topic_created_at, topic_id = self._safe_topic_keys(topic)
+        
+        stage_map = {"Growth": "爆发增长期", "Climax": "高潮平稳期"}
+        cn_stage = stage_map.get(stage, stage)
+
         return TopicRiskWarning(
             topic_created_at=topic_created_at,
             topic_id=topic_id,
@@ -207,8 +213,8 @@ class RiskWarningDomainService:
             risk_level=self._score_to_level(score),
             risk_score=score,
             reason=(
-                f"heat_change_percent={heat_change_percent:.2f} >= {self.burst_heat_change_threshold:.2f} "
-                f"and stage={stage}"
+                f"话题热度异常爆发: 增长率 {heat_change_percent:.1f}% (阈值: {self.burst_heat_change_threshold:.1f}%)，"
+                f"当前处于话题周期的 {cn_stage}"
             ),
             metrics={
                 "heat_change_percent": heat_change_percent,
@@ -241,11 +247,16 @@ class RiskWarningDomainService:
             return None
 
         score_values = [float(item["score"]) for item in platform_scores]
-        max_score = max(score_values)
-        min_score = min(score_values)
+        # 过滤掉分值为 0 的项（对应 sentiment 为 unknown 的平台）
+        valid_scores = [v for v in score_values if v != 0.0]
+        if len(valid_scores) < 2:
+            return None
+
+        max_score = max(valid_scores)
+        min_score = min(valid_scores)
         gap = max_score - min_score
-        has_positive = any(value > 0.2 for value in score_values)
-        has_negative = any(value < -0.2 for value in score_values)
+        has_positive = any(value > 0.2 for value in valid_scores)
+        has_negative = any(value < -0.2 for value in valid_scores)
         polarity_conflict = has_positive and has_negative
 
         if gap < self.cross_platform_gap_threshold or not polarity_conflict:
@@ -261,8 +272,8 @@ class RiskWarningDomainService:
             risk_level=self._score_to_level(score),
             risk_score=score,
             reason=(
-                f"platform_sentiment_gap={gap:.3f} >= {self.cross_platform_gap_threshold:.2f} "
-                f"and polarity_conflict={polarity_conflict}"
+                f"跨平台舆情存在巨大差异: 情感分差值 {gap:.3f} (阈值: {self.cross_platform_gap_threshold:.2f})，"
+                f"且各平台之间存在明显的极性对立 (正负并存)"
             ),
             metrics={
                 "platform_sentiment_gap": gap,
@@ -327,7 +338,14 @@ class RiskWarningDomainService:
         if isinstance(candidate_titles_raw, list):
             candidate_titles = [str(item).strip() for item in candidate_titles_raw if str(item).strip()]
 
-        reason = str(payload.get("reason", "data_inspection_failed") or "data_inspection_failed")
+        reason_raw = str(payload.get("reason", "data_inspection_failed") or "data_inspection_failed")
+        reason_map = {
+            "data_inspection_failed": "由于合规性检查（敏感词或道德策略）未通过，LLM 输出内容被拦截",
+            "content_filter_blocked": "LLM 触发内容安全过滤机制",
+            "audit_failed": "人工/自动审计未通过"
+        }
+        reason = reason_map.get(reason_raw, f"安全策略拦截: {reason_raw}")
+
         occurred_at = self._to_int(payload.get("occurred_at"), now_timestamp())
         record = SensitiveTitleRecord(
             topic_created_at=topic_created_at,

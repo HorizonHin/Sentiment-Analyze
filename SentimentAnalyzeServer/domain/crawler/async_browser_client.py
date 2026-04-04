@@ -10,6 +10,7 @@ import logging
 import threading
 from typing import Dict, Optional
 
+
 from SentimentAnalyzeServer.domain.crawler.stealth_config import create_stealth_browser
 
 logger = logging.getLogger(__name__)

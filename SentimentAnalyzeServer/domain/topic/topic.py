@@ -422,7 +422,7 @@ class TopicDomainService:
 				platform_volumes[platform] += item.total_weigh
 				
 				# 按情感极性累加权重
-				sentiment = item.sentiment_polarity or "neutral"
+				sentiment = item.sentiment_polarity or "unknown"
 				if sentiment not in platform_data[platform]:
 					platform_data[platform][sentiment] = 0.0
 				platform_data[platform][sentiment] += item.total_weigh
@@ -434,7 +434,7 @@ class TopicDomainService:
 		
 		for platform, sentiments in platform_data.items():
 			# 找出该平台权重最大的情感极性
-			max_sentiment = max(sentiments.items(), key=lambda x: x[1])[0] if sentiments else "neutral"
+			max_sentiment = max(sentiments.items(), key=lambda x: x[1])[0] if sentiments else "unknown"
 			max_weight = sentiments.get(max_sentiment, 0.0)
 			
 			# 计算该平台在所有情感中的占比
@@ -449,7 +449,7 @@ class TopicDomainService:
 			)
 			result_distribution.append(topic_platform_stats)
 
-			sentiment_key = (max_sentiment or "").strip() or "neutral"
+			sentiment_key = (max_sentiment or "").strip() or "unknown"
 			topic_sentiment_scores[sentiment_key] = topic_sentiment_scores.get(sentiment_key, 0.0) + (
 				float(platform_volumes[platform]) * ratio
 			)
