@@ -310,10 +310,15 @@ class DataFetcher:
 
         # 2. 检查内存中的连续失败计数
         if self._consecutive_empty_counts.get(platform_key, 0) >= self._circuit_break_threshold:
-            logger.warning(f"内存熔断机制触发：平台 {source_id} 最近连续 {self._consecutive_empty_counts[platform_key]} 次未抓取到评论，本次跳过执行。")
-            # 强化：同时设置 Redis 标记
-            self._redis.set(redis_circuit_key, True, ttl_seconds=180)
-            return []
+            # 只有当 Redis 锁还在时，才真正熔断本次执行
+            if self._redis.get(redis_circuit_key):
+                logger.warning(f"熔断保护：平台 {source_id} 处于 3 分钟冷却期内，跳过执行。")
+                return []
+            else:
+                # 如果 Redis 锁已过期（说明是跨任务的陈旧残留），则重置计数并允许执行
+                # 这样可以保证新一轮定时任务开始时，能够重新尝试，而不是直接判定为熔断
+                logger.info(f"检测到平台 {source_id} 的陈旧熔断计数，且冷却期已过，重置计数并尝试爬取。")
+                self._consecutive_empty_counts[platform_key] = 0
         
         comments = []
         if "baidu" in platform_key:
@@ -385,21 +390,56 @@ class DataFetcher:
             
             if href.startswith("/s?"):
                 href = f"https://www.baidu.com{href}"
-
+            page.on("response", handle_response)   
             # 3. 跳转到详细页
-            await page.goto(href, wait_until="domcontentloaded", timeout=10000)
+            await page.goto(href, wait_until="domcontentloaded", timeout=13*1000)
+            def parse_baidu_jsonp(text: str) -> dict:
+                try:
+                    # 匹配 JSONP 回调的内容：callback_name({...})
+                    match = re.search(r'^[^(]+\((.*)\)$', text.strip(), re.S)
+                    if match:
+                        return json.loads(match.group(1))
+                    return json.loads(text)
+                except:
+                    return {}
+            found_comments = asyncio.get_running_loop().create_future()
+            async def handle_response(response):
+                if "/api/comment/v2/comment/list" in response.url and response.status == 200:
+                    try:
+                        text = await response.text()
+                        data = parse_baidu_jsonp(text)
+                        items = data.get("ret", {}).get("list", [])
+                        for item in items:
+                            # 抓取层级1评论
+                            content = item.get("content")
+                            if content:
+                                self._append_comment(comments, content)
+                            
+                            # 抓取回复列表
+                            reply_list = item.get("reply_list", [])
+                            for reply in reply_list:
+                                r_content = reply.get("content")
+                                if r_content:
+                                    self._append_comment(comments, r_content)
+                                    
+                        if comments and not found_comments.done():
+                            found_comments.set_result(True)
+                    except Exception as e:
+                        logger.warning(f"解析百度评论接口失败: {e}")
+            # 定向滚动以触发更多接口加载
+            await self._random_scroll_page(
+                page, 
+                min_scrolls=3, max_scrolls=6, 
+                min_step=400, max_step=800,
+                min_delay=0.5, max_delay=1.2,
+                stop_condition=lambda: found_comments.done() or len(comments) >= self.max_comments
+            )
 
-            comment_selector = 'span[class*="type-text"]'
-            await page.wait_for_selector(comment_selector, timeout=10000)
-            comment_elements = await page.query_selector_all(comment_selector)
-            for el in comment_elements:
-                text = (await el.inner_text()).strip()
-                if text:
-                    if self._append_comment(comments, text):
-                        return comments[: self.max_comments]
-                if len(comments) >= self.max_comments:
-                    break
-
+            try:
+                if not found_comments.done():
+                    await asyncio.wait_for(found_comments, timeout=5.0)
+            except:
+                pass
             if not comments:
                 logger.info(f"Playwright 为标题 '{title}' 抓取到 0 条百度评论")
         except Exception as e:
@@ -412,9 +452,13 @@ class DataFetcher:
             return []
         finally:
             if page:
+                try:
+                    page.remove_listener("response", handle_response)
+                except:
+                    pass
                 browser_client = await self._get_browser_client()
                 await browser_client.release_page(page)
-        return comments
+        return comments[: self.max_comments]
        
     # 反爬虫机制较强的平台，完全使用 Playwright。
     async def crawl_weibo_comments(self, title: str, url: str) -> List[str]:
@@ -930,50 +974,26 @@ class DataFetcher:
                 await browser_client.release_page(page)
         return comments[: self.max_comments]
 
-    # 直接调用澎湃的评论 API，绕过页面复杂的反爬机制。适用于澎湃等平台。
+    # 监听澎湃新闻的评论 API 响应。
     async def crawl_thepaper_comments(self, title: str, url: str) -> List[str]:
-        """爬取澎湃新闻评论。"""
+        """爬取澎湃新闻评论。通过 Playwright 访问页面并提取 API 响应数据。"""
         comments: List[str] = []
-        cont_id = None
-
+        page = None
         try:
-            # 示例: https://www.thepaper.cn/newsDetail_forward_32870834
-            match = re.search(r"newsDetail_forward_(\d+)", url or "")
-            if match:
-                cont_id = match.group(1)
-                # 兜底：尝试从 URL 中提取连续数字
-                fallback = re.search(r"(\d{6,})", url or "")
-                if fallback:
-                    cont_id = fallback.group(1)
+            browser_client = await self._get_browser_client()
+            page = await browser_client.acquire_page()
 
-            if not cont_id:
-                logger.warning(f"无法从澎湃链接提取 contId: {url}")
-                return []
+            api_url_fragment = "comment/news/comment/talkList"
+            # 澎湃的评论是异步加载的，我们监听包含 talkList 的请求
+            async with page.expect_response(
+                lambda response: api_url_fragment in response.url and response.status == 200,
+                timeout=10 * 1000
+            ) as response_info:
+                await page.goto(url, wait_until="domcontentloaded", timeout=15 * 1000)
 
-            api_url = "https://api.thepaper.cn/comment/news/comment/talkList"
-            proxies = {"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None
-
-            payload = {
-                "contId": str(cont_id),
-                "commentSort": 1,
-                "contType": 1,
-            }
-            await asyncio.sleep(random.uniform(1.5, 3.0))  # 随机等待，降低请求频率
-            # 使用 loop.run_in_executor 包装同步的 requests 调用，避免阻塞协程
-            loop = asyncio.get_event_loop()
-            def fetch_page():
-                return requests.post(
-                    api_url,
-                    json=payload,
-                    headers=self.DEFAULT_HEADERS,
-                    proxies=proxies,
-                    timeout=15,
-                )
-            
-            resp = await loop.run_in_executor(None, fetch_page)
-            resp.raise_for_status()
-
-            data = resp.json() if resp.text else {}
+            response = await response_info.value
+            payload_text = await response.text()
+            data = json.loads(payload_text) if payload_text.strip() else {}
             items = data.get("data", {}).get("list", [])
 
             for item in items:
@@ -982,11 +1002,19 @@ class DataFetcher:
                     return comments[: self.max_comments]
 
             if not comments:
-                logger.info(f"为澎湃标题 '{title}' 抓取到 0 条评论")
-            return comments
+                logger.info(f"Playwright 为澎湃标题 '{title}' 抓取到 0 条评论")
         except Exception as e:
+            try:
+                if page:
+                    await page.screenshot(path=f"screenshots/thepaper_fatal_{int(time.time())}.png")
+            except Exception:
+                pass
             logger.warning(f"crawl_thepaper_comments 整体失败: {e}")
-            return []
+        finally:
+            if page:
+                browser_client = await self._get_browser_client()
+                await browser_client.release_page(page)
+        return comments[: self.max_comments]
         
     async def crawl_hupu_comments(self, title: str, url: str) -> List[str]:
         """爬取虎扑体育社区评论。"""
