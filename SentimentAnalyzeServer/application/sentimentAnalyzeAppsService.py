@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
@@ -11,6 +12,7 @@ from SentimentAnalyzeServer.system.infra import (
 	REDIS_KEY_LATEST_NOT_NEED_ANALYSIS_NEWS,
 	REDIS_KEY_RECENT_30M_ANALYZED_NEWS,
 	CommonThreadPool,
+	QueueBatchManager,
 	EventManager,
 	MyRedis,
 )
@@ -44,6 +46,9 @@ class SentimentAnalyzeAppService:
 		self.batch_save_size = 20
 		self.executor_service = LLMExecutorService(max_workers=max_workers)
 		self.max_analysis_workers = max_analysis_workers
+		
+		# 初始化生产者消费者模型（用于落库）
+		self._db_batch_manager: Optional[QueueBatchManager] = None
 
 	def _serialize_news_items(self, items: List[NewsItem]) -> List[Dict[str, Any]]:
 		return [item.to_dict() for item in items]
@@ -162,25 +167,36 @@ class SentimentAnalyzeAppService:
 				# 使用信号量控制协程并发数
 				sem = asyncio.Semaphore(self.max_analysis_workers)
 				
+				# 生产者-消费者：用于收集已成功保存的数据以供后续事件通知
+				updated_items_lock = threading.Lock()
+				
+				def consume_db_batch(batch: List[NewsItem]):
+					if self._save_batch_with_retry(batch):
+						with updated_items_lock:
+							updated_items.extend(batch)
+
+				# 初始化批处理器
+				self._db_batch_manager = self.common_thread_pool.create_queue_batch_manager(
+					batch_size=self.batch_save_size,
+					consume_batch=consume_db_batch
+				)
+				
 				async def analyze_task(item: NewsItem):
 					async with sem:
 						# _analyze_with_retry 会直接修改传入的 item 对象
 						result_item = await self._analyze_with_retry(item)
+						if result_item:
+							# 生产并入队
+							self._db_batch_manager.put(result_item)
 						return result_item
 
 				# 创建所有分析任务并并发执行
 				tasks = [analyze_task(item) for item in pending_items]
-				results = await asyncio.gather(*tasks)
+				await asyncio.gather(*tasks)
 				
-				# 过滤掉分析失败的项
-				analyzed_results = [r for r in results if r is not None]
-				
-				if analyzed_results:
-					# 批量保存到数据库
-					for i in range(0, len(analyzed_results), self.batch_save_size):
-						batch = analyzed_results[i : i + self.batch_save_size]
-						if self._save_batch_with_retry(batch):
-							updated_items.extend(batch)
+				# 关闭队列并等待所有入库任务完成
+				self._db_batch_manager.close_and_wait()
+				self._db_batch_manager = None
 				
 				if not updated_items:
 					logger.warning(
