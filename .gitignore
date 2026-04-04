@@ -11,3 +11,5 @@ SentimentAnalyzeServer/system/last_scheduler_run.txt
 SentimentAnalyzeServer/system/logs/root_app.log
 SentimentAnalyzeServer/domain/crawler/fetcher.py
 screenshots/*
+SentimentAnalyzeServer/system/daily_reports/*
+SentimentAnalyzeServer/system/last_report_run.txt

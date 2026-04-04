@@ -302,8 +302,8 @@ class LLMTitleAnalyzer:
                         "role": "user",
                         "content": (
                             "请分析以下新闻标题及公众评论并输出 json。"
-                            "其中 entities 和 keywords 各只保留最具代表性的 3-5 项。"
-                            "仅输出 json，不要输出任何解释。"
+                            "其中 entities 仅保留最具代表性的 3-5 项，keywords 保留 5-7 项。"
+                            "仅输出 json，不要输出 any 解释。"
                             f"\n新闻标题：{title}"
                             f"\n公众评论：\n{comments_text}"
                         ),

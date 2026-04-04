@@ -13,6 +13,7 @@ from flask import Blueprint, jsonify, request
 from SentimentAnalyzeServer.application.common import Result
 from SentimentAnalyzeServer.application.sentimentAnalyzeAppsService import SentimentAnalyzeAppService
 from SentimentAnalyzeServer.application.topicAppService import TopicAppService
+from SentimentAnalyzeServer.application.reportAppService import ReportAppService
 from SentimentAnalyzeServer.system.datetime_utils import parse_int_timestamp
 
 
@@ -24,6 +25,7 @@ def create_external_controller(
 	sentiment_app_service: SentimentAnalyzeAppService,
 	topic_app_service: TopicAppService,
     risk_warning_domain_service: Any,
+    report_app_service: ReportAppService,
 	crawl_interval_seconds: int,
 	first_time_lookback_seconds: int,
 ) -> Blueprint:
@@ -377,6 +379,31 @@ def create_external_controller(
 			return jsonify(Result.success_result(data).to_dict())
 		except Exception as exc:
 			logger.exception("Failed to execute /risk/sensitive-title-audit")
+			return jsonify(Result.failure_result(str(exc)).to_dict())
+
+	@bp.get("/report/daily")
+	def get_daily_report() -> object:
+		try:
+			date_str = request.args.get("date")
+			if not date_str:
+				return jsonify(Result.failure_result("Missing date parameter").to_dict())
+			report_data = report_app_service.get_report_by_date(date_str)
+			if not report_data:
+				return jsonify(Result.failure_result(f"Report for {date_str} not found").to_dict())
+			return jsonify(Result.success_result(report_data).to_dict())
+		except Exception as exc:
+			logger.exception("Failed to execute /report/daily")
+			return jsonify(Result.failure_result(str(exc)).to_dict())
+
+	@bp.post("/report/generate")
+	def generate_report() -> object:
+		try:
+			success, path_or_err = report_app_service.generate_and_save_daily_report()
+			if not success:
+				return jsonify(Result.failure_result(path_or_err).to_dict())
+			return jsonify(Result.success_result({"message": "Report generated", "path": path_or_err}).to_dict())
+		except Exception as exc:
+			logger.exception("Failed to execute /report/generate")
 			return jsonify(Result.failure_result(str(exc)).to_dict())
 
 

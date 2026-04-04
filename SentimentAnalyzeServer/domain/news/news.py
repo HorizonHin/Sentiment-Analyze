@@ -1287,3 +1287,29 @@ class NewsDomainService:
             first_time=first_time,
         )
 
+    def get_keywords_by_time_range(
+        self,
+        start_time: int,
+        end_time: int,
+        news_first_time: Optional[int] = None,
+    ) -> List[Keyword]:
+        """根据 start_time 和 end_time 范围查询 Keywords。"""
+        return self.storage.get_keywords_by_last_time_range(
+            start_time=start_time,
+            end_time=end_time,
+            news_first_time=news_first_time,
+        )
+
+    def get_entities_by_time_range(
+        self,
+        start_time: int,
+        end_time: int,
+        news_first_time: Optional[int] = None,
+    ) -> List[Entity]:
+        """根据 start_time 和 end_time 范围查询 Entities。"""
+        return self.storage.get_entities_by_last_time_range(
+            start_time=start_time,
+            end_time=end_time,
+            news_first_time=news_first_time,
+        )
+

@@ -315,8 +315,8 @@ class TopicDomainService:
 		if not isinstance(topic, Topic):
 			return False
 		
-		has_enough_news = topic.news_count >= 4
-		has_high_weight = topic.total_weight >= 140.0
+		has_enough_news = topic.news_count >= 3
+		has_high_weight = topic.total_weight >= 90.0
 		must = has_enough_news and has_high_weight	
 
 		return must

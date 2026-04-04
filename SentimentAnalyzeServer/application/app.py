@@ -16,6 +16,7 @@ from SentimentAnalyzeServer.application.common import Result, get_config, get_in
 from SentimentAnalyzeServer.application.dataFetcherAppService import DataFetcherAppService
 from SentimentAnalyzeServer.application.sentimentAnalyzeAppsService import SentimentAnalyzeAppService
 from SentimentAnalyzeServer.application.topicAppService import TopicAppService
+from SentimentAnalyzeServer.application.reportAppService import ReportAppService
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import NewsDomainService
 from SentimentAnalyzeServer.domain.news.sqlServerNewsItemRepository import SqlServerNewsItemRepository
@@ -164,6 +165,12 @@ def create_app() -> Flask:
         llm_title_analyzer=llm_title_analyzer,
         first_time_lookback_seconds=first_time_lookback_seconds,
     )
+    report_app_service = ReportAppService(
+        topic_domain_service=topic_app_service.topic_domain_service,
+        risk_warning_domain_service=risk_warning_domain_service,
+        news_domain_service=topic_app_service.news_domain_service,
+        system_dir=str(config_path.parent / "system"),
+    )
     workflow_subscribers = WorkflowEventSubscribers(
         sentiment_app_service=sentiment_app_service,
         topic_app_service=topic_app_service,
@@ -177,6 +184,7 @@ def create_app() -> Flask:
             sentiment_app_service=sentiment_app_service,
             topic_app_service=topic_app_service,
             risk_warning_domain_service=risk_warning_domain_service,
+            report_app_service=report_app_service,
             crawl_interval_seconds=interval_seconds,
             first_time_lookback_seconds=first_time_lookback_seconds,
         )
@@ -190,6 +198,7 @@ def create_app() -> Flask:
         data_fetcher_app_service=data_fetcher_app_service,
         sentiment_app_service=sentiment_app_service,
         topic_app_service=topic_app_service,
+        report_app_service=report_app_service,
         first_time_lookback_seconds=first_time_lookback_seconds,
     )
 

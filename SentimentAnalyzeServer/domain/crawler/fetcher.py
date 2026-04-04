@@ -17,9 +17,11 @@ import time
 import os
 import yaml
 import asyncio
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Callable, Dict, List, Tuple, Optional, Union
 import requests
 from bs4 import BeautifulSoup
+
+from SentimentAnalyzeServer.system.infra import  MyRedis
 from SentimentAnalyzeServer.domain.crawler.async_browser_client import AsyncBrowserClient
 
 logger = logging.getLogger(__name__)
@@ -73,6 +75,7 @@ class DataFetcher:
         self._consecutive_empty_counts: Dict[str, int] = {}
         # 熔断阈值：连续 N 次抓到 0 条则暂时封禁该平台的一个爬取周期（或本次运行）
         self._circuit_break_threshold = 5
+        self._redis = MyRedis()
 
     def _load_headers_config(self) -> Dict:
         """加载 headers.yaml 配置文件"""
@@ -120,6 +123,34 @@ class DataFetcher:
             return True
         except Exception:
             return False
+
+    async def _random_scroll_page(self, page, min_scrolls: int = 3, max_scrolls: int = 5, 
+                                  min_step: int = 300, max_step: int = 600,
+                                  min_delay: float = 0.5, max_delay: float = 1.5,
+                                  stop_condition: Optional[Callable] = None):
+        """
+        公共内部方法：在页面上执行随机步进滑动
+
+        Args:
+            page: Playwright page 对象
+            min_scrolls: 最小滑动次数
+            max_scrolls: 最大滑动次数
+            min_step: 最小滑动像素
+            max_step: 最大滑动像素
+            min_delay: 最小滑动后停顿时间（秒）
+            max_delay: 最大滑动后停顿时间（秒）
+            stop_condition: 可选回调函数，返回 True 时停止滑动
+        """
+        for _ in range(random.randint(min_scrolls, max_scrolls)):
+            if stop_condition and stop_condition():
+                break
+            
+            # 随机下滑距离
+            scroll_step = random.randint(min_step, max_step)
+            await page.mouse.wheel(0, scroll_step)
+            
+            # 随机停顿，模拟人类阅读
+            await asyncio.sleep(random.uniform(min_delay, max_delay))
 
     def _append_comment(self, comments: List[str], comment: str) -> bool:
         comment = re.sub(r"\s+", " ", str(comment).strip())
@@ -271,10 +302,19 @@ class DataFetcher:
         """
         platform_key = source_id.lower()
         
-        # 检查熔断状态
-        if self._consecutive_empty_counts.get(platform_key, 0) >= self._circuit_break_threshold:
-            logger.warning(f"熔断机制触发：平台 {source_id} 最近连续 {self._consecutive_empty_counts[platform_key]} 次未抓取到评论，本次跳过执行。")
+        # 1. 检查 Redis 里的短期熔断标记 (3分钟)
+        redis_circuit_key = f"circuit_break:{platform_key}"
+        if self._redis.get(redis_circuit_key):
+            logger.warning(f"Redis 熔断机制生效：平台 {source_id} 处于 3 分钟冷却期，跳过执行。")
             return []
+
+        # 2. 检查内存中的连续失败计数
+        if self._consecutive_empty_counts.get(platform_key, 0) >= self._circuit_break_threshold:
+            logger.warning(f"内存熔断机制触发：平台 {source_id} 最近连续 {self._consecutive_empty_counts[platform_key]} 次未抓取到评论，本次跳过执行。")
+            # 强化：同时设置 Redis 标记
+            self._redis.set(redis_circuit_key, True, ttl_seconds=180)
+            return []
+        
         comments = []
         if "baidu" in platform_key:
             comments = await self.crawl_baidu_comments_opyimized(title, url)
@@ -304,10 +344,13 @@ class DataFetcher:
         if not comments:
             self._consecutive_empty_counts[platform_key] = self._consecutive_empty_counts.get(platform_key, 0) + 1
             if self._consecutive_empty_counts[platform_key] >= self._circuit_break_threshold:
-                logger.error(f"严重警告：平台 {source_id} 已连续 {self._consecutive_empty_counts[platform_key]} 次抓取失败，已进入熔断状态。")
+                logger.error(f"严重警告：平台 {source_id} 已连续 {self._consecutive_empty_counts[platform_key]} 次抓取失败，已进入熔断状态 (3分钟)。")
+                # 设置 Redis 短期熔断
+                self._redis.set(redis_circuit_key, True, ttl_seconds=180)
         else:
-            # 只要抓到一次有效评论，就重置计数器
+            # 只要抓到一次有效评论，就重置计数器和 Redis 标记
             self._consecutive_empty_counts[platform_key] = 0
+            self._redis.delete(redis_circuit_key)
             
         return comments
            
@@ -431,7 +474,7 @@ class DataFetcher:
 
             page.on("response", handle_response)
             
-            await page.goto(search_url, wait_until="domcontentloaded", timeout=15*1000)
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=10*1000)
             
             # 启动一个异步任务来循环滑动页面
             async def scroll_task():
@@ -440,10 +483,15 @@ class DataFetcher:
                     for i in range(max_scroll_attempts):
                         if crawl_future.done():
                             break
-                        # 滚动到底部
-                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        # 等待数据加载
-                        await asyncio.sleep(random.uniform(0.5, 2.0))
+                        
+                        # 使用公共滑动方法
+                        await self._random_scroll_page(
+                            page, 
+                            min_scrolls=3, max_scrolls=5, 
+                            min_step=300, max_step=600,
+                            min_delay=0.5, max_delay=1.5,
+                            stop_condition=lambda: crawl_future.done()
+                        )
              
                     # 如果循环结束还没满足数量，但也拿到了数据，也算某种程度的成功
                     if not crawl_future.done():
@@ -457,7 +505,7 @@ class DataFetcher:
             
             try:
                 # 等待 Future 完成，设置总超时时间
-                await asyncio.wait_for(crawl_future, timeout=15.0)
+                await asyncio.wait_for(crawl_future, timeout=10.0)
             except (asyncio.TimeoutError, TimeoutError):
                 logger.warning(f"微博爬取任务超时，当前收集到 {len(comments)} 条内容")
 
@@ -524,8 +572,15 @@ class DataFetcher:
                         timeout=15 * 1000,
                     ) as response_info:
                         await page.goto(video_url, wait_until="domcontentloaded", timeout=15 * 1000)
-                        await page.evaluate("window.scrollBy(0, 800)")
-
+                        
+                        # 使用公共滑动方法进行优化后的平滑随机滑动
+                        await self._random_scroll_page(
+                            page, 
+                            min_scrolls=4, max_scrolls=8, 
+                            min_step=200, max_step=500,
+                            min_delay=0.5, max_delay=1.5
+                        )
+                            
                     response = await response_info.value
                     try:
                         payload_text = await response.text()
@@ -640,9 +695,16 @@ class DataFetcher:
             page.on("response", handle_response)
             
             await page.goto(url, wait_until="domcontentloaded", timeout=15*1000)
-            # 增加一点评论加载的触发动作
-            await page.evaluate("window.scrollBy(0, 1200)")
             
+            # 使用公共滑动方法进行优化后的平滑随机滑动
+            await self._random_scroll_page(
+                page, 
+                min_scrolls=5, max_scrolls=10, 
+                min_step=200, max_step=500,
+                min_delay=0.3, max_delay=0.8,
+                stop_condition=lambda: found_valid_data.done()
+            )
+                
             # 等待数据，如果 20s 没拿到任何评论也继续，不作为异常抛出
             try:
                 await asyncio.wait_for(found_valid_data, timeout=20.0)

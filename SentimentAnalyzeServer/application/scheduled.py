@@ -14,10 +14,12 @@ from SentimentAnalyzeServer.system.infra import CommonThreadPool
 from SentimentAnalyzeServer.application.dataFetcherAppService import DataFetcherAppService
 from SentimentAnalyzeServer.application.sentimentAnalyzeAppsService import SentimentAnalyzeAppService
 from SentimentAnalyzeServer.application.topicAppService import TopicAppService
+from SentimentAnalyzeServer.application.reportAppService import ReportAppService
 
 
 _DEFAULT_INTERVAL_SECONDS = 30 * 60
 _TOPIC_LOOKBACK_MULTIPLIER = 12.4
+_REPORT_INTERVAL_SECONDS = 24 * 3600 # 24小时生成一次日报
 logger = logging.getLogger(__name__)
 _LOCAL_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -31,6 +33,7 @@ class Scheduled:
         data_fetcher_app_service: DataFetcherAppService | None = None,
         sentiment_app_service: SentimentAnalyzeAppService | None = None,
         topic_app_service: TopicAppService | None = None,
+        report_app_service: ReportAppService | None = None,
         first_time_lookback_seconds: int = 7 * 24 * 60 * 60,
     ) -> None:
         self.config_path = Path(config_path)
@@ -40,12 +43,14 @@ class Scheduled:
         self.dataFetcher_app_service = data_fetcher_app_service or DataFetcherAppService(self.config_path, storage)
         self.sentiment_app_service = sentiment_app_service
         self.topic_app_service = topic_app_service
+        self.report_app_service = report_app_service
         self.common_thread_pool = CommonThreadPool()
         self.first_time_lookback_seconds = max(60, int(first_time_lookback_seconds))
 
         self.system_dir = self.config_path.parent / "system"
         self.system_dir.mkdir(parents=True, exist_ok=True)
         self.last_run_file = self.system_dir / "last_scheduler_run.txt"
+        self.last_report_file = self.system_dir / "last_report_run.txt"
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -95,6 +100,29 @@ class Scheduled:
 
         return self.sentiment_app_service.analyze_pending_items_by_latest_time()
 
+    def run_generate_daily_report_once(self) -> dict[str, Any]:
+        now_ts = int(time.time())
+        # 检查上次生成报告的时间
+        last_report = self._read_last_report_time()
+        if last_report is not None:
+            elapsed = now_ts - last_report
+            if elapsed < _REPORT_INTERVAL_SECONDS:
+                return {"success": True, "reason": "already_generated_recently"}
+
+        logger.info("[scheduler] 开始生成日报任务")
+        if self.report_app_service is None:
+            logger.error("[scheduler] report_app_service 未配置")
+            return {"success": False, "reason": "report_service_not_configured"}
+        
+        success, path = self.report_app_service.generate_and_save_daily_report()
+        if success:
+            self._write_last_report_time(now_ts)
+            logger.info(f"[scheduler] 日报生成成功: {path}")
+            return {"success": True, "path": path}
+        else:
+            logger.error(f"[scheduler] 日报生成失败: {path}")
+            return {"success": False, "reason": path}
+
     def _read_last_started_time(self) -> int | None:
         if not self.last_run_file.exists():
             return None
@@ -123,6 +151,20 @@ class Scheduled:
             raise TypeError(f"started_at must be int timestamp, got {type(started_at).__name__}")
         text = time.strftime(_LOCAL_TIME_FORMAT, time.localtime(started_at))
         self.last_run_file.write_text(text, encoding="utf-8")
+
+    def _read_last_report_time(self) -> int | None:
+        if not self.last_report_file.exists():
+            return None
+        try:
+            raw = self.last_report_file.read_text(encoding="utf-8").strip()
+            if not raw: return None
+            return int(datetime.strptime(raw, _LOCAL_TIME_FORMAT).timestamp())
+        except (ValueError, OSError):
+            return None
+
+    def _write_last_report_time(self, timestamp: int) -> None:
+        text = time.strftime(_LOCAL_TIME_FORMAT, time.localtime(timestamp))
+        self.last_report_file.write_text(text, encoding="utf-8")
 
     def _wait_until_next_run(self) -> bool:
         """Return True when caller should stop loop, False when cycle can proceed."""
@@ -166,6 +208,11 @@ class Scheduled:
                 self._run_in_common_pool(self.fetch_and_store_news_data, "dataFetcher")
             except Exception as exc:
                 logger.error(f"[dataFetcher] 任务执行失败: {exc}")
+
+            try:
+                self._run_in_common_pool(self.run_generate_daily_report_once, "reportGenerator")
+            except Exception as exc:
+                logger.error(f"[reportGenerator] 任务执行失败: {exc}")
 
             elapsed = time.time() - started_at
             wait_seconds = max(0, self.interval_seconds - elapsed)

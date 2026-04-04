@@ -69,6 +69,12 @@ topic:
     climax_change_abs_limit_percent: 20.0
     growth_threshold_percent: 20.0
 
+risk_warning:
+  negative_ratio_threshold: 0.5                # 负面舆情占比阈值 (0-1)
+  negative_news_count_threshold: 3            # 负面新闻起征点 (篇)
+  burst_heat_change_threshold: 60.0            # 热度爆发增长率阈值 (%)
+  cross_platform_gap_threshold: 0.35           # 跨平台情感分差值阈值 (0-2)
+
 mssql:
   server: "localhost"              # 优先级：配置文件 > 默认值(localhost)
   database: "sentiment_analyze"    # 优先级：配置文件 > 默认值(sentiment_analyze)
