@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import asyncio
 from collections import defaultdict
 from concurrent.futures import as_completed
 import logging
@@ -701,15 +702,17 @@ class TopicAppService:
                     return list(title_set)
         return list(title_set)
 
-    def _summarize_llm_title_for_topic(self, topic: Topic) -> str:
+    async def _summarize_llm_title_for_topic(self, topic: Topic) -> str:
         if self.llm_title_analyzer is None:
             return ""
         titles = self._extract_topic_titles(topic)
         if not titles:
             return ""
-        return str(self.llm_title_analyzer.summarize_topic_title(topic.topic, titles, topic=topic) or "").strip()
+        
+        result = await self.llm_title_analyzer.summarize_topic_title(topic.topic, titles, topic=topic)
+        return str(result or "").strip()
 
-    def backfill_missing_llm_titles(self, limit: int = 50) -> Dict[str, Any]:
+    async def backfill_missing_llm_titles(self, limit: int = 50) -> Dict[str, Any]:
         if self.llm_title_analyzer is None:
             return {
                 "success": False,
@@ -741,31 +744,36 @@ class TopicAppService:
         #     # Prefer cache copy because it is more likely to contain fresh rank_data for LLM summarization.
         #     candidates.append(cached if cached is not None else db_topic)
 
-        futures = {
-            self.executor_service.execute(self._summarize_llm_title_for_topic, topic): topic
-            for topic in candidates
-        }
+        # futures = {
+        #     self.executor_service.execute(self._summarize_llm_title_for_topic, topic): topic
+        #     for topic in candidates
+        # }
+
+        if not candidates:
+            return {
+                "success": True,
+                "candidate_count": 0,
+                "updated_count": 0,
+            }
+
+        # 使用 asyncio.gather 并发执行协程
+        tasks = [self._summarize_llm_title_for_topic(topic) for topic in candidates]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
         updated_count = 0
         skipped_count = 0
         cache_updated_count = 0
 
-        for future in as_completed(futures):
-            topic = futures[future]
-            try:
-                llm_title = str(future.result() or "").strip()
-            except Exception as exc:
+        for topic, result in zip(candidates, results):
+            if isinstance(result, Exception):
                 skipped_count += 1
-
-                logger.warning(exc)
-                logger.exception(
-                "build llm_title failed. created_at=%s, id=%s, topic=%s",
-                   topic.created_at,
-                topic.id,
-                topic.topic,
+                logger.error(
+                    "build llm_title failed. created_at=%s, id=%s, topic=%s, error=%s",
+                    topic.created_at, topic.id, topic.topic, str(result)
                 )
                 continue
 
+            llm_title = str(result or "").strip()
             if not llm_title:
                 skipped_count += 1
                 continue
@@ -786,6 +794,17 @@ class TopicAppService:
                 cache_updated_count += 1
 
             updated_count += 1
+
+        if cache_topics and cache_updated_count > 0:
+            self.topic_cache_manager.save_or_update_topics_cache(cache_topics, limit=max(1, len(cache_topics)))
+
+        return {
+            "success": True,
+            "candidate_count": len(candidates),
+            "updated_count": updated_count,
+            "skipped_count": skipped_count,
+            "cache_updated_count": cache_updated_count,
+        }
 
         if cache_topics and cache_updated_count > 0:
             self.topic_cache_manager.save_or_update_topics_cache(cache_topics, limit=max(1, len(cache_topics)))

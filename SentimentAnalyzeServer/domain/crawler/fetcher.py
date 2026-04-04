@@ -390,9 +390,7 @@ class DataFetcher:
             
             if href.startswith("/s?"):
                 href = f"https://www.baidu.com{href}"
-            page.on("response", handle_response)   
-            # 3. 跳转到详细页
-            await page.goto(href, wait_until="domcontentloaded", timeout=13*1000)
+
             def parse_baidu_jsonp(text: str) -> dict:
                 try:
                     # 匹配 JSONP 回调的内容：callback_name({...})
@@ -402,7 +400,9 @@ class DataFetcher:
                     return json.loads(text)
                 except:
                     return {}
+
             found_comments = asyncio.get_running_loop().create_future()
+
             async def handle_response(response):
                 if "/api/comment/v2/comment/list" in response.url and response.status == 200:
                     try:
@@ -426,6 +426,11 @@ class DataFetcher:
                             found_comments.set_result(True)
                     except Exception as e:
                         logger.warning(f"解析百度评论接口失败: {e}")
+
+            page.on("response", handle_response)   
+            # 3. 跳转到详细页
+            await page.goto(href, wait_until="domcontentloaded", timeout=13*1000)
+
             # 定向滚动以触发更多接口加载
             await self._random_scroll_page(
                 page, 

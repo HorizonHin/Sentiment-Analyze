@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import UTC, datetime
@@ -31,6 +32,7 @@ class SentimentAnalyzeAppService:
 		recent_window_seconds: int = 30 * 60,
 		first_time_lookback_seconds: int = 7 * 24 * 60 * 60,
 		news_domain_service: Optional[NewsDomainService] = None,
+		max_analysis_workers: Optional[int] = 5,
 	) -> None:
 		self.news_domain_service = news_domain_service or NewsDomainService(storage)
 		self.llm_domain_analyzer = analyzer
@@ -39,10 +41,9 @@ class SentimentAnalyzeAppService:
 		self.common_thread_pool = CommonThreadPool()
 		self.recent_window_seconds = max(60, int(recent_window_seconds))
 		self.first_time_lookback_seconds = max(60, int(first_time_lookback_seconds))
-		self.max_retries = 5
-		self.retry_delay_seconds = 1
 		self.batch_save_size = 20
 		self.executor_service = LLMExecutorService(max_workers=max_workers)
+		self.max_analysis_workers = max_analysis_workers
 
 	def _serialize_news_items(self, items: List[NewsItem]) -> List[Dict[str, Any]]:
 		return [item.to_dict() for item in items]
@@ -157,41 +158,47 @@ class SentimentAnalyzeAppService:
 		if not pending_items:
 			logger.info("No pending news items to analyze. input_count=%s", len(items))
 		else:
-			def consume_batch(batch: List[Any]) -> None:
-				news_batch = [item for item in batch if isinstance(item, NewsItem)]
-				if not news_batch:
-					return
-				if self._save_batch_with_retry(news_batch):
-					updated_items.extend(news_batch)
+			async def run_analysis():
+				# 使用信号量控制协程并发数
+				sem = asyncio.Semaphore(self.max_analysis_workers)
+				
+				async def analyze_task(item: NewsItem):
+					async with sem:
+						# _analyze_with_retry 会直接修改传入的 item 对象
+						result_item = await self._analyze_with_retry(item)
+						return result_item
 
-			batch_manager = self.executor_service.create_queue_batch_manager(
-				batch_size=self.batch_save_size,
-				consume_batch=consume_batch,
-			)
+				# 创建所有分析任务并并发执行
+				tasks = [analyze_task(item) for item in pending_items]
+				results = await asyncio.gather(*tasks)
+				
+				# 过滤掉分析失败的项
+				analyzed_results = [r for r in results if r is not None]
+				
+				if analyzed_results:
+					# 批量保存到数据库
+					for i in range(0, len(analyzed_results), self.batch_save_size):
+						batch = analyzed_results[i : i + self.batch_save_size]
+						if self._save_batch_with_retry(batch):
+							updated_items.extend(batch)
+				
+				if not updated_items:
+					logger.warning(
+						"Analysis finished but no items were persisted. pending_count=%s",
+						len(pending_items),
+					)
 
-			futures = [
-				self.executor_service.execute(self._analyze_with_retry, item)
-				for item in pending_items
-			]
-
+			# 运行异步分析流程
 			try:
-				for future in futures:
-					try:
-						result_item = future.result()
-					except Exception:
-						logger.exception("Unexpected error in LLM executor future.")
-						continue
-
-					if result_item is not None:
-						batch_manager.put(result_item)
-			finally:
-				batch_manager.close_and_wait()
-
-			if not updated_items:
-				logger.warning(
-					"Analysis finished but no items were persisted. pending_count=%s",
-					len(pending_items),
-				)
+				loop = asyncio.get_event_loop()
+				if loop.is_running():
+					import nest_asyncio
+					nest_asyncio.apply()
+					loop.run_until_complete(run_analysis())
+				else:
+					loop.run_until_complete(run_analysis())
+			except RuntimeError:
+				asyncio.run(run_analysis())
 
 		# 仅在 should_cache 为 True 时更新 Redis 热门缓存（通常来自实时爬取）
 		if should_cache:
@@ -230,37 +237,29 @@ class SentimentAnalyzeAppService:
 		logger.info("Sentiment analysis flow completed successfully. persisted_count=%s", len(updated_items))
 		return True
 
-	def _analyze_with_retry(self, item: NewsItem) -> Optional[NewsItem]:
+	async def _analyze_with_retry(self, item: NewsItem) -> Optional[NewsItem]:
 		# 检查是否支持评论抓取，且评论字段确实有内容
 		supports_comments = is_source_support_comments(item.source_id or "")
 		has_comments = bool(item.comments)
 
-		for attempt in range(1, self.max_retries + 1):
-			try:
-				# 只有当平台支持评论且抓取到了评论时，才调用带评论的分析方法
-				if supports_comments and has_comments:
-					result = self.llm_domain_analyzer.analyze_title_and_comments(item.title, comments=item.comments)
-				else:
-					# 否则（不支持评论，或支持但没抓到评论），降级为仅分析标题
-					result = self.llm_domain_analyzer.analyze_title_only(item.title)
-					
-				self.apply_llm_result(item, result)
-				return item
-			except Exception:
-				logger.exception(
-					"Analyze title failed. title=%s, attempt=%s/%s",
-					item.title,
-					attempt,
-					self.max_retries,
-				)
-				if attempt < self.max_retries:
-					time.sleep(self.retry_delay_seconds)
-
-		logger.error("Analyze title failed after retries; skipping item. title=%s", item.title)
-		return None
+		try:
+			# 限流和重试逻辑已下沉到 llm_domain_analyzer 内部
+			if supports_comments and has_comments:
+				result = await self.llm_domain_analyzer.analyze_title_and_comments(item.title, comments=item.comments)
+			else:
+				result = await self.llm_domain_analyzer.analyze_title_only(item.title)
+				
+			self.apply_llm_result(item, result)
+			return item
+		except Exception:
+			logger.exception("Final LLM analysis failure for item: %s", item.title)
+			return None
 
 	def _save_batch_with_retry(self, batch: List[NewsItem]) -> bool:
-		for attempt in range(1, self.max_retries + 1):
+		# 数据库保存依然保留简单的重试逻辑，因为 domain 层不处理数据库重试
+		max_retries = 3
+		retry_delay = 1
+		for attempt in range(1, max_retries + 1):
 			try:
 				saved = self.news_domain_service.update_news_list(batch)
 				if not saved:
@@ -270,11 +269,11 @@ class SentimentAnalyzeAppService:
 				logger.exception(
 					"Batch persistence failed. attempt=%s/%s, batch_size=%s",
 					attempt,
-					self.max_retries,
+					max_retries,
 					len(batch),
 				)
-				if attempt < self.max_retries:
-					time.sleep(self.retry_delay_seconds)
+				if attempt < max_retries:
+					time.sleep(retry_delay)
 
 		logger.error("Batch persistence failed after retries; dropping batch. batch_size=%s", len(batch))
 		return False

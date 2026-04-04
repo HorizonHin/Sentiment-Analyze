@@ -87,8 +87,23 @@ class WorkflowEventSubscribers:
         except (TypeError, ValueError):
             limit = 50
 
+        async def run_backfill():
+            await self.topic_app_service.backfill_missing_llm_titles(limit=limit)
+
+        import asyncio
+        import nest_asyncio
         try:
-            self.topic_app_service.backfill_missing_llm_titles(limit=limit)
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            if loop.is_running():
+                nest_asyncio.apply()
+                loop.run_until_complete(run_backfill())
+            else:
+                loop.run_until_complete(run_backfill())
         except Exception:
             logger.exception("backfill_missing_llm_titles failed")
 

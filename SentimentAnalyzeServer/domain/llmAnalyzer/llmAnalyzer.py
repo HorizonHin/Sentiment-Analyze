@@ -1,11 +1,12 @@
-﻿import json
+﻿import asyncio
+import json
 import logging
 import os
 import random
 import time
 from typing import Any, List
 
-from openai import BadRequestError, OpenAI, RateLimitError
+from openai import AsyncOpenAI, BadRequestError, RateLimitError
 from SentimentAnalyzeServer.system.infra import EventManager, EVENT_TOPIC_TITLE_SUMMARY_BLOCKED
 from SentimentAnalyzeServer.system.rate_limiter import SlidingWindowRateLimiter
 
@@ -46,17 +47,21 @@ class LLMTitleAnalyzer:
             raise ValueError("Missing API key 'Qwen_SentimentAnalyze'.")
 
         self.model = model
-        self.client = OpenAI(api_key=api_key, base_url=base_url
-                            )
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.prompt_file = os.path.join(os.path.dirname(__file__), "analyze_title_prompt.txt")
         self.topic_prompt_file = os.path.join(os.path.dirname(__file__), "analyze_topic_title.txt")
         self.title_only_prompt_file = os.path.join(os.path.dirname(__file__), "analyze_title_only_prompt.txt")
         self.max_retries = 5
         self.initial_retry_delay = 1.0
         
-        # 滑动窗口速率限制：每分钟最大 120 个请求 (针对通义千问免费版/基础版)
-        self._rate_limiter = SlidingWindowRateLimiter(window_seconds=60, max_requests=120)
+        # 滑动窗口速率限制
+        self._rate_limiter = SlidingWindowRateLimiter(window_seconds=1, max_requests=7)
         self.event_manager = EventManager()
+
+    async def _wait_for_retry(self, attempt: int, error_msg: str):
+        wait_seconds = self.initial_retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+        logger.warning("%s. attempt=%d/%d, wait=%.2fs", error_msg, attempt, self.max_retries, wait_seconds)
+        await asyncio.sleep(wait_seconds)
 
     def _get_analyze_title_prompt(self) -> str:
         with open(self.prompt_file, "r", encoding="utf-8") as f:
@@ -285,7 +290,7 @@ class LLMTitleAnalyzer:
             },
         }
 
-    def analyze_title_and_comments(self, title: str, comments: List[str] | None = None) -> dict[str, Any]:
+    async def analyze_title_and_comments(self, title: str, comments: List[str] | None = None) -> dict[str, Any]:
         if not title or not title.strip():
             raise ValueError("title cannot be empty")
 
@@ -294,7 +299,7 @@ class LLMTitleAnalyzer:
         for attempt in range(1, self.max_retries + 1):
             try:
                 # 获取速率限制令牌
-                self._rate_limiter.acquire()
+                await self._rate_limiter.async_acquire()
 
                 messages = [
                     {"role": "system", "content": self._get_analyze_title_prompt()},
@@ -310,7 +315,7 @@ class LLMTitleAnalyzer:
                     },
                 ]
 
-                completion = self.client.chat.completions.create(
+                completion = await self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
                     temperature=0.1,
@@ -340,28 +345,26 @@ class LLMTitleAnalyzer:
                 raise
             except RateLimitError as e:
                 if attempt < self.max_retries:
-                    wait_seconds = self.initial_retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
-                    time.sleep(wait_seconds)
+                    await self._wait_for_retry(attempt, f"LLM 429 RateLimit: {str(e)}")
                     continue
                 logger.exception("LLM 分析标题连续触发速率限制，已超过重试次数。title=%s", title)
                 raise
-            except Exception:
+            except Exception as e:
                 if attempt < self.max_retries:
-                    wait_seconds = self.initial_retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
-                    time.sleep(wait_seconds)
+                    await self._wait_for_retry(attempt, f"LLM Analyze Error: {str(e)}")
                     continue
 
                 logger.exception("LLM 分析标题异常 (非速率限制)，已超过重试次数。title=%s", title)
                 raise
 
-    def analyze_title_only(self, title: str) -> dict[str, Any]:
+    async def analyze_title_only(self, title: str) -> dict[str, Any]:
         if not title or not title.strip():
             raise ValueError("title cannot be empty")
 
         for attempt in range(1, self.max_retries + 1):
             try:
                 # 获取速率限制令牌
-                self._rate_limiter.acquire()
+                await self._rate_limiter.async_acquire()
 
                 messages = [
                     {"role": "system", "content": self._get_analyze_title_only_prompt()},
@@ -374,7 +377,7 @@ class LLMTitleAnalyzer:
                     },
                 ]
 
-                completion = self.client.chat.completions.create(
+                completion = await self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
                     temperature=0.1,
@@ -395,22 +398,20 @@ class LLMTitleAnalyzer:
                     return self._build_empty_result()
                 logger.exception("LLM 仅分析标题 BadRequest。title=%s, code=%s", title, error_code)
                 raise
-            except RateLimitError:
+            except RateLimitError as e:
                 if attempt < self.max_retries:
-                    wait_seconds = self.initial_retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
-                    time.sleep(wait_seconds)
+                    await self._wait_for_retry(attempt, f"LLM 429 RateLimit (Title Only): {str(e)}")
                     continue
                 logger.exception("LLM 仅分析标题连续触发速率限制。title=%s", title)
                 raise
-            except Exception:
+            except Exception as e:
                 if attempt < self.max_retries:
-                    wait_seconds = self.initial_retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
-                    time.sleep(wait_seconds)
+                    await self._wait_for_retry(attempt, f"LLM Analyze Error (Title Only): {str(e)}")
                     continue
                 logger.exception("LLM 仅分析标题异常。title=%s", title)
                 raise
 
-    def summarize_topic_title(self, old_topic: str, titles: list[str], topic: Any = None) -> str:
+    async def summarize_topic_title(self, old_topic: str, titles: list[str], topic: Any = None) -> str:
         cleaned_titles = [str(title).strip() for title in (titles or []) if str(title).strip()]
         if not str(old_topic or "").strip() or not cleaned_titles:
             return ""
@@ -418,7 +419,7 @@ class LLMTitleAnalyzer:
         for attempt in range(1, self.max_retries + 1):
             try:
                 # 获取速率限制令牌
-                self._rate_limiter.acquire()
+                await self._rate_limiter.async_acquire()
 
                 title_lines = "\n".join([f"- {title}" for title in cleaned_titles[:50]])
                 messages = [
@@ -433,7 +434,7 @@ class LLMTitleAnalyzer:
                     },
                 ]
 
-                completion = self.client.chat.completions.create(
+                completion = await self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
                     temperature=0.1,
@@ -480,17 +481,15 @@ class LLMTitleAnalyzer:
                     error_code,
                 )
                 raise
-            except RateLimitError:
+            except RateLimitError as e:
                 if attempt < self.max_retries:
-                    wait_seconds = self.initial_retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
-                    time.sleep(wait_seconds)
+                    await self._wait_for_retry(attempt, f"LLM 429 RateLimit (Topic): {str(e)}")
                     continue
                 logger.exception("LLM 话题标题总结连续触发速率限制，已超过重试次数。old_topic=%s", old_topic)
                 raise
-            except Exception:
+            except Exception as e:
                 if attempt < self.max_retries:
-                    wait_seconds = self.initial_retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
-                    time.sleep(wait_seconds)
+                    await self._wait_for_retry(attempt, f"LLM Analyze Error (Topic): {str(e)}")
                     continue
                 logger.exception("LLM 话题标题总结异常，已超过重试次数。old_topic=%s", old_topic)
                 raise
