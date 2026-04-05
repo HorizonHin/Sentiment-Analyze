@@ -20,6 +20,7 @@ import asyncio
 from typing import Callable, Dict, List, Tuple, Optional, Union
 import requests
 from bs4 import BeautifulSoup
+from playwright.async_api import Page, Locator
 
 from SentimentAnalyzeServer.system.infra import  MyRedis
 from SentimentAnalyzeServer.domain.crawler.async_browser_client import AsyncBrowserClient
@@ -115,14 +116,14 @@ class DataFetcher:
         if client:
             await client.close()
 
-    async def _wait_locator_visible(self, page, selector: str, timeout: int = 10000) -> bool:
+    async def _wait_locator_visible(self, page: Page, selector: str, timeout: int = 10000) -> Locator:
         """Wait for the first matching locator to become visible."""
         locator = page.locator(selector).first
         try:
             await locator.wait_for(state="visible", timeout=timeout)
-            return True
+            return locator
         except Exception:
-            return False
+            return None
 
     async def _random_scroll_page(self, page, min_scrolls: int = 3, max_scrolls: int = 5, 
                                   min_step: int = 300, max_step: int = 600,
@@ -371,19 +372,19 @@ class DataFetcher:
             page = await browser_client.acquire_page()
             
             # 1. 使用 Playwright 访问百度搜索列表页
-            await page.goto(search_url, wait_until="load", timeout=10*1000)
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=10*1000)
             
             # 2. 定位首条搜索结果链接
             link_selector = 'div[class*="title_1WDM0"] a'
-            first_link_handle = await page.query_selector(link_selector)
-            
-            if not first_link_handle:
+            comments_link_locator=await self._wait_locator_visible(page, link_selector, timeout=8*1000)
+
+            if not comments_link_locator:
                 logger.warning(f"Playwright 无法定位到百度搜索首条链接: {title}")
                 if page:
                     await page.screenshot(path=f"{self.screenshot_dir}/baidu_no_link_{int(time.time())}.png")
                 return []
 
-            href = await first_link_handle.get_attribute("href")
+            href = await comments_link_locator.get_attribute("href")
             if not href:
                 logger.warning("Playwright 抓取到空 href")
                 return []
@@ -543,7 +544,7 @@ class DataFetcher:
                         )
              
                     # 如果循环结束还没满足数量，但也拿到了数据，也算某种程度的成功
-                    if not crawl_future.done():
+                    if not crawl_future.done() and comments:
                         crawl_future.set_result(True)
                 except Exception as e:
                     if not crawl_future.done():
@@ -577,7 +578,7 @@ class DataFetcher:
         video_urls: List[str] = []
         page = None
         response_timeout_count = 0
-        max_response_timeouts = 3
+        max_response_timeouts = 2
         successful_video_fetches = 0
         max_successful_videos = 1 # 网速太慢了，先限制只成功抓取1个视频的评论就返回
 
@@ -618,9 +619,9 @@ class DataFetcher:
                             "bilibili.com/x/v2/reply/wbi/main" in response.url
                             and response.status == 200
                         ),
-                        timeout=15 * 1000,
+                        timeout=20 * 1000,
                     ) as response_info:
-                        await page.goto(video_url, wait_until="domcontentloaded", timeout=15 * 1000)
+                        await page.goto(video_url, wait_until="domcontentloaded", timeout=20 * 1000)
                         
                         # 使用公共滑动方法进行优化后的平滑随机滑动
                         await self._random_scroll_page(
@@ -743,7 +744,7 @@ class DataFetcher:
             # 使用 page.on 注册监听器
             page.on("response", handle_response)
             
-            await page.goto(url, wait_until="domcontentloaded", timeout=15*1000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=20*1000)
             
             # 使用公共滑动方法进行优化后的平滑随机滑动
             await self._random_scroll_page(
@@ -969,7 +970,7 @@ class DataFetcher:
         except Exception as e:
             try:
                 if page:
-                    await page.screenshot(path="screenshots/zhihu_debug_fatal_error.png")
+                    await page.screenshot(path=f"screenshots/zhihu_debug_fatal_error_{int(time.time())}.png")
             except Exception:
                 pass
             logger.warning(f"crawl_zhihu_comments 整体失败: {e}")

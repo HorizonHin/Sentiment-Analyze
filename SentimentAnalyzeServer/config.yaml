@@ -41,7 +41,7 @@ weight:
     HOTNESS_WEIGHT: 0.1
 
 llm_executor:
-  max_workers: 4
+  max_workers: 8
 
 scheduler:  
   crawl_interval_minutes: 23       # 系统周期（原 CRAWL_INTERVAL_MINUTES）

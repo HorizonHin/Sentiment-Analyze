@@ -43,6 +43,9 @@ class SqlServerRiskWarningRepository(RiskWarningRepository):
                 f"Database={self.database};"
                 "Trusted_Connection=yes;"
             )
+        
+        # 启用 pyodbc 连接池
+        pyodbc.pooling = True
 
     def _get_connection(self) -> pyodbc.Connection:
         return pyodbc.connect(self.connection_string, timeout=10)

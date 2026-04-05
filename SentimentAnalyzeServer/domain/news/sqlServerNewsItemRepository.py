@@ -62,6 +62,9 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 "Trusted_Connection=yes;"
             )
 
+        # 启用连接池
+        pyodbc.pooling = True
+
     def _get_connection(self) -> pyodbc.Connection:
         conn = pyodbc.connect(self.connection_string, timeout=10)
         # conn.setdecoding(pyodbc.SQL_CHAR, encoding='utf-8')
