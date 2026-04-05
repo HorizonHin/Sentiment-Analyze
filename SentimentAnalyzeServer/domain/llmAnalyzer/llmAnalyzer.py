@@ -55,7 +55,7 @@ class LLMTitleAnalyzer:
         self.initial_retry_delay = 1.0
         
         # 滑动窗口速率限制
-        self._rate_limiter = SlidingWindowRateLimiter(window_seconds=1, max_requests=7)
+        self._rate_limiter = SlidingWindowRateLimiter(window_seconds=1, max_requests=5)
         self.event_manager = EventManager()
 
     async def _wait_for_retry(self, attempt: int, error_msg: str):
