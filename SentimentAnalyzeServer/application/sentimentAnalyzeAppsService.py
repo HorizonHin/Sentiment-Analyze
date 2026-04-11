@@ -17,7 +17,6 @@ from SentimentAnalyzeServer.system.infra import (
 	MyRedis,
 )
 from SentimentAnalyzeServer.application.common import is_item_analysis_pending, is_source_support_comments
-from SentimentAnalyzeServer.domain.llmAnalyzer.llmExecutorService import LLMExecutorService
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsItem, NewsDomainService
 
@@ -44,7 +43,6 @@ class SentimentAnalyzeAppService:
 		self.recent_window_seconds = max(60, int(recent_window_seconds))
 		self.first_time_lookback_seconds = max(60, int(first_time_lookback_seconds))
 		self.batch_save_size = 20
-		self.executor_service = LLMExecutorService(max_workers=max_workers)
 		self.max_analysis_workers = max_analysis_workers
 		
 		# 初始化生产者消费者模型（用于落库）

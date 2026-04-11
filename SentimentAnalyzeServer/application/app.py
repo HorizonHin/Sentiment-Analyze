@@ -74,6 +74,7 @@ def get_app_logger( log_dir: str = None) -> logging.Logger:
 
 def create_app() -> Flask:
     app_logger = get_app_logger()  # 配置 Root Logger，所有模块日志汇总到一起
+    logging.getLogger('httpx').setLevel(logging.WARNING)  # 减少 httpx 的日志噪音
     app = Flask(__name__)
     config = get_config()
     root_dir = Path(__file__).resolve().parent.parent

@@ -14,8 +14,6 @@ from SentimentAnalyzeServer.application.common import Result
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsDomainService, NewsItem
 from SentimentAnalyzeServer.domain.topic.topic import Topic, TopicDomainService
-from SentimentAnalyzeServer.domain.llmAnalyzer.llmExecutorService import LLMExecutorService
-
 
 logger = logging.getLogger(__name__)
 
@@ -351,7 +349,6 @@ class TopicAppService:
         self.topic_lookback = self._resolve_topic_lookback_window()
         self.topic_cache_manager = topic_cache_manager or TopicCacheManager_Memory()
         self.llm_title_analyzer = llm_title_analyzer
-        self.executor_service = LLMExecutorService()
         self.event_manager = EventManager()
         self.common_thread_pool = CommonThreadPool()
         self.first_time_lookback_seconds = max(60, int(first_time_lookback_seconds))
@@ -743,11 +740,6 @@ class TopicAppService:
         #     cached = cache_map.get(key)
         #     # Prefer cache copy because it is more likely to contain fresh rank_data for LLM summarization.
         #     candidates.append(cached if cached is not None else db_topic)
-
-        # futures = {
-        #     self.executor_service.execute(self._summarize_llm_title_for_topic, topic): topic
-        #     for topic in candidates
-        # }
 
         if not candidates:
             return {

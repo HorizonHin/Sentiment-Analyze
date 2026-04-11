@@ -380,7 +380,7 @@ class DataFetcher:
             # 2. 从 danmakuBody 定位评论
             try:
                 danmaku_body = page.locator('//div[@id="danmakuBody"]')
-                await danmaku_body.wait_for(state="attached", timeout=8*1000)
+                await danmaku_body.wait_for(state="attached", timeout=12*1000)
                 
                 titles =await danmaku_body.evaluate("""
     (element) => Array.from(element.querySelectorAll('div'))
@@ -650,7 +650,7 @@ class DataFetcher:
                             max_response_timeouts,
                             title,
                         )
-                        page.screenshot(path=f"{self.screenshot_dir}/bilibili_timeout_{int(time.time())}.png")
+                        await page.screenshot(path=f"{self.screenshot_dir}/bilibili_timeout_{int(time.time())}.png")
                         return comments[: self.max_comments]
                 except Exception as video_e:
                     error_text = str(video_e)
@@ -665,7 +665,7 @@ class DataFetcher:
                                 max_response_timeouts,
                                 title,
                             )
-                            page.screenshot(path=f"{self.screenshot_dir}/bilibili_timeout_{int(time.time())}.png")
+                            await page.screenshot(path=f"{self.screenshot_dir}/bilibili_timeout_{int(time.time())}.png")
                             return comments[: self.max_comments]
                     logger.warning(f"处理 B站单个视频 {video_url} 报错: {video_e}")
                     continue
