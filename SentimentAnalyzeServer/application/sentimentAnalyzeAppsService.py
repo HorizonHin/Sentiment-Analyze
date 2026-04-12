@@ -17,7 +17,7 @@ from SentimentAnalyzeServer.system.infra import (
 	MyRedis,
 )
 from SentimentAnalyzeServer.application.common import is_item_analysis_pending, is_source_support_comments
-from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
+from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMAnalyzer, LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import Entity, NewsKeyword, NewsItem, NewsDomainService
 
 
@@ -28,7 +28,7 @@ class SentimentAnalyzeAppService:
 	def __init__(
 		self,
 		storage: object,
-		analyzer: LLMTitleAnalyzer,
+		analyzer: LLMAnalyzer,
 		max_workers: int = 32,
 		recent_window_seconds: int = 30 * 60,
 		first_time_lookback_seconds: int = 7 * 24 * 60 * 60,

@@ -49,7 +49,7 @@ scheduler:
 sentiment:
   first_time_lookback_days: 14      # 查询分区键 first_time 默认回溯天数
   weibo:
-    max_comments: 10               # 评论爬取数量限制
+    max_comments: 100               # 评论爬取数量限制
 
 common_thread_pool:
   max_workers: 4

@@ -1,10 +1,12 @@
-﻿import asyncio
+﻿from abc import ABC, abstractmethod
+import asyncio
 import json
 import logging
 import os
 import random
 import time
-from typing import Any, List
+from typing import Any, List, Optional
+from typing_extensions import Dict
 
 from openai import AsyncOpenAI, BadRequestError, RateLimitError
 from SentimentAnalyzeServer.system.infra import EventManager, EVENT_TOPIC_TITLE_SUMMARY_BLOCKED
@@ -34,8 +36,23 @@ MAX_REPRESENTATIVE_ITEMS = 5
 
 logger = logging.getLogger(__name__)
 
+class LLMAnalyzer(ABC):
+    @abstractmethod
+    async def analyze_title_and_comments(self, title: str, comments: Optional[List[str]] = None) -> Dict[str, Any]:
+        """分析新闻标题及其公众评论"""
+        pass
 
-class LLMTitleAnalyzer:
+    @abstractmethod
+    async def analyze_title_only(self, title: str) -> Dict[str, Any]:
+        """仅分析新闻标题"""
+        pass
+
+    @abstractmethod
+    async def summarize_topic_title(self, old_topic: str, titles: List[str], topic: Any = None) -> str:
+        """总结话题标题"""
+        pass
+    
+class LLMTitleAnalyzer(LLMAnalyzer):
     def __init__(
         self,
         model: str = "qwen-turbo-2025-07-15", #qwen3.5-flash

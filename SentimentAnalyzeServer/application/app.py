@@ -17,7 +17,7 @@ from SentimentAnalyzeServer.application.dataFetcherAppService import DataFetcher
 from SentimentAnalyzeServer.application.sentimentAnalyzeAppsService import SentimentAnalyzeAppService
 from SentimentAnalyzeServer.application.topicAppService import TopicAppService
 from SentimentAnalyzeServer.application.reportAppService import ReportAppService
-from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
+from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMAnalyzer, LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import NewsDomainService
 from SentimentAnalyzeServer.domain.news.sqlServerNewsItemRepository import SqlServerNewsItemRepository
 from SentimentAnalyzeServer.domain.risk.risk import RiskWarningDomainService
@@ -147,7 +147,7 @@ def create_app() -> Flask:
         risk_warning_repository=risk_warning_repository,
         risk_config=(config.get("risk_warning") or {}),
     )
-    llm_title_analyzer = LLMTitleAnalyzer(api_key=llm_api_key)
+    llm_title_analyzer: LLMAnalyzer = LLMTitleAnalyzer(api_key=llm_api_key)
     sentiment_app_service = SentimentAnalyzeAppService(
         storage=storage,
         analyzer=llm_title_analyzer,

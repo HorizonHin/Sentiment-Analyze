@@ -3,13 +3,14 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from SentimentAnalyzeServer.domain.topic.topic import Topic, TopicPlatformStats
 
 RISK_TYPE_NEGATIVE_CLUSTER = "negative_cluster"
 RISK_TYPE_BURST_EVENT = "burst_event"
 RISK_TYPE_CROSS_PLATFORM_GAP = "cross_platform_gap"
+RISK_TYPE_SENSITIVE_KEYWORDS = "sensitive_keywords"
 
 RISK_LEVEL_LOW = "low"
 RISK_LEVEL_MEDIUM = "medium"
@@ -94,6 +95,15 @@ class RiskWarningDomainService:
         self.negative_news_count_threshold = self._to_int(config.get("negative_news_count_threshold"), 20)
         self.burst_heat_change_threshold = self._to_float(config.get("burst_heat_change_threshold"), 60.0)
         self.cross_platform_gap_threshold = self._to_float(config.get("cross_platform_gap_threshold"), 0.35)
+        
+        # 敏感词配置
+        self.sensitive_keywords = {
+            "爆炸", "起火", "泄露", "中毒", # 安全类
+            "诉讼", "投诉", "违规", "受罚", # 法律类
+            "欺诈", "骚扰", "歧视", # 道德类
+            "罢工", "抵制", "联署"  # 舆论类
+        }
+        self.sensitive_keyword_count_threshold = self._to_int(config.get("sensitive_keyword_count_threshold"), 5)
 
     @staticmethod
     def _to_float(value: Any, default: float) -> float:
@@ -285,6 +295,59 @@ class RiskWarningDomainService:
             occurred_at=occurred_at,
         )
 
+    def _check_sensitive_keywords(self, topic: Topic, occurred_at: int, detected_by_event: str) -> Optional[TopicRiskWarning]:
+        """
+        检测是否有敏感词触发风险
+        IF 敏感词出现 AND 新闻>5条 THEN risk_level = HIGH
+        """
+        news_count = int(getattr(topic, "news_count", 0) or 0)
+        # 如果新闻条数少于阈值，则不触发
+        if news_count < self.sensitive_keyword_count_threshold:
+            return None
+
+        found_keywords: Set[str] = set()
+        
+        # 遍历所有新闻
+        for item in self._iter_news_items(topic):
+            # 1. 从 keywords 查找 (NewsKeyword 对象在 items.keywords 属性里)
+            if hasattr(item, "keywords"):
+                for kw in item.keywords:
+                    # kw 可能是 NewsKeyword 数据类，也可能是 dict（如果存储层之前反序列化）
+                    term = getattr(kw, "term", "") if not isinstance(kw, dict) else kw.get("term", "")
+                    if term in self.sensitive_keywords:
+                        found_keywords.add(str(term))
+            
+            # 2. 从 summary 查找
+            summary = str(getattr(item, "summary", "") or "")
+            if summary:
+                for target_kw in self.sensitive_keywords:
+                    if target_kw in summary:
+                        found_keywords.add(target_kw)
+
+        if not found_keywords:
+            return None
+
+        topic_created_at, topic_id = self._safe_topic_keys(topic)
+        return TopicRiskWarning(
+            topic_created_at=topic_created_at,
+            topic_id=topic_id,
+            topic_name=str(getattr(topic, "topic", "") or ""),
+            risk_type=RISK_TYPE_SENSITIVE_KEYWORDS,
+            risk_level=RISK_LEVEL_HIGH, # 触发规则定为 HIGH
+            risk_score=70, # 配合 HIGH 等级（>=50 且 <75 为 HIGH）
+            reason=(
+                f"触发敏感关键词检测: {', '.join(sorted(list(found_keywords)))}。 "
+                f"当前话题新闻数量已达 {news_count} 篇 (起征点: {self.sensitive_keyword_count_threshold})。"
+            ),
+            metrics={
+                "found_keywords": list(found_keywords),
+                "news_count": news_count,
+                "thresholds": {"sensitive_keyword_count": self.sensitive_keyword_count_threshold},
+            },
+            detected_by_event=detected_by_event,
+            occurred_at=occurred_at,
+        )
+
     def evaluate_topic_risks(
         self,
         topics: List[Topic],
@@ -305,6 +368,7 @@ class RiskWarningDomainService:
                 self._check_negative_cluster(topic, occur_ts, detected_by_event),
                 self._check_burst_event(topic, occur_ts, detected_by_event),
                 self._check_cross_platform_gap(topic, occur_ts, detected_by_event),
+                self._check_sensitive_keywords(topic, occur_ts, detected_by_event),
             ]
             for item in candidates:
                 if item is not None:

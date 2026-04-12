@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from SentimentAnalyzeServer.system.infra import CommonThreadPool, singleton_task
 from SentimentAnalyzeServer.system.infra import EventManager, EVENT_TOPIC_RANK_UPDATED
 from SentimentAnalyzeServer.application.common import Result
-from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
+from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMAnalyzer, LLMTitleAnalyzer
 from SentimentAnalyzeServer.domain.news.news import Entity, NewsKeyword, NewsDomainService, NewsItem
 from SentimentAnalyzeServer.domain.topic.topic import Topic, TopicDomainService
 
@@ -339,7 +339,7 @@ class TopicAppService:
         crawl_interval_seconds: int,
         topic_config: Optional[Dict[str, Any]] = None,
         topic_cache_manager: Optional[TopicCacheManager] = None,
-        llm_title_analyzer: Optional[LLMTitleAnalyzer] = None,
+        llm_title_analyzer: Optional[LLMAnalyzer] = None,
         first_time_lookback_seconds: int = 7 * 24 * 3600,
     ) -> None:
         self.topic_domain_service = topic_domain_service
