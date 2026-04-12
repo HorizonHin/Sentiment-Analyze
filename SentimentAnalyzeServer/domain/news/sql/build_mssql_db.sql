@@ -34,6 +34,7 @@ CREATE TABLE NewsItem (
     source_name NVARCHAR(100) DEFAULT '',
     event_type NVARCHAR(100) DEFAULT '',
     summary NVARCHAR(2000) DEFAULT '',
+    comments NVARCHAR(MAX) DEFAULT '',
     latest_rank INT DEFAULT 0,
     url NVARCHAR(1000) DEFAULT '',
     mobile_url NVARCHAR(1000) DEFAULT '',
@@ -52,9 +53,9 @@ CREATE TABLE NewsItem (
     CONSTRAINT PK_NewsItem PRIMARY KEY CLUSTERED (first_time, id)
 ) ON ps_news_time(first_time);
 
--- 创建 Keyword 表
-IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Keyword')
-CREATE TABLE Keyword (
+-- 创建 NewsKeyword 表 (原 Keyword 表)
+IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'NewsKeyword')
+CREATE TABLE NewsKeyword (
     id INT IDENTITY(1,1) NOT NULL,
     news_item_id INT NOT NULL,
     news_first_time BIGINT NOT NULL,
@@ -62,11 +63,20 @@ CREATE TABLE Keyword (
     term NVARCHAR(500) NOT NULL,
     importance FLOAT DEFAULT 0.0,
     weigh FLOAT DEFAULT 0.0,
-    CONSTRAINT PK_Keyword PRIMARY KEY CLUSTERED (news_first_time, news_item_id, id),
-    CONSTRAINT FK_Keyword_NewsItem FOREIGN KEY (news_first_time, news_item_id)
+    CONSTRAINT PK_NewsKeyword PRIMARY KEY CLUSTERED (news_first_time, news_item_id, id),
+    CONSTRAINT FK_NewsKeyword_NewsItem FOREIGN KEY (news_first_time, news_item_id)
         REFERENCES NewsItem(first_time, id) ON DELETE CASCADE,
     UNIQUE(news_first_time, news_item_id, term)
 ) ON ps_news_time(news_first_time);
+
+-- 创建 字典表 Keyword
+IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Keyword')
+CREATE TABLE Keyword (
+    id INT IDENTITY(1,1) NOT NULL,
+    term NVARCHAR(500) NOT NULL,
+    CONSTRAINT PK_Keyword_Dict PRIMARY KEY CLUSTERED (id),
+    CONSTRAINT UX_Keyword_Dict_term UNIQUE(term)
+);
 
 -- 创建 Entity 表
 IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Entity')
@@ -113,14 +123,14 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'ux_news_url' AND object_i
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_news_source' AND object_id = OBJECT_ID('NewsItem'))
     CREATE INDEX idx_news_source ON NewsItem(source_id);
 
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_keyword_news' AND object_id = OBJECT_ID('Keyword'))
-    CREATE INDEX idx_keyword_news ON Keyword(news_first_time, news_item_id);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_keyword_news' AND object_id = OBJECT_ID('NewsKeyword'))
+    CREATE INDEX idx_keyword_news ON NewsKeyword(news_first_time, news_item_id);
 
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_keyword_term' AND object_id = OBJECT_ID('Keyword'))
-    CREATE INDEX idx_keyword_term ON Keyword(term, news_first_time, news_item_id);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_keyword_term' AND object_id = OBJECT_ID('NewsKeyword'))
+    CREATE INDEX idx_keyword_term ON NewsKeyword(term, news_first_time, news_item_id);
 
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_keyword_last_time' AND object_id = OBJECT_ID('Keyword'))
-    CREATE INDEX idx_keyword_last_time ON Keyword(news_first_time, last_time, news_item_id);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_keyword_last_time' AND object_id = OBJECT_ID('NewsKeyword'))
+    CREATE INDEX idx_keyword_last_time ON NewsKeyword(news_first_time, last_time, news_item_id);
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_entity_news' AND object_id = OBJECT_ID('Entity'))
     CREATE INDEX idx_entity_news ON Entity(news_first_time, news_item_id);

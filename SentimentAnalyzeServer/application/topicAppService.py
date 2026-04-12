@@ -12,7 +12,7 @@ from SentimentAnalyzeServer.system.infra import CommonThreadPool, singleton_task
 from SentimentAnalyzeServer.system.infra import EventManager, EVENT_TOPIC_RANK_UPDATED
 from SentimentAnalyzeServer.application.common import Result
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
-from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsDomainService, NewsItem
+from SentimentAnalyzeServer.domain.news.news import Entity, NewsKeyword, NewsDomainService, NewsItem
 from SentimentAnalyzeServer.domain.topic.topic import Topic, TopicDomainService
 
 logger = logging.getLogger(__name__)
@@ -152,7 +152,7 @@ class TopicAppService:
         return candidate_text == query_text
 
     @staticmethod
-    def _keyword_dedup_score(item: Keyword) -> tuple[float, int]:
+    def _keyword_dedup_score(item: NewsKeyword) -> tuple[float, int]:
         return (float(getattr(item, "weigh", 0.0) or 0.0), int(getattr(item, "last_time", 0) or 0))
 
     @staticmethod
@@ -178,7 +178,7 @@ class TopicAppService:
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
         limit: int = 100,
-    ) -> List[Keyword]:
+    ) -> List[NewsKeyword]:
         """按 query 在时间范围内模糊检索 Keyword，并按 term 去重。"""
         normalized_query = self._normalize_search_text(query)
         if not normalized_query:
@@ -196,7 +196,7 @@ class TopicAppService:
             end_time=int(end_time),
         )
 
-        dedup_map: Dict[str, Keyword] = {}
+        dedup_map: Dict[str, NewsKeyword] = {}
         for item in matched:
             term_key = str(item.term or "").strip().lower()
             if not term_key:
@@ -378,7 +378,7 @@ class TopicAppService:
 
     def build_topics_by_keywords_entities(
         self,
-        keywords: List[Keyword],
+        keywords: List[NewsKeyword],
         entities: List[Entity],
         news_first_time: Optional[int],
     ) -> List[Topic]:
@@ -407,7 +407,7 @@ class TopicAppService:
 
             # 以输入 keyword.term 为准分组，支持 term 在输入列表中重复出现。
             for keyword in keywords:
-                if not isinstance(keyword, Keyword):
+                if not isinstance(keyword, NewsKeyword):
                     continue
                 topic_name = str(keyword.term or "").strip()
                 if not topic_name:

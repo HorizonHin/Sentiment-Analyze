@@ -15,6 +15,6 @@
 
 【要求】
 1. 实体类型必须从以下类别中选择：company, product, person, policy, org, unknown。
-2. importance 范围是 0 到 1 的浮点数，代表该关键词在标题中的核心价值程度。
+2. importance 范围是 0 到 1 的浮点数，代表该关键词在标题中的核心价值程度。严禁提取如“争议”、“关注”、“热议”、“回应”、“背景”等无法反映新闻具体内容的空泛词汇
 3. event_type 必须从以下类别中选择：business_competition, policy_change, product_launch, crisis_event, technology_breakthrough, other。
 4. 不要输出 sentiment_analysis 字段；标题分析模式下情感分数由系统统一置 0。

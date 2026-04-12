@@ -51,11 +51,11 @@ class LLMTitleAnalyzer:
         self.prompt_file = os.path.join(os.path.dirname(__file__), "analyze_title_prompt.txt")
         self.topic_prompt_file = os.path.join(os.path.dirname(__file__), "analyze_topic_title.txt")
         self.title_only_prompt_file = os.path.join(os.path.dirname(__file__), "analyze_title_only_prompt.txt")
-        self.max_retries = 5
+        self.max_retries = 7
         self.initial_retry_delay = 1.0
         
         # 滑动窗口速率限制
-        self._rate_limiter = SlidingWindowRateLimiter(window_seconds=1, max_requests=5)
+        self._rate_limiter = SlidingWindowRateLimiter(window_seconds=1, max_requests=3)
         self.event_manager = EventManager()
 
     async def _wait_for_retry(self, attempt: int, error_msg: str):

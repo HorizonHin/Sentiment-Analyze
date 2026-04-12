@@ -10,12 +10,14 @@ except ImportError:
 
 from SentimentAnalyzeServer.domain.news.news import (
     Entity,
+    NewsKeyword,
     Keyword,
     NewsData,
     NewsItem,
     NewsItemRepository,
     RankTimelineEntry,
 )
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +25,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
     """基于 SQL Server 的新闻数据存储后端。"""
 
     _NEWSITEM_SELECT_COLUMNS = (
-        "id, news_date, title, source_id, source_name, event_type, summary, "
+        "id, news_date, title, source_id, source_name, event_type, summary, comments, "
         "latest_rank, url, mobile_url, sentiment_polarity, positive_ratio, negative_ratio, neutral_ratio, "
         "optimism_score, trust_score, controversy_score, attention_score, first_time, last_time, analyzed_time, total_weigh"
     )
@@ -192,8 +194,14 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 point.id = int(inserted[0])
 
     def _replace_keyword_and_entity(self, conn: pyodbc.Connection, valid_news: List[NewsItem]) -> None:
-        """覆盖式更新关键字和实体：先删除旧关联，再插入新关联。"""
+        """覆盖式更新关键字和实体：先删除旧关联，再插入新关联。支持批量执行。"""
         cursor = conn.cursor()
+
+        # 1. 批量处理关键词
+        news_keyword_delete_params = []
+        news_keyword_insert_params = []
+        dict_keyword_insert_params = []
+        unique_terms = set()
 
         for item in valid_news:
             if item.id is None or int(item.id) <= 0:
@@ -201,60 +209,66 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             news_first_time = self._to_timestamp(item.first_time) or self._to_timestamp(item.last_time, fallback_now=True)
             item_last_time = self._to_timestamp(item.last_time, fallback_now=True)
             
-            # 1. 覆盖式更新：先删除该新闻项下已有的所有关键词
-            cursor.execute(
-                "DELETE FROM Keyword WHERE news_item_id = ? AND news_first_time = ?",
-                int(item.id),
-                news_first_time
-            )
+            news_keyword_delete_params.append((int(item.id), news_first_time))
             
-            # 2. 插入当前最新的关键词列表
             for keyword in item.keywords:
                 term = str(keyword.term or "").strip()
                 if not term:
                     continue
                 keyword_weigh = float(keyword.weigh if keyword.weigh is not None else item.total_weigh)
-                
-                cursor.execute(
-                    "INSERT INTO Keyword(news_item_id, news_first_time, last_time, term, importance, weigh) VALUES (?, ?, ?, ?, ?, ?)",
-                    int(item.id),
-                    news_first_time,
-                    item_last_time,
-                    term,
-                    keyword.importance,
-                    keyword_weigh,
-                )
+                news_keyword_insert_params.append((
+                    int(item.id), news_first_time, item_last_time, term, keyword.importance, keyword_weigh
+                ))
+                if term not in unique_terms:
+                    dict_keyword_insert_params.append((term,))
+                    unique_terms.add(term)
 
+        if news_keyword_delete_params:
+            cursor.executemany("DELETE FROM NewsKeyword WHERE news_item_id = ? AND news_first_time = ?", news_keyword_delete_params)
+        
+        if dict_keyword_insert_params:
+            # 插入字典表，忽略重复错误
+            for term_param in dict_keyword_insert_params:
+                try:
+                    cursor.execute("INSERT INTO Keyword (term) VALUES (?)", term_param)
+                except pyodbc.Error:
+                    pass # 忽略重复插入等错误
+
+        if news_keyword_insert_params:
+            cursor.executemany(
+                "INSERT INTO NewsKeyword(news_item_id, news_first_time, last_time, term, importance, weigh) VALUES (?, ?, ?, ?, ?, ?)",
+                news_keyword_insert_params
+            )
+
+        # 2. 批量处理实体
+        entity_delete_params = []
+        entity_insert_params = []
         for item in valid_news:
             if item.id is None or int(item.id) <= 0:
                 continue
             news_first_time = self._to_timestamp(item.first_time) or self._to_timestamp(item.last_time, fallback_now=True)
             item_last_time = self._to_timestamp(item.last_time, fallback_now=True)
             
-            # 1. 覆盖式更新：先删除该新闻项下已有的所有实体
-            cursor.execute(
-                "DELETE FROM Entity WHERE news_item_id = ? AND news_first_time = ?",
-                int(item.id),
-                news_first_time
-            )
+            entity_delete_params.append((int(item.id), news_first_time))
             
-            # 2. 插入当前最新的实体列表
             for entity in item.entities:
                 entity_name = str(entity.name or "").strip()
                 entity_type = str(entity.type or "").strip()
                 if not entity_name or not entity_type:
                     continue
                 entity_weigh = float(entity.weigh if entity.weigh is not None else item.total_weigh)
+                entity_insert_params.append((
+                    int(item.id), news_first_time, item_last_time, entity_name, entity_type, entity_weigh
+                ))
 
-                cursor.execute(
-                    "INSERT INTO Entity(news_item_id, news_first_time, last_time, name, entity_type, weigh) VALUES (?, ?, ?, ?, ?, ?)",
-                    int(item.id),
-                    news_first_time,
-                    item_last_time,
-                    entity_name,
-                    entity_type,
-                    entity_weigh,
-                )
+        if entity_delete_params:
+            cursor.executemany("DELETE FROM Entity WHERE news_item_id = ? AND news_first_time = ?", entity_delete_params)
+        
+        if entity_insert_params:
+            cursor.executemany(
+                "INSERT INTO Entity(news_item_id, news_first_time, last_time, name, entity_type, weigh) VALUES (?, ?, ?, ?, ?, ?)",
+                entity_insert_params
+            )
 
     def _build_datetime_range_clause(
         self,
@@ -312,8 +326,8 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         self,
         cursor: pyodbc.Cursor,
         row_key_pairs: List[tuple[int, int]],
-    ) -> tuple[Dict[int, List[Keyword]], Dict[int, List[Entity]], Dict[int, List[RankTimelineEntry]]]:
-        keywords_by_news: Dict[int, List[Keyword]] = {}
+    ) -> tuple[Dict[int, List[NewsKeyword]], Dict[int, List[Entity]], Dict[int, List[RankTimelineEntry]]]:
+        keywords_by_news: Dict[int, List[NewsKeyword]] = {}
         entities_by_news: Dict[int, List[Entity]] = {}
         timeline_by_news: Dict[int, List[RankTimelineEntry]] = {}
 
@@ -326,7 +340,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             f"""
             WITH kpair(news_item_id, news_first_time) AS ({values_sql})
             SELECT k.id, k.news_item_id, k.news_first_time, k.last_time, k.term, k.importance, k.weigh
-            FROM Keyword k
+            FROM NewsKeyword k
             INNER JOIN kpair p
                 ON k.news_item_id = p.news_item_id
                AND k.news_first_time = p.news_first_time
@@ -337,7 +351,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         for keyword_row in cursor.fetchall():
             news_item_id = int(keyword_row[1])
             keywords_by_news.setdefault(news_item_id, []).append(
-                Keyword(
+                NewsKeyword(
                     id=int(keyword_row[0]),
                     news_item_id=int(keyword_row[1]),
                     news_first_time=self._to_timestamp(keyword_row[2]),
@@ -411,7 +425,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
-    ) -> List[Keyword]:
+    ) -> List[NewsKeyword]:
         partition_first_time = self._resolve_partition_first_time(news_first_time)
         where_sql, params, normalized_last_time = self._build_normalized_datetime_text_range_clause(
             column_name="last_time",
@@ -425,13 +439,13 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         cursor = conn.cursor()
         try:
             cursor.execute(
-                f"SELECT id, news_item_id, news_first_time, last_time, term, importance, weigh FROM Keyword WHERE {where_sql} ORDER BY {normalized_last_time} ASC, id ASC",
+                f"SELECT id, news_item_id, news_first_time, last_time, term, importance, weigh FROM NewsKeyword WHERE {where_sql} ORDER BY {normalized_last_time} ASC, id ASC",
                 *params,
             )
-            result: List[Keyword] = []
+            result: List[NewsKeyword] = []
             for row in cursor.fetchall():
                 result.append(
-                    Keyword(
+                    NewsKeyword(
                         id=int(row[0]),
                         news_item_id=int(row[1]),
                         news_first_time=self._to_timestamp(row[2]),
@@ -486,7 +500,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
 
     def get_news_list_by_keywords(
         self,
-        keywords: List[Keyword],
+        keywords: List[NewsKeyword],
         news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
@@ -497,7 +511,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         key_pairs = {
             (int(keyword.news_item_id), int(keyword.news_first_time))
             for keyword in keywords
-            if isinstance(keyword, Keyword)
+            if isinstance(keyword, NewsKeyword)
             and keyword.news_item_id is not None
             and keyword.news_first_time is not None
             and int(keyword.news_item_id) > 0
@@ -673,11 +687,11 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                     cursor.execute("""
                         INSERT INTO NewsItem (
                             news_date, title, source_id, source_name, event_type,
-                            summary, latest_rank, url, mobile_url, sentiment_polarity,
+                            summary, comments, latest_rank, url, mobile_url, sentiment_polarity,
                             positive_ratio, negative_ratio, neutral_ratio,
                             optimism_score, trust_score, controversy_score, attention_score,
                             first_time, last_time, analyzed_time, total_weigh
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
                         data_date,
                         item.title,
@@ -685,6 +699,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                         item.source_name or item.source_id,
                         item.event_type,
                         item.summary,
+                        json.dumps(item.comments, ensure_ascii=False) if item.comments else "",
                         item.latest_rank,
                         item.url,
                         item.mobile_url,
@@ -757,7 +772,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                     cursor.execute("""
                         UPDATE NewsItem SET
                             title = ?, source_id = ?, source_name = ?, event_type = ?,
-                            summary = ?, latest_rank = ?, url = ?, mobile_url = ?,
+                            summary = ?, comments = ?, latest_rank = ?, url = ?, mobile_url = ?,
                             sentiment_polarity = ?, positive_ratio = ?, negative_ratio = ?,
                             neutral_ratio = ?, optimism_score = ?, trust_score = ?,
                             controversy_score = ?, attention_score = ?,
@@ -769,6 +784,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                         item.source_name,
                         item.event_type,
                         item.summary,
+                        json.dumps(item.comments, ensure_ascii=False) if item.comments else "",
                         item.latest_rank,
                         item.url,
                         item.mobile_url,
@@ -976,6 +992,14 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 source_name = str(row[4])
                 news_item_id = int(row[0])
 
+                raw_comments = row[7]
+                comments = []
+                if raw_comments:
+                    try:
+                        comments = json.loads(raw_comments)
+                    except (json.JSONDecodeError, TypeError):
+                        comments = []
+
                 item = NewsItem(
                     id=news_item_id,
                     title=str(row[2]),
@@ -983,21 +1007,22 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                     source_name=source_name,
                     event_type=str(row[5]),
                     summary=str(row[6]),
+                    comments=comments,
                     entities=entities_by_news.get(news_item_id, []),
                     keywords=keywords_by_news.get(news_item_id, []),
-                    latest_rank=int(row[7]),
-                    url=str(row[8]),
-                    mobile_url=str(row[9]),
-                    sentiment_polarity=str(row[10]),
-                    positive_ratio=float(row[11]),
-                    negative_ratio=float(row[12]),
-                    neutral_ratio=float(row[13]),
-                    optimism_score=float(row[14]),
-                    trust_score=float(row[15]),
-                    controversy_score=float(row[16]),
-                    attention_score=float(row[17]),
-                    first_time=self._to_timestamp(row[18]),
-                    last_time=self._to_timestamp(row[19]),
+                    latest_rank=int(row[8]),
+                    url=str(row[9]),
+                    mobile_url=str(row[10]),
+                    sentiment_polarity=str(row[11]),
+                    positive_ratio=float(row[12]),
+                    negative_ratio=float(row[13]),
+                    neutral_ratio=float(row[14]),
+                    optimism_score=float(row[15]),
+                    trust_score=float(row[16]),
+                    controversy_score=float(row[17]),
+                    attention_score=float(row[18]),
+                    first_time=self._to_timestamp(row[19]),
+                    last_time=self._to_timestamp(row[20]),
                     analyzed_time=self._expect_db_datetime_or_none(row[20]),
                     total_weigh=float(row[21]),
                     rank_timeline_obj=timeline_by_news.get(news_item_id, []),
@@ -1014,7 +1039,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         try:
             next_day_value = int(date_value) + 24 * 60 * 60
             cursor.execute("""
-                SELECT id, news_date, title, source_id, source_name, event_type, summary,
+                SELECT id, news_date, title, source_id, source_name, event_type, summary, comments,
                        latest_rank, url, mobile_url, sentiment_polarity, positive_ratio, negative_ratio, neutral_ratio,
                        optimism_score, trust_score, controversy_score, attention_score, first_time, last_time, analyzed_time, total_weigh
                 FROM NewsItem

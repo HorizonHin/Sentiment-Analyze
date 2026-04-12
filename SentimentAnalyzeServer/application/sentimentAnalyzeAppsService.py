@@ -18,7 +18,7 @@ from SentimentAnalyzeServer.system.infra import (
 )
 from SentimentAnalyzeServer.application.common import is_item_analysis_pending, is_source_support_comments
 from SentimentAnalyzeServer.domain.llmAnalyzer.llmAnalyzer import LLMTitleAnalyzer
-from SentimentAnalyzeServer.domain.news.news import Entity, Keyword, NewsItem, NewsDomainService
+from SentimentAnalyzeServer.domain.news.news import Entity, NewsKeyword, NewsItem, NewsDomainService
 
 
 logger = logging.getLogger(__name__)
@@ -307,7 +307,7 @@ class SentimentAnalyzeAppService:
 		keywords = result.get("keywords", [])
 		if isinstance(keywords, list):
 			item.keywords = [
-				Keyword(term=str(keyword.get("term", "")), importance=float(keyword.get("importance", 0.0)))
+				NewsKeyword(term=str(keyword.get("term", "")), importance=float(keyword.get("importance", 0.0)))
 				for keyword in keywords
 				if isinstance(keyword, dict)
 			]

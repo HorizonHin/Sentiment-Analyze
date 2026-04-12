@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 import time
+import json
 from typing import Dict, List, Optional, Any, Set, Tuple
 
 FIRST_TIME_MIN = 0
@@ -46,6 +47,12 @@ class Entity:
 @dataclass(slots=True)
 class Keyword:
     id: int = field(default=-1)
+    term: str = ""
+
+
+@dataclass(slots=True)
+class NewsKeyword:
+    id: int = field(default=-1)
     news_item_id: int = field(default=-1)
     news_first_time: Optional[int] = None
     last_time: Optional[int] = None
@@ -88,9 +95,9 @@ class NewsItem:
     source_name: str = ""                    # 来源平台名称（运行时使用，数据库不存储）
     event_type: str = ""
     summary: str = "" # LLM总结的公众评论摘要
-    comments: List[str] = field(default_factory=list)  # 公众评论内容列表，不存储数据库，仅运行时使用
+    comments: List[str] = field(default_factory=list)  # 公众评论内容列表，存储为 JSON 字符串
     entities: List[Entity] = field(default_factory=list)
-    keywords: List[Keyword] = field(default_factory=list)
+    keywords: List[NewsKeyword] = field(default_factory=list)
     latest_rank: int = 0                 # 排名
     url: str = ""                       # 链接 URL
     mobile_url: str = ""                # 移动端 URL
@@ -134,7 +141,7 @@ class NewsItem:
         self.entities = list(seen_entities.values())
 
         # 去重 keywords: 保留首次出现的，保留最高权重
-        seen_keywords: Dict[str, Keyword] = {}
+        seen_keywords: Dict[str, NewsKeyword] = {}
         for keyword in self.keywords:
             key = keyword.term.strip()
             if key not in seen_keywords or keyword.weigh > seen_keywords[key].weigh:
@@ -279,7 +286,7 @@ class NewsItem:
                 for item in raw_entities
             ],
             keywords=[
-                Keyword(
+                NewsKeyword(
                     id=int(item.get("id", -1) or -1),
                     news_item_id=int(item.get("news_item_id", -1) or -1),
                     news_first_time=parse_timestamp(item.get("news_first_time")),
@@ -545,7 +552,7 @@ class NewsItemRepository(ABC):
         news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
-    ) -> List[Keyword]:
+    ) -> List[NewsKeyword]:
         """根据 last_time 范围查询关键词表，并按 news_first_time 过滤分区。"""
         pass
 
@@ -562,7 +569,7 @@ class NewsItemRepository(ABC):
     @abstractmethod
     def get_news_list_by_keywords(
         self,
-        keywords: List[Keyword],
+        keywords: List[NewsKeyword],
         news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
@@ -657,7 +664,7 @@ class NewsDomainService:
         end_time: int,
         news_first_time: Optional[int] = None,
         top_n: int = 50,
-    ) -> Tuple[Dict[str, List[Keyword]], Dict[str, List[Entity]]]:
+    ) -> Tuple[Dict[str, List[NewsKeyword]], Dict[str, List[Entity]]]:
         """
         - 通过 keyword 和 entity 推荐热点 topic 候选
         - start_time/end_time: keyword/entity 的 last_time 查询区间
@@ -676,7 +683,7 @@ class NewsDomainService:
             news_first_time=news_first_time,
         )
 
-        keyword_groups: Dict[str, List[Keyword]] = {}
+        keyword_groups: Dict[str, List[NewsKeyword]] = {}
         keyword_weight_sum: Dict[str, float] = {}
         for keyword in keywords:
             key = keyword.term.strip()
@@ -743,7 +750,7 @@ class NewsDomainService:
         end_time: int,
         news_first_time: Optional[int] = None,
         top_n: int = 50,
-    ) -> Tuple[List[Keyword], List[Entity]]:
+    ) -> Tuple[List[NewsKeyword], List[Entity]]:
         """
         - 功能类似 recommend_hot_terms_by_time_range
         - 返回扁平化列表: (keyword_list, entity_list)
@@ -871,7 +878,7 @@ class NewsDomainService:
         news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
-    ) -> List[Keyword]:
+    ) -> List[NewsKeyword]:
         """根据关键词文本搜索 Keyword 记录。"""
         normalized_terms = {
             self._normalize_search_text(term)
@@ -957,7 +964,7 @@ class NewsDomainService:
             ]
         if src.keywords:
             target.keywords = [
-                Keyword(
+                NewsKeyword(
                     id=keyword.id,
                     news_item_id=keyword.news_item_id,
                     news_first_time=keyword.news_first_time,
@@ -1058,7 +1065,7 @@ class NewsDomainService:
         start_time: int,
         end_time: int,
         news_first_time: Optional[int] = None,
-    ) -> List[Keyword]:
+    ) -> List[NewsKeyword]:
         """根据起止时间获取关键词列表（直接查询关键词表）。"""
         return self.storage.get_keywords_by_last_time_range(
             news_first_time=news_first_time,
@@ -1072,7 +1079,7 @@ class NewsDomainService:
         start_time: int,
         end_time: int,
         news_first_time: Optional[int] = None,
-    ) -> List[Keyword]:
+    ) -> List[NewsKeyword]:
         """按 term 模糊匹配，且在时间范围内检索 Keywords。"""
         if not term_query:
             return []
@@ -1139,7 +1146,7 @@ class NewsDomainService:
 
     def get_news_list_by_keywords(
         self,
-        keywords: List[Keyword],
+        keywords: List[NewsKeyword],
         news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
@@ -1292,7 +1299,7 @@ class NewsDomainService:
         start_time: int,
         end_time: int,
         news_first_time: Optional[int] = None,
-    ) -> List[Keyword]:
+    ) -> List[NewsKeyword]:
         """根据 start_time 和 end_time 范围查询 Keywords。"""
         return self.storage.get_keywords_by_last_time_range(
             start_time=start_time,
