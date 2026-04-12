@@ -976,7 +976,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             row_key_pairs: List[tuple[int, int]] = []
             for row in rows:
                 row_id = int(row[0])
-                row_first_time = self._to_timestamp(row[18])
+                row_first_time = self._to_timestamp(row[19])  # first_time
                 if row_first_time is None:
                     continue
                 row_key_pairs.append((row_id, int(row_first_time)))
@@ -1023,8 +1023,8 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                     attention_score=float(row[18]),
                     first_time=self._to_timestamp(row[19]),
                     last_time=self._to_timestamp(row[20]),
-                    analyzed_time=self._expect_db_datetime_or_none(row[20]),
-                    total_weigh=float(row[21]),
+                    analyzed_time=self._expect_db_datetime_or_none(row[21]),
+                    total_weigh=float(row[22]),
                     rank_timeline_obj=timeline_by_news.get(news_item_id, []),
                 )
                 items.append(item)
@@ -1054,7 +1054,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             row_key_pairs: List[tuple[int, int]] = []
             for row in rows:
                 row_id = int(row[0])
-                row_first_time = self._to_timestamp(row[18])
+                row_first_time = self._to_timestamp(row[19])  # first_time
                 if row_first_time is None:
                     continue
                 row_key_pairs.append((row_id, int(row_first_time)))
@@ -1073,6 +1073,14 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 id_to_name[source_id] = source_name
                 news_item_id = int(row[0])
 
+                raw_comments = row[7]
+                comments = []
+                if raw_comments:
+                    try:
+                        comments = json.loads(raw_comments)
+                    except (json.JSONDecodeError, TypeError):
+                        comments = []
+
                 item = NewsItem(
                     id=news_item_id,
                     title=str(row[2]),
@@ -1080,23 +1088,24 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                     source_name=source_name,
                     event_type=str(row[5]),
                     summary=str(row[6]),
+                    comments=comments,
                     entities=entities_by_news.get(news_item_id, []),
                     keywords=keywords_by_news.get(news_item_id, []),
-                    latest_rank=int(row[7]),
-                    url=str(row[8]),
-                    mobile_url=str(row[9]),
-                    sentiment_polarity=str(row[10]),
-                    positive_ratio=float(row[11]),
-                    negative_ratio=float(row[12]),
-                    neutral_ratio=float(row[13]),
-                    optimism_score=float(row[14]),
-                    trust_score=float(row[15]),
-                    controversy_score=float(row[16]),
-                    attention_score=float(row[17]),
-                    first_time=self._to_timestamp(row[18]),
-                    last_time=self._to_timestamp(row[19]),
-                    analyzed_time=self._expect_db_datetime_or_none(row[20]),
-                    total_weigh=float(row[21]),
+                    latest_rank=int(row[8]),
+                    url=str(row[9]),
+                    mobile_url=str(row[10]),
+                    sentiment_polarity=str(row[11]),
+                    positive_ratio=float(row[12]),
+                    negative_ratio=float(row[13]),
+                    neutral_ratio=float(row[14]),
+                    optimism_score=float(row[15]),
+                    trust_score=float(row[16]),
+                    controversy_score=float(row[17]),
+                    attention_score=float(row[18]),
+                    first_time=self._to_timestamp(row[19]),
+                    last_time=self._to_timestamp(row[20]),
+                    analyzed_time=self._expect_db_datetime_or_none(row[21]),
+                    total_weigh=float(row[22]),
                     rank_timeline_obj=timeline_by_news.get(news_item_id, []),
                 )
                 items.setdefault(source_id, []).append(item)
