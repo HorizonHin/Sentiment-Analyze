@@ -127,6 +127,15 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             return int(news_first_time)
         return int(time.time()) - self.first_time_lookback_seconds
 
+    def _iter_partition_thresholds(self) -> List[Optional[int]]:
+        """按 first_time_lookback_days 回溯 3 次，最后兜底全量查询。"""
+        now_ts = int(time.time())
+        thresholds: List[Optional[int]] = []
+        for step in range(1, 4):
+            thresholds.append(now_ts - self.first_time_lookback_seconds * step)
+        thresholds.append(None)
+        return thresholds
+
     def _normalize_timeline_point(self, point: object) -> Optional[Tuple[str, int]]:
         """兼容 tuple/list/dict 的 timeline 点，统一返回 (time, rank)。"""
         time_value = ""
@@ -422,86 +431,97 @@ class SqlServerNewsItemRepository(NewsItemRepository):
 
     def get_keywords_by_last_time_range(
         self,
-        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsKeyword]:
-        partition_first_time = self._resolve_partition_first_time(news_first_time)
         where_sql, params, normalized_last_time = self._build_normalized_datetime_text_range_clause(
             column_name="last_time",
             start_time=start_time,
             end_time=end_time,
         )
-        where_sql = f"news_first_time >= ? AND ({where_sql})"
-        params = [partition_first_time] + params
 
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                f"SELECT id, news_item_id, news_first_time, last_time, term, importance, weigh FROM NewsKeyword WHERE {where_sql} ORDER BY {normalized_last_time} ASC, id ASC",
-                *params,
-            )
-            result: List[NewsKeyword] = []
-            for row in cursor.fetchall():
-                result.append(
-                    NewsKeyword(
-                        id=int(row[0]),
-                        news_item_id=int(row[1]),
-                        news_first_time=self._to_timestamp(row[2]),
-                        last_time=self._to_timestamp(row[3]),
-                        term=str(row[4]),
-                        importance=float(row[5] if row[5] is not None else 0.0),
-                        weigh=float(row[6] if row[6] is not None else 0.0),
-                    )
+        for partition_first_time in self._iter_partition_thresholds():
+            effective_where_sql = f"({where_sql})"
+            effective_params = list(params)
+            if partition_first_time is not None:
+                effective_where_sql = f"news_first_time >= ? AND {effective_where_sql}"
+                effective_params = [partition_first_time] + effective_params
+
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    f"SELECT id, news_item_id, news_first_time, last_time, term, importance, weigh FROM NewsKeyword WHERE {effective_where_sql} ORDER BY {normalized_last_time} ASC, id ASC",
+                    *effective_params,
                 )
-            return result
-        finally:
-            conn.close()
+                result: List[NewsKeyword] = []
+                for row in cursor.fetchall():
+                    result.append(
+                        NewsKeyword(
+                            id=int(row[0]),
+                            news_item_id=int(row[1]),
+                            news_first_time=self._to_timestamp(row[2]),
+                            last_time=self._to_timestamp(row[3]),
+                            term=str(row[4]),
+                            importance=float(row[5] if row[5] is not None else 0.0),
+                            weigh=float(row[6] if row[6] is not None else 0.0),
+                        )
+                    )
+                if result:
+                    return result
+            finally:
+                conn.close()
+
+        return []
 
     def get_entities_by_last_time_range(
         self,
-        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[Entity]:
-        partition_first_time = self._resolve_partition_first_time(news_first_time)
         where_sql, params, normalized_last_time = self._build_normalized_datetime_text_range_clause(
             column_name="last_time",
             start_time=start_time,
             end_time=end_time,
         )
-        where_sql = f"news_first_time >= ? AND ({where_sql})"
-        params = [partition_first_time] + params
 
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                f"SELECT id, news_item_id, news_first_time, last_time, name, entity_type, weigh FROM Entity WHERE {where_sql} ORDER BY {normalized_last_time} ASC, id ASC",
-                *params,
-            )
-            result: List[Entity] = []
-            for row in cursor.fetchall():
-                result.append(
-                    Entity(
-                        id=int(row[0]),
-                        news_item_id=int(row[1]),
-                        news_first_time=self._to_timestamp(row[2]),
-                        last_time=self._to_timestamp(row[3]),
-                        name=str(row[4]),
-                        type=str(row[5]),
-                        weigh=float(row[6] if row[6] is not None else 0.0),
-                    )
+        for partition_first_time in self._iter_partition_thresholds():
+            effective_where_sql = f"({where_sql})"
+            effective_params = list(params)
+            if partition_first_time is not None:
+                effective_where_sql = f"news_first_time >= ? AND {effective_where_sql}"
+                effective_params = [partition_first_time] + effective_params
+
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    f"SELECT id, news_item_id, news_first_time, last_time, name, entity_type, weigh FROM Entity WHERE {effective_where_sql} ORDER BY {normalized_last_time} ASC, id ASC",
+                    *effective_params,
                 )
-            return result
-        finally:
-            conn.close()
+                result: List[Entity] = []
+                for row in cursor.fetchall():
+                    result.append(
+                        Entity(
+                            id=int(row[0]),
+                            news_item_id=int(row[1]),
+                            news_first_time=self._to_timestamp(row[2]),
+                            last_time=self._to_timestamp(row[3]),
+                            name=str(row[4]),
+                            type=str(row[5]),
+                            weigh=float(row[6] if row[6] is not None else 0.0),
+                        )
+                    )
+                if result:
+                    return result
+            finally:
+                conn.close()
+
+        return []
 
     def get_news_list_by_keywords(
         self,
         keywords: List[NewsKeyword],
-        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
@@ -521,7 +541,6 @@ class SqlServerNewsItemRepository(NewsItemRepository):
 
         return self._load_news_list_by_composite_keys(
             row_key_pairs=list(key_pairs),
-            news_first_time=news_first_time,
             start_time=start_time,
             end_time=end_time,
         )
@@ -529,7 +548,6 @@ class SqlServerNewsItemRepository(NewsItemRepository):
     def _load_news_list_by_composite_keys(
         self,
         row_key_pairs: List[tuple[int, int]],
-        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
@@ -545,10 +563,6 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             params.extend([int(news_item_id), int(row_news_first_time)])
         where_clauses.append(f"({' OR '.join(composite_conditions)})")
 
-        partition_first_time = self._resolve_partition_first_time(news_first_time)
-        where_clauses.append("first_time >= ?")
-        params.append(partition_first_time)
-
         time_where_sql, time_params = self._build_datetime_range_clause(
             column_name="first_time",
             start_time=start_time,
@@ -558,14 +572,23 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             where_clauses.append(time_where_sql)
             params.extend(time_params)
 
-        where_sql = " AND ".join(where_clauses)
-        items = self._load_filtered_data(where_sql=where_sql, params=params)
-        return items if items is not None else []
+        base_where_sql = " AND ".join(where_clauses)
+        for partition_first_time in self._iter_partition_thresholds():
+            where_sql = base_where_sql
+            effective_params = list(params)
+            if partition_first_time is not None:
+                where_sql = f"{where_sql} AND first_time >= ?"
+                effective_params.append(partition_first_time)
+
+            items = self._load_filtered_data(where_sql=where_sql, params=effective_params)
+            if items:
+                return items
+
+        return []
 
     def get_news_list_by_entities(
         self,
         entities: List[Entity],
-        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
@@ -585,7 +608,6 @@ class SqlServerNewsItemRepository(NewsItemRepository):
 
         return self._load_news_list_by_composite_keys(
             row_key_pairs=list(key_pairs),
-            news_first_time=news_first_time,
             start_time=start_time,
             end_time=end_time,
         )
@@ -660,7 +682,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         deduplicated_news_list = list(unique_items_by_key.values())
         key_list = list(unique_items_by_key.keys())
 
-        existing_items = self.get_news_list_by_source_title_list(key_list, 0)
+        existing_items = self.get_news_list_by_source_title_list(key_list)
         existing_keys = {
             self._normalize_source_title_key(item.source_id, item.title)
             for item in existing_items
@@ -745,7 +767,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             self._replace_keyword_and_entity(conn, deduplicated_news_list)
 
             conn.commit()
-            return self.get_news_list_by_source_title_list(key_list, 0)
+            return self.get_news_list_by_source_title_list(key_list)
         except pyodbc.Error as e:
             conn.rollback()
             logger.error(f"添加新闻数据失败: {e}")
@@ -877,7 +899,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                     self._upsert_rank_timeline_for_item(cursor, item)
 
                 conn.commit()
-                return self.get_news_list_by_source_title_list(key_list, 0)
+                return self.get_news_list_by_source_title_list(key_list)
             except pyodbc.DatabaseError as e:
                 conn.rollback()
                 err = str(e).lower()
@@ -900,13 +922,8 @@ class SqlServerNewsItemRepository(NewsItemRepository):
     def get_news_list_by_source_title_list(
         self,
         source_title_list: List[tuple[str, str]],
-        first_time: int,
     ) -> List[NewsItem]:
         if not source_title_list:
-            return []
-
-        first_time_ts = self._to_timestamp(first_time)
-        if first_time_ts is None:
             return []
 
         where_conditions = []
@@ -920,17 +937,22 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         if not where_conditions:
             return []
 
-        where_sql = f"({' OR '.join(where_conditions)}) AND first_time >= ?"
-        params.append(first_time_ts)
-        items = self._load_filtered_data(where_sql=where_sql, params=params)
-        return items if items is not None else []
+        base_where_sql = f"({' OR '.join(where_conditions)})"
+        for partition_first_time in self._iter_partition_thresholds():
+            where_sql = base_where_sql
+            effective_params = list(params)
+            if partition_first_time is not None:
+                where_sql = f"{where_sql} AND first_time >= ?"
+                effective_params.append(partition_first_time)
 
-    def get_news_items_by_url(self, url_list: List[str], first_time: int) -> List[NewsItem]:
+            items = self._load_filtered_data(where_sql=where_sql, params=effective_params)
+            if items:
+                return items
+
+        return []
+
+    def get_news_items_by_url(self, url_list: List[str]) -> List[NewsItem]:
         if not url_list:
-            return []
-
-        first_time_ts = self._to_timestamp(first_time)
-        if first_time_ts is None:
             return []
 
         where_conditions = []
@@ -944,10 +966,19 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         if not where_conditions:
             return []
 
-        where_sql = f"({' OR '.join(where_conditions)}) AND first_time >= ?"
-        params.append(first_time_ts)
-        items = self._load_filtered_data(where_sql=where_sql, params=params)
-        return items if items is not None else []
+        base_where_sql = f"({' OR '.join(where_conditions)})"
+        for partition_first_time in self._iter_partition_thresholds():
+            where_sql = base_where_sql
+            effective_params = list(params)
+            if partition_first_time is not None:
+                where_sql = f"{where_sql} AND first_time >= ?"
+                effective_params.append(partition_first_time)
+
+            items = self._load_filtered_data(where_sql=where_sql, params=effective_params)
+            if items:
+                return items
+
+        return []
 
     def _load_filtered_data(
         self,
@@ -1123,32 +1154,35 @@ class SqlServerNewsItemRepository(NewsItemRepository):
     def get_news_list_by_latest_batch(
         self,
         isAnalyzed: bool,
-        first_time: int,
     ) -> Optional[List[NewsItem]]:
         """获取最新一批已分析（或未分析）的新闻，按 last_time DESC 排序，返回 TOP 500。
         
         Args:
             isAnalyzed: 是否已分析
-            first_time: 分区键（下界），用于过滤分区
+            分区键自动回溯（默认 first_time_lookback_days）
         
         Returns:
             按 last_time 降序排列的最新新闻，最多 500 条
         """
-        partition_first_time = self._to_timestamp(first_time)
-        if partition_first_time is None:
-            raise ValueError("first_time is required for partition filtering")
-        
         analyzed_filter = "analyzed_time IS NOT NULL" if isAnalyzed else "analyzed_time IS NULL"
-        where_sql = f"first_time >= ? AND {analyzed_filter}"
-        params = [partition_first_time]
 
-        # 按 last_time 降序，返回最新的 500 条
-        return self._load_filtered_data(
-            where_sql=where_sql,
-            params=params,
-            order_by="last_time DESC, id DESC",
-            top_n=500,
-        )
+        for partition_first_time in self._iter_partition_thresholds():
+            where_sql = analyzed_filter
+            params: List[object] = []
+            if partition_first_time is not None:
+                where_sql = f"first_time >= ? AND {where_sql}"
+                params.append(partition_first_time)
+
+            items = self._load_filtered_data(
+                where_sql=where_sql,
+                params=params,
+                order_by="last_time DESC, id DESC",
+                top_n=500,
+            )
+            if items:
+                return items
+
+        return None
 
     def get_news_list_by_first_time_range(
         self,

@@ -135,6 +135,7 @@ def create_app() -> Flask:
         username=mssql_username,
         password=mssql_password,
         driver=mssql_driver,
+        first_time_lookback_days=first_time_lookback_days,
     )
     risk_warning_repository = SqlServerRiskWarningRepository(
         server=mssql_server,

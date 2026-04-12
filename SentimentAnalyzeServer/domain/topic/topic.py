@@ -505,12 +505,11 @@ class TopicDomainService:
 		topic.updated_at = now
 		return self.aggregate_topic_metrics(topic)
 
-	def find_recent_topic_by_name(self, topic_name: str, days_lookback: int = 7) -> Optional[Topic]:
+	def find_topic_by_name(self, topic_name: str) -> Optional[Topic]:
 		if self.topic_repository is None:
 			return None
-		return self.topic_repository.find_recent_topic_by_name(
+		return self.topic_repository.find_topic_by_name(
 			topic_name=str(topic_name),
-			days_lookback=max(1, int(days_lookback)),
 		)
 
 class TopicRepository(ABC):
@@ -533,13 +532,13 @@ class TopicRepository(ABC):
 	@abstractmethod
 	def list_topics_by_time_range(
 		self,
-		first_time_start: Optional[int] = None,
-		first_time_end: Optional[int] = None,
+		created_at_start: Optional[int] = None,
+		created_at_end: Optional[int] = None,
 		updated_at_start: Optional[int] = None,
 		updated_at_end: Optional[int] = None,
 		limit: int = 100,
 	) -> List[Topic]:
-		"""根据first_time和updated_at的起止时间，返回Topic表中的所有Topic。"""
+		"""根据created_at和updated_at的起止时间，返回Topic表中的所有Topic。"""
 		pass
 
 	@abstractmethod
@@ -556,12 +555,11 @@ class TopicRepository(ABC):
 		pass
 
 	@abstractmethod
-	def find_recent_topic_by_name(
+	def find_topic_by_name(
 		self,
 		topic_name: str,
-		days_lookback: int = 7,
 	) -> Optional[Topic]:
-		"""查找最近N天内相同topic名称的最新记录."""
+		"""按 topic 名称查询最新记录，具体时间回溯策略由实现层决定。"""
 		pass
 
 	@abstractmethod

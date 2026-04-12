@@ -469,13 +469,12 @@ class NewsItemRepository(ABC):
     def get_news_list_by_source_title_list(
         self,
         source_title_list: List[tuple[str, str]],
-        first_time: int,
     ) -> List[NewsItem]:
         """根据 (source_id, title) 列表查询新闻数据。"""
         pass
 
     @abstractmethod
-    def get_news_items_by_url(self, url_list: List[str], first_time: int) -> List[NewsItem]:
+    def get_news_items_by_url(self, url_list: List[str]) -> List[NewsItem]:
         """根据 URL 列表（url 或 mobile_url）查询新闻数据。"""
         pass
 
@@ -514,17 +513,8 @@ class NewsItemRepository(ABC):
         """
         return False
 
-    def save_analyzed_news(self, news_ids: List[str], source_type: str, interests_file: str, prompt_hash: str, matched_ids: Set[str], date: Optional[int] = None) -> int:
-        return 0
-
     def get_analyzed_news_ids(self, source_type: str = "hotlist", date: Optional[int] = None, interests_file: str = "ai_interests.txt") -> Set[str]:
         return set()
-
-    def clear_analyzed_news(self, date: Optional[int] = None, interests_file: str = "ai_interests.txt") -> int:
-        return 0
-
-    def clear_unmatched_analyzed_news(self, date: Optional[int] = None, interests_file: str = "ai_interests.txt") -> int:
-        return 0
 
     def get_all_news_ids(self, date: Optional[int] = None) -> List[Dict]:
         return []
@@ -533,7 +523,6 @@ class NewsItemRepository(ABC):
     def get_news_list_by_latest_batch(
         self,
         isAnalyzed: bool,
-        first_time: int,
     ) -> Optional[List[NewsItem]]:
         pass
 
@@ -549,7 +538,6 @@ class NewsItemRepository(ABC):
     @abstractmethod
     def get_keywords_by_last_time_range(
         self,
-        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsKeyword]:
@@ -559,7 +547,6 @@ class NewsItemRepository(ABC):
     @abstractmethod
     def get_entities_by_last_time_range(
         self,
-        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[Entity]:
@@ -570,7 +557,6 @@ class NewsItemRepository(ABC):
     def get_news_list_by_keywords(
         self,
         keywords: List[NewsKeyword],
-        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
@@ -581,7 +567,6 @@ class NewsItemRepository(ABC):
     def get_news_list_by_entities(
         self,
         entities: List[Entity],
-        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
@@ -675,12 +660,10 @@ class NewsDomainService:
         keywords = self.get_keywords_by_last_time_range(
             start_time=start_time,
             end_time=end_time,
-            news_first_time=news_first_time,
         )
         entities = self.get_entities_by_last_time_range(
             start_time=start_time,
             end_time=end_time,
-            news_first_time=news_first_time,
         )
 
         keyword_groups: Dict[str, List[NewsKeyword]] = {}
@@ -804,7 +787,6 @@ class NewsDomainService:
             for keyword in self.get_keywords_by_time_range(
                 start_time=int(start_time),
                 end_time=int(end_time),
-                news_first_time=news_first_time,
             )
             if str(keyword.term or "").strip() in normalized_terms
         ]
@@ -813,7 +795,6 @@ class NewsDomainService:
 
         return self.get_news_list_by_keywords(
             keywords=matched_keywords,
-            news_first_time=news_first_time,
             start_time=start_time,
             end_time=end_time,
         )
@@ -846,7 +827,6 @@ class NewsDomainService:
             for entity in self.get_entities_by_time_range(
                 start_time=int(start_time),
                 end_time=int(end_time),
-                news_first_time=news_first_time,
             )
             if str(entity.name or "").strip() in normalized_names
         ]
@@ -855,7 +835,6 @@ class NewsDomainService:
 
         return self.get_news_list_by_entities(
             entities=matched_entities,
-            news_first_time=news_first_time,
             start_time=start_time,
             end_time=end_time,
         )
@@ -896,7 +875,6 @@ class NewsDomainService:
         keywords = self.get_keywords_by_time_range(
             start_time=int(start_time),
             end_time=int(end_time),
-            news_first_time=news_first_time,
         )
         return [
             keyword
@@ -928,7 +906,6 @@ class NewsDomainService:
         entities = self.get_entities_by_time_range(
             start_time=int(start_time),
             end_time=int(end_time),
-            news_first_time=news_first_time,
         )
         return [
             entity
@@ -1064,11 +1041,9 @@ class NewsDomainService:
         self,
         start_time: int,
         end_time: int,
-        news_first_time: Optional[int] = None,
     ) -> List[NewsKeyword]:
         """根据起止时间获取关键词列表（直接查询关键词表）。"""
         return self.storage.get_keywords_by_last_time_range(
-            news_first_time=news_first_time,
             start_time=start_time,
             end_time=end_time,
         )
@@ -1088,7 +1063,6 @@ class NewsDomainService:
         all_keywords = self.get_keywords_by_last_time_range(
             start_time=start_time,
             end_time=end_time,
-            news_first_time=news_first_time
         )
         
         # 2. 手动进行模糊过滤
@@ -1106,11 +1080,9 @@ class NewsDomainService:
         self,
         start_time: int,
         end_time: int,
-        news_first_time: Optional[int] = None,
     ) -> List[Entity]:
         """根据起止时间获取实体列表（直接查询实体表）。"""
         return self.storage.get_entities_by_last_time_range(
-            news_first_time=news_first_time,
             start_time=start_time,
             end_time=end_time,
         )
@@ -1130,7 +1102,6 @@ class NewsDomainService:
         all_entities = self.get_entities_by_last_time_range(
             start_time=start_time,
             end_time=end_time,
-            news_first_time=news_first_time
         )
         
         # 2. 手动进行模糊过滤
@@ -1147,13 +1118,11 @@ class NewsDomainService:
     def get_news_list_by_keywords(
         self,
         keywords: List[NewsKeyword],
-        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
         return self.storage.get_news_list_by_keywords(
             keywords=keywords,
-            news_first_time=news_first_time,
             start_time=start_time,
             end_time=end_time,
         )
@@ -1161,13 +1130,11 @@ class NewsDomainService:
     def get_news_list_by_entities(
         self,
         entities: List[Entity],
-        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
         return self.storage.get_news_list_by_entities(
             entities=entities,
-            news_first_time=news_first_time,
             start_time=start_time,
             end_time=end_time,
         )
@@ -1205,19 +1172,17 @@ class NewsDomainService:
     def get_news_list_by_source_title_list(
         self,
         source_title_list: List[tuple[str, str]],
-        first_time: int,
     ) -> List[NewsItem]:
-        return self.storage.get_news_list_by_source_title_list(source_title_list, first_time)
+        return self.storage.get_news_list_by_source_title_list(source_title_list)
 
     def get_news_list_by_url(
         self,
         url_list: List[str],
-        first_time: int,
     ) -> List[NewsItem]:
         """根据 URL 列表查询新闻数据。"""
         if not url_list:
             return []
-        return self.storage.get_news_items_by_url(url_list, first_time)
+        return self.storage.get_news_items_by_url(url_list)
 
     def update_news_list(self, news_list: List[NewsItem]) -> bool:
         if not news_list:
@@ -1227,7 +1192,7 @@ class NewsDomainService:
         if not key_list:
             return False
 
-        existing_items = self.get_news_list_by_source_title_list(key_list, FIRST_TIME_MIN)
+        existing_items = self.get_news_list_by_source_title_list(key_list)
         existing_map: Dict[Tuple[str, str], NewsItem] = {
             (item.source_id, item.title): item
             for item in existing_items
@@ -1256,7 +1221,6 @@ class NewsDomainService:
 
     def get_latest_analyzed_news_batch_grouped_by_source(
         self,
-        first_time: int,
     ) -> Optional[Dict[str, List[NewsItem]]]:
         """获取最新一批已分析的新闻，按 source_id 分组。
         
@@ -1268,7 +1232,6 @@ class NewsDomainService:
         """
         news_items = self.get_news_list_by_latest_batch(
             isAnalyzed=True,
-            first_time=first_time,
         )
         if news_items is None:
             return None
@@ -1278,7 +1241,6 @@ class NewsDomainService:
     def get_news_list_by_latest_batch(
         self,
         isAnalyzed: bool,
-        first_time: int,
     ) -> Optional[List[NewsItem]]:
         """获取最新一批已分析（或未分析）的新闻。
         
@@ -1291,32 +1253,27 @@ class NewsDomainService:
         """
         return self.storage.get_news_list_by_latest_batch(
             isAnalyzed=isAnalyzed,
-            first_time=first_time,
         )
 
     def get_keywords_by_time_range(
         self,
         start_time: int,
         end_time: int,
-        news_first_time: Optional[int] = None,
     ) -> List[NewsKeyword]:
         """根据 start_time 和 end_time 范围查询 Keywords。"""
         return self.storage.get_keywords_by_last_time_range(
             start_time=start_time,
             end_time=end_time,
-            news_first_time=news_first_time,
         )
 
     def get_entities_by_time_range(
         self,
         start_time: int,
         end_time: int,
-        news_first_time: Optional[int] = None,
     ) -> List[Entity]:
         """根据 start_time 和 end_time 范围查询 Entities。"""
         return self.storage.get_entities_by_last_time_range(
             start_time=start_time,
             end_time=end_time,
-            news_first_time=news_first_time,
         )
 

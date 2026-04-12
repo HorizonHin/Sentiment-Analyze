@@ -15,6 +15,13 @@ from SentimentAnalyzeServer.domain.topic.topic import Topic, TopicPlatformStats,
 
 class SqlServerTopicRepository(TopicRepository):
 
+    def _iter_default_window_starts(self, base_end_ts: int) -> List[Optional[int]]:
+        starts: List[Optional[int]] = []
+        for step in range(1, 4):
+            starts.append(int(base_end_ts) - self.first_time_lookback_seconds * step)
+        starts.append(None)
+        return starts
+
     def add_topics(self, topics: List[Topic]) -> List[Topic]:
         if not topics:
             return []
@@ -195,38 +202,56 @@ class SqlServerTopicRepository(TopicRepository):
             """
             根据created_at和updated_at的起止时间，返回Topic表中的所有Topic。
             """
-            conditions = []
-            params = []
-            if created_at_start is not None:
-                conditions.append("created_at >= ?")
-                params.append(int(created_at_start))
-            if created_at_end is not None:
-                conditions.append("created_at <= ?")
-                params.append(int(created_at_end))
-            if updated_at_start is not None:
-                conditions.append("updated_at >= ?")
-                params.append(int(updated_at_start))
-            if updated_at_end is not None:
-                conditions.append("updated_at <= ?")
-                params.append(int(updated_at_end))
-            where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-            sql = f"""
-                SELECT TOP (?)
-                    created_at, id, topic, llm_title, topic_type, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
-                    sentiment, news_count, total_weight, heat_change_percent,
-                    stage, updated_at, version
-                FROM Topic
-                {where_clause}
-                ORDER BY  total_weight DESC,updated_at DESC
-            """
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            try:
-                cursor.execute(sql, int(limit), *params)
-                rows = cursor.fetchall()
-                return [self._from_topic_row(row) for row in rows]
-            finally:
-                conn.close()
+            use_default_window = created_at_start is None and updated_at_start is None
+            base_end_ts = int(updated_at_end or created_at_end or time.time())
+
+            if use_default_window:
+                created_start_candidates = self._iter_default_window_starts(base_end_ts)
+                updated_start_candidates = self._iter_default_window_starts(base_end_ts)
+            else:
+                created_start_candidates = [created_at_start]
+                updated_start_candidates = [updated_at_start]
+
+            for idx in range(len(created_start_candidates)):
+                effective_created_start = created_start_candidates[idx]
+                effective_updated_start = updated_start_candidates[idx]
+
+                conditions = []
+                params = []
+                if effective_created_start is not None:
+                    conditions.append("created_at >= ?")
+                    params.append(int(effective_created_start))
+                if created_at_end is not None:
+                    conditions.append("created_at <= ?")
+                    params.append(int(created_at_end))
+                if effective_updated_start is not None:
+                    conditions.append("updated_at >= ?")
+                    params.append(int(effective_updated_start))
+                if updated_at_end is not None:
+                    conditions.append("updated_at <= ?")
+                    params.append(int(updated_at_end))
+
+                where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+                sql = f"""
+                    SELECT TOP (?)
+                        created_at, id, topic, llm_title, topic_type, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
+                        sentiment, news_count, total_weight, heat_change_percent,
+                        stage, updated_at, version
+                    FROM Topic
+                    {where_clause}
+                    ORDER BY  total_weight DESC,updated_at DESC
+                """
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(sql, int(limit), *params)
+                    rows = cursor.fetchall()
+                    if rows:
+                        return [self._from_topic_row(row) for row in rows]
+                finally:
+                    conn.close()
+
+            return []
     
     def __init__(
         self,
@@ -235,12 +260,14 @@ class SqlServerTopicRepository(TopicRepository):
         username: Optional[str] = None,
         password: Optional[str] = None,
         driver: str = "ODBC Driver 17 for SQL Server",
+        first_time_lookback_days: int = 7,
     ) -> None:
         self.server = server or "localhost"
         self.database = database or "sentiment_analyze"
         self.username = username or "sa"
         self.password = password or ""
         self.driver = driver
+        self.first_time_lookback_seconds = max(1, int(first_time_lookback_days)) * 24 * 60 * 60
 
         if self.password:
             self.connection_string = (
@@ -424,55 +451,59 @@ class SqlServerTopicRepository(TopicRepository):
         finally:
             conn.close()
 
-    def find_recent_topic_by_name(
+    def find_topic_by_name(
         self,
         topic_name: str,
-        days_lookback: int = 7,
     ) -> Optional[Topic]:
         """
-        查找相同topic名称、且updated_at在最近N天内的最新Topic记录。
+        按名称查找 Topic，默认使用 first_time_lookback_days 的窗口回溯策略。
         
-        如果存在这样的记录，返回其信息（包括created_at和id），
-        以便后续update操作能够使用正确的主键。
-        
-        Args:
-            topic_name: Topic名称
-            days_lookback: 向后查看的天数（默认7天）
-        
-        Returns:
-            Topic对象（如果存在）或None
+        回溯顺序：1x、2x、3x lookback window，最后全量兜底。
         """
         topic_name = str(topic_name or "").strip()
         if not topic_name:
             return None
 
-        now = int(time.time())
-        lookback_seconds = days_lookback * 86400
-        cutoff_time_ts = now - lookback_seconds
+        now_ts = int(time.time())
+        for start_ts in self._iter_default_window_starts(now_ts):
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                if start_ts is None:
+                    cursor.execute(
+                        """
+                        SELECT TOP 1
+                            created_at, id, topic, llm_title, topic_type, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
+                            sentiment, news_count, total_weight, heat_change_percent,
+                            stage, updated_at, version
+                        FROM Topic
+                        WHERE topic = ?
+                        ORDER BY updated_at DESC, created_at DESC, id DESC
+                        """,
+                        topic_name,
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        SELECT TOP 1
+                            created_at, id, topic, llm_title, topic_type, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
+                            sentiment, news_count, total_weight, heat_change_percent,
+                            stage, updated_at, version
+                        FROM Topic
+                        WHERE topic = ? AND created_at >= ? AND updated_at >= ?
+                        ORDER BY updated_at DESC, created_at DESC, id DESC
+                        """,
+                        topic_name,
+                        start_ts,
+                        start_ts,
+                    )
+                row = cursor.fetchone()
+                if row is not None:
+                    return self._from_topic_row(row)
+            finally:
+                conn.close()
 
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                """
-                SELECT TOP 1
-                    created_at, id, topic, llm_title, topic_type, platform_distribution_json, rank_data_json, start_time, end_time, window_size,
-                    sentiment, news_count, total_weight, heat_change_percent,
-                    stage, updated_at, version
-                FROM Topic
-                WHERE topic = ? AND created_at >= ? AND updated_at >= ?
-                ORDER BY updated_at DESC, created_at DESC, id DESC
-                """,
-                topic_name,
-                cutoff_time_ts,
-                cutoff_time_ts,
-            )
-            row = cursor.fetchone()
-            if row is None:
-                return None
-            return self._from_topic_row(row)
-        finally:
-            conn.close()
+        return None
 
     def list_topics_missing_llm_title(self, limit: int = 50) -> List[Topic]:
         conn = self._get_connection()

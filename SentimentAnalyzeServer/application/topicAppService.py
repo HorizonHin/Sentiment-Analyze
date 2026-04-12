@@ -256,9 +256,8 @@ class TopicAppService:
             if self._topic_name_matches(topic.topic, normalized_keyword):
                 return topic
 
-        topic = self.topic_domain_service.find_recent_topic_by_name(
+        topic = self.topic_domain_service.find_topic_by_name(
             topic_name=normalized_keyword,
-            days_lookback=self.default_days_lookback,
         )
         if topic is not None and self._topic_name_matches(topic.topic, normalized_keyword):
             return topic
@@ -298,13 +297,11 @@ class TopicAppService:
 
         keyword_items = self.news_domain_service.get_news_list_by_keywords(
             keywords=matched_keywords,
-            news_first_time=news_first_time,
             start_time=start_time,
             end_time=end_time,
         )
         entity_items = self.news_domain_service.get_news_list_by_entities(
             entities=matched_entities,
-            news_first_time=news_first_time,
             start_time=start_time,
             end_time=end_time,
         )
@@ -396,7 +393,6 @@ class TopicAppService:
         if keywords:
             keyword_news_items = self.news_domain_service.get_news_list_by_keywords(
                 keywords=keywords,
-                news_first_time=news_first_time,
             )
             keyword_item_map: Dict[tuple[int, int], NewsItem] = {
                 (int(item.id), int(item.first_time))
@@ -428,7 +424,6 @@ class TopicAppService:
         if entities:
             entity_news_items = self.news_domain_service.get_news_list_by_entities(
                 entities=entities,
-                news_first_time=news_first_time,
             )
             entity_item_map: Dict[tuple[int, int], NewsItem] = {
                 (int(item.id), int(item.first_time))
@@ -537,7 +532,7 @@ class TopicAppService:
             topic_name = str(new_status_topic.topic or "").strip()
             topic_db_match = self.topic_cache_manager.get_topic_by_name(topic_name)
             if topic_db_match is None:
-                topic_db_match = self.topic_domain_service.find_recent_topic_by_name(topic_name, days_lookback=self.default_days_lookback)
+                topic_db_match = self.topic_domain_service.find_topic_by_name(topic_name)
             # 2. 用Topic DB主键查topic_metrics_history
             if topic_db_match is not None: # update 操作
                 new_status_topic = self.topic_domain_service.applyNewStatus(new_status_topic, topic_db_match)
@@ -640,7 +635,6 @@ class TopicAppService:
         # 默认查最近6小时
         updated_at_start = now - self.topic_lookback
         topics = self.topic_domain_service.list_topics_by_time_range(
-            created_at_start=now - self.first_time_lookback_seconds,
             updated_at_start=updated_at_start,
             updated_at_end=now,
             limit=self.default_top_n,

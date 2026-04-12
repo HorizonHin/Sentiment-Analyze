@@ -51,37 +51,6 @@ class DataFetcherAppService:
         self.redis = MyRedis()
         self.common_thread_pool = CommonThreadPool()
 
-    def _rehydrate_runtime_comments(
-        self,
-        target_items: List[NewsItem],
-        source_items: List[NewsItem],
-    ) -> None:
-        """comments 不落库，需要在入库返回对象上回填运行时评论。"""
-        # 分别按 (source_id, title) 和 url 建立映射，实现“或”关系的匹配
-        source_st_map: Dict[tuple[str, str], List[str]] = {}
-        source_url_map: Dict[str, List[str]] = {}
-
-        for item in source_items:
-            if not item.comments:
-                continue
-            
-            st_key = (str(item.source_id or "").strip(), str(item.title or "").strip())
-            if st_key != ("", ""):
-                source_st_map[st_key] = list(item.comments)
-            
-            url_key = str(item.url or "").strip()
-            if url_key:
-                source_url_map[url_key] = list(item.comments)
-
-        for item in target_items:
-            # 优先按标题匹配，其次按 URL 匹配
-            st_key = (str(item.source_id or "").strip(), str(item.title or "").strip())
-            url_key = str(item.url or "").strip()
-            
-            comments = source_st_map.get(st_key) or source_url_map.get(url_key)
-            if comments:
-                item.comments = list(comments)
-
     async def _run_comment_fetch_task(self, incoming_items: List[NewsItem]) -> None:
         """执行评论抓取主任务（纯协程实现，平台间并发，平台内串行）。"""
         if not incoming_items:
@@ -222,12 +191,8 @@ class DataFetcherAppService:
         mobile_url_list = list({item.mobile_url for item in incoming_items if item.mobile_url})
         all_urls = list(set(url_list + mobile_url_list))
 
-        # 根据配置的回溯天数计算查询的起始时间戳
-        lookback_seconds = self._first_time_lookback_days * 86400
-        query_start_time = int(time.time()) - lookback_seconds
-
-        existing_items_by_st = self.news_domain_service.get_news_list_by_source_title_list(source_title_list, query_start_time)
-        existing_items_by_url = self.news_domain_service.get_news_list_by_url(all_urls, query_start_time)
+        existing_items_by_st = self.news_domain_service.get_news_list_by_source_title_list(source_title_list)
+        existing_items_by_url = self.news_domain_service.get_news_list_by_url(all_urls)
 
         existing_item_map: Dict[tuple[str, str], NewsItem] = {}
         existing_url_map: Dict[str, NewsItem] = {}
@@ -294,7 +259,6 @@ class DataFetcherAppService:
             added_items = self.news_domain_service.add_news_items(new_items)
             if not added_items:
                 raise RuntimeError("保存新增新闻数据失败")
-            self._rehydrate_runtime_comments(added_items, new_items)
             saved_items.extend(added_items)
 
         if merged_items:
@@ -304,7 +268,6 @@ class DataFetcherAppService:
             updated_items = self.news_domain_service.update_existing_crawled_titles(merged_items)
             if not updated_items:
                 raise RuntimeError("更新已存在新闻数据失败")
-            self._rehydrate_runtime_comments(updated_items, merged_items)
             saved_items.extend(updated_items)
 
         if saved_items:

@@ -342,10 +342,8 @@ class SentimentAnalyzeAppService:
 		self,
 	) -> dict[str, Any]:
 		"""获取最新一批未分析的新闻并执行分析。"""
-		resolved_first_time = int(time.time()) - self.first_time_lookback_seconds
 		latest_items = self.news_domain_service.get_news_list_by_latest_batch(
 			isAnalyzed=False,
-			first_time=resolved_first_time,
 		)
 		if not latest_items:
 			logger.info("[Analyze_pending] 无可分析的数据")
@@ -369,8 +367,6 @@ class SentimentAnalyzeAppService:
 		2. 缓存为空或被过滤后，查询数据库获取 TOP 500 最新已分析新闻
 		3. Domain 层进一步过滤确保数据完整性
 		"""
-		resolved_first_time = int(time.time()) - self.first_time_lookback_seconds
-		
 		# 尝试从 Redis 缓存读取最新数据
 		cached_payload_map = self.redis.get_many(
 			[
@@ -411,9 +407,7 @@ class SentimentAnalyzeAppService:
 
 		# 后备：查询数据库获取最新已分析的新闻
 		logger.info("Querying database for latest analyzed news")
-		grouped = self.news_domain_service.get_latest_analyzed_news_batch_grouped_by_source(
-			first_time=resolved_first_time
-		)
+		grouped = self.news_domain_service.get_latest_analyzed_news_batch_grouped_by_source()
 		if not grouped:
 			return {}
 
