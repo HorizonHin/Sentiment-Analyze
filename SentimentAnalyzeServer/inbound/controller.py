@@ -21,6 +21,10 @@ _LATEST_RANKED_LOOKBACK_MULTIPLIER = 2.2
 logger = logging.getLogger(__name__)
 
 
+def _normalize_search_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
 def create_external_controller(
 	sentiment_app_service: SentimentAnalyzeAppService,
 	topic_app_service: TopicAppService,
@@ -145,50 +149,28 @@ def create_external_controller(
 		"""
 		参数:
 		- keyword: str (必填，搜索词，如: 小米)
-		- start_time: int (秒级时间戳)
-		- end_time: int (秒级时间戳)
-		- news_first_time: int (可选，分区下界)
 		- limit: int (可选，默认100)
 		"""
 		try:
-			keyword = str(request.args.get("keyword", "")).strip()
+			keyword = _normalize_search_text(request.args.get("keyword", ""))
 			if not keyword:
 				return jsonify(Result.failure_result("参数 keyword 不能为空").to_dict())
-
-			start_time = parse_int_timestamp(request.args.get("start_time"))
-			end_time = parse_int_timestamp(request.args.get("end_time"))
-			news_first_time = parse_int_timestamp(request.args.get("news_first_time"))
 			limit_raw = request.args.get("limit")
 			try:
 				limit = max(1, int(limit_raw)) if limit_raw is not None else 100
 			except (TypeError, ValueError):
 				limit = 100
-
-			if start_time is None or end_time is None:
-				return jsonify(Result.failure_result("参数 start_time 和 end_time 必须为有效的秒级时间戳").to_dict())
-
-			keywords = topic_app_service.search_keywords_by_query(
+			news_domain_service = topic_app_service.news_domain_service
+			keywords = news_domain_service.search_or_insert_keyword_dict(
 				query=keyword,
-				start_time=start_time,
-				end_time=end_time,
-				news_first_time=news_first_time,
 				limit=limit,
 			)
-			entities = topic_app_service.search_entities_by_query(
-				query=keyword,
-				start_time=start_time,
-				end_time=end_time,
-				news_first_time=news_first_time,
-				limit=limit,
-			)
-
-			def key_or_enti_to_dict(obj):
-				return {slot: getattr(obj, slot) for slot in obj.__slots__ if hasattr(obj, slot)}
+			def keyword_to_dict(obj):
+				return {"id": obj.id, "term": obj.term}
 
 			data = {
 				"keyword": keyword,
-				"keywords": [key_or_enti_to_dict(kw) for kw in keywords],
-				"entities": [key_or_enti_to_dict(e) for e in entities],
+				"keywords": [keyword_to_dict(kw) for kw in keywords],
 			}
 			return jsonify(Result.success_result(data).to_dict())
 		except Exception as exc:
@@ -198,19 +180,12 @@ def create_external_controller(
 	@bp.get("/topics/by-keyword")
 	def get_topic_by_keyword() -> object:
 		try:
-			keyword = str(request.args.get("keyword", "")).strip()
+			keyword = _normalize_search_text(request.args.get("keyword", ""))
 			if not keyword:
 				return jsonify(Result.failure_result("参数 keyword 不能为空").to_dict())
 
-			news_first_time = parse_int_timestamp(request.args.get("news_first_time"))
-			start_time = parse_int_timestamp(request.args.get("start_time"))
-			end_time = parse_int_timestamp(request.args.get("end_time"))
-
 			topic = topic_app_service.get_topic_by_keyword_or_build(
-				keyword=keyword,
-				news_first_time=news_first_time,
-				start_time=start_time,
-				end_time=end_time,
+				keyword=keyword
 			)
 			if topic is None:
 				return jsonify(Result.failure_result("未找到可返回或可构建的 Topic").to_dict())
@@ -253,9 +228,9 @@ def create_external_controller(
 	def add_followed_keyword() -> object:
 		try:
 			payload = request.get_json(silent=True) or {}
-			keyword_term = str(payload.get("keyword_term", "")).strip()
+			keyword_term = _normalize_search_text(payload.get("keyword_term", ""))
 			if not keyword_term:
-				keyword_term = str(request.args.get("keyword_term", "")).strip()
+				keyword_term = _normalize_search_text(request.args.get("keyword_term", ""))
 			if not keyword_term:
 				return jsonify(Result.failure_result("参数 keyword_term 不能为空").to_dict())
 
@@ -273,10 +248,10 @@ def create_external_controller(
 	@bp.delete("/keywords/followed/delete")
 	def delete_followed_keyword() -> object:
 		try:
-			keyword_term = str(request.args.get("keyword_term", "")).strip()
+			keyword_term = _normalize_search_text(request.args.get("keyword_term", ""))
 			if not keyword_term:
 				payload = request.get_json(silent=True) or {}
-				keyword_term = str(payload.get("keyword_term", "")).strip()
+				keyword_term = _normalize_search_text(payload.get("keyword_term", ""))
 			if not keyword_term:
 				return jsonify(Result.failure_result("参数 keyword_term 不能为空").to_dict())
 

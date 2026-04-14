@@ -202,8 +202,8 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             if inserted and inserted[0] is not None:
                 point.id = int(inserted[0])
 
-    def _replace_keyword_and_entity(self, conn: pyodbc.Connection, valid_news: List[NewsItem]) -> None:
-        """覆盖式更新关键字和实体：先删除旧关联，再插入新关联。支持批量执行。"""
+    def _replace_news_keyword_and_entity(self, conn: pyodbc.Connection, valid_news: List[NewsItem]) -> None:
+        """覆盖式更新新新闻关键字和实体：先删除旧关联，再插入新关联。支持批量执行。"""
         cursor = conn.cursor()
 
         # 1. 批量处理关键词
@@ -429,7 +429,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
 
         return keywords_by_news, entities_by_news, timeline_by_news
 
-    def get_keywords_by_last_time_range(
+    def get_news_keywords_by_last_time_range(
         self,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
@@ -519,22 +519,22 @@ class SqlServerNewsItemRepository(NewsItemRepository):
 
         return []
 
-    def get_news_list_by_keywords(
+    def get_news_list_by_news_keywords(
         self,
-        keywords: List[NewsKeyword],
+        news_keywords: List[NewsKeyword],
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
-        if not keywords:
+        if not news_keywords:
             return []
 
         key_pairs = {
-            (int(keyword.news_item_id), int(keyword.news_first_time))
-            for keyword in keywords
-            if isinstance(keyword, NewsKeyword)
-            and keyword.news_item_id is not None
-            and keyword.news_first_time is not None
-            and int(keyword.news_item_id) > 0
+            (int(kw.news_item_id), int(kw.news_first_time))
+            for kw in news_keywords
+            if isinstance(kw, NewsKeyword)
+            and kw.news_item_id is not None
+            and kw.news_first_time is not None
+            and int(kw.news_item_id) > 0
         }
         if not key_pairs:
             return []
@@ -665,6 +665,56 @@ class SqlServerNewsItemRepository(NewsItemRepository):
         finally:
             conn.close()
 
+    def search_keywords_from_dict(self, query: str, limit: int = 100) -> List[Keyword]:
+        """从 Keyword 字典表模糊搜索。"""
+        if not query:
+            return []
+        safe_limit = max(1, int(limit or 100))
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            sql = "SELECT TOP (?) id, term FROM Keyword WHERE term LIKE ? ORDER BY term ASC"
+            cursor.execute(sql, safe_limit, f"%{query}%")
+            results = []
+            for row in cursor.fetchall():
+                results.append(Keyword(id=row[0], term=str(row[1]).strip()))
+            return results
+        finally:
+            conn.close()
+
+    def insert_keywords_to_dict(self, terms: List[str]) -> List[Keyword]:
+        """批量插入关键词到字典表。"""
+        if not terms:
+            return []
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        results = []
+        try:
+            for term in terms:
+                term_clean = str(term or "").strip()
+                if not term_clean:
+                    continue
+                try:
+                    cursor.execute("INSERT INTO Keyword (term) OUTPUT INSERTED.id VALUES (?)", term_clean)
+                    new_id = cursor.fetchval()
+                    results.append(Keyword(id=new_id, term=term_clean))
+                except pyodbc.Error as e:
+                    if self._is_unique_violation(e):
+                        cursor.execute("SELECT id, term FROM Keyword WHERE term = ?", term_clean)
+                        row = cursor.fetchone()
+                        if row:
+                            results.append(Keyword(id=row[0], term=str(row[1]).strip()))
+                    else:
+                        logger.error(f"Failed to insert keyword dict: {term_clean}, error: {e}")
+            conn.commit()
+            return results
+        except Exception as e:
+            logger.error(f"Failed to batch insert keyword dict: {e}")
+            conn.rollback()
+            return results
+        finally:
+            conn.close()
+
     def add_news_items(self, news_list: List[NewsItem]) -> List[NewsItem]:
         unique_items_by_key: Dict[Tuple[str, str], NewsItem] = {}
         for item in news_list:
@@ -764,7 +814,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
             for item in deduplicated_news_list:
                 self._upsert_rank_timeline_for_item(cursor, item)
 
-            self._replace_keyword_and_entity(conn, deduplicated_news_list)
+            self._replace_news_keyword_and_entity(conn, deduplicated_news_list)
 
             conn.commit()
             return self.get_news_list_by_source_title_list(key_list)
@@ -828,7 +878,7 @@ class SqlServerNewsItemRepository(NewsItemRepository):
                 for item in valid_news:
                     self._upsert_rank_timeline_for_item(cursor, item)
 
-                self._replace_keyword_and_entity(conn, valid_news)
+                self._replace_news_keyword_and_entity(conn, valid_news)
 
                 conn.commit()
                 return True

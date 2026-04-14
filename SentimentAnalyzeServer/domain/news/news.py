@@ -536,7 +536,7 @@ class NewsItemRepository(ABC):
         pass
 
     @abstractmethod
-    def get_keywords_by_last_time_range(
+    def get_news_keywords_by_last_time_range(
         self,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
@@ -554,13 +554,13 @@ class NewsItemRepository(ABC):
         pass
 
     @abstractmethod
-    def get_news_list_by_keywords(
+    def get_news_list_by_news_keywords(
         self,
-        keywords: List[NewsKeyword],
+        news_keywords: List[NewsKeyword],
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
-        """根据 keyword 列表查询 NewsItem（优先使用 news_item_id+news_first_time 联合键）。"""
+        """根据 news_keyword 列表查询 NewsItem（优先使用 news_item_id+news_first_time 联合键）。"""
         pass
 
     @abstractmethod
@@ -586,6 +586,16 @@ class NewsItemRepository(ABC):
     @abstractmethod
     def list_followed_keywords(self, limit: int = 1000) -> List[str]:
         """获取用户关注关键词列表。"""
+        pass
+
+    @abstractmethod
+    def search_keywords_from_dict(self, query: str, limit: int = 100) -> List[Keyword]:
+        """从 Keyword 字典表模糊搜索关键词。"""
+        pass
+
+    @abstractmethod
+    def insert_keywords_to_dict(self, terms: List[str]) -> List[Keyword]:
+        """批量插入关键词到字典表。"""
         pass
 
 
@@ -657,7 +667,7 @@ class NewsDomainService:
         - 返回 (term_to_keywords, name_to_entities)
         - top_n 表示按 term/name 聚合后的最热门数量
         """
-        keywords = self.get_keywords_by_last_time_range(
+        news_keywords = self.get_news_keywords_by_last_time_range(
             start_time=start_time,
             end_time=end_time,
         )
@@ -668,8 +678,8 @@ class NewsDomainService:
 
         keyword_groups: Dict[str, List[NewsKeyword]] = {}
         keyword_weight_sum: Dict[str, float] = {}
-        for keyword in keywords:
-            key = keyword.term.strip()
+        for kw in news_keywords:
+            key = kw.term.strip()
             if not key:
                 continue
 
@@ -762,7 +772,6 @@ class NewsDomainService:
     def get_news_list_by_keyword_terms(
         self,
         terms: List[str],
-        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
@@ -782,19 +791,19 @@ class NewsDomainService:
         if end_time is None:
             end_time = int(time.time())
 
-        matched_keywords = [
-            keyword
-            for keyword in self.get_keywords_by_time_range(
+        matched_news_keywords = [
+            kw
+            for kw in self.get_news_keywords_by_last_time_range(
                 start_time=int(start_time),
                 end_time=int(end_time),
             )
-            if str(keyword.term or "").strip() in normalized_terms
+            if str(kw.term or "").strip() in normalized_terms
         ]
-        if not matched_keywords:
+        if not matched_news_keywords:
             return []
 
-        return self.get_news_list_by_keywords(
-            keywords=matched_keywords,
+        return self.get_news_list_by_news_keywords(
+            news_keywords=matched_news_keywords,
             start_time=start_time,
             end_time=end_time,
         )
@@ -851,14 +860,13 @@ class NewsDomainService:
             return False
         return candidate_text == query_text
 
-    def get_keywords_by_terms(
+    def get_news_keywords_by_terms(
         self,
         terms: List[str],
-        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsKeyword]:
-        """根据关键词文本搜索 Keyword 记录。"""
+        """根据关键词文本搜索 NewsKeyword 记录。"""
         normalized_terms = {
             self._normalize_search_text(term)
             for term in terms
@@ -872,14 +880,14 @@ class NewsDomainService:
         if end_time is None:
             end_time = int(time.time())
 
-        keywords = self.get_keywords_by_time_range(
+        news_keywords = self.get_news_keywords_by_last_time_range(
             start_time=int(start_time),
             end_time=int(end_time),
         )
         return [
-            keyword
-            for keyword in keywords
-            if any(self._matches_search_text(keyword.term, term) for term in normalized_terms)
+            kw
+            for kw in news_keywords
+            if any(self._matches_search_text(kw.term, term) for term in normalized_terms)
         ]
 
     def get_entities_by_names(
@@ -1037,30 +1045,30 @@ class NewsDomainService:
             items[item.source_id].append(item)
         return items
 
-    def get_keywords_by_last_time_range(
+    def get_news_keywords_by_last_time_range(
         self,
         start_time: int,
         end_time: int,
     ) -> List[NewsKeyword]:
         """根据起止时间获取关键词列表（直接查询关键词表）。"""
-        return self.storage.get_keywords_by_last_time_range(
+        return self.storage.get_news_keywords_by_last_time_range(
             start_time=start_time,
             end_time=end_time,
         )
 
-    def get_keywords_by_fuzzy_term(
+    def get_news_keywords_by_fuzzy_term(
         self,
         term_query: str,
         start_time: int,
         end_time: int,
         news_first_time: Optional[int] = None,
     ) -> List[NewsKeyword]:
-        """按 term 模糊匹配，且在时间范围内检索 Keywords。"""
+        """按 term 模糊匹配，且在时间范围内检索 NewsKeywords。"""
         if not term_query:
             return []
         
         # 1. 先查时间范围内所有的候选词
-        all_keywords = self.get_keywords_by_last_time_range(
+        all_news_keywords = self.get_news_keywords_by_last_time_range(
             start_time=start_time,
             end_time=end_time,
         )
@@ -1068,7 +1076,7 @@ class NewsDomainService:
         # 2. 手动进行模糊过滤
         q = term_query.strip().lower()
         matched = []
-        for kw in all_keywords:
+        for kw in all_news_keywords:
             term = str(kw.term or "").strip().lower()
             if not term:
                 continue
@@ -1115,14 +1123,14 @@ class NewsDomainService:
                 matched.append(en)
         return matched
 
-    def get_news_list_by_keywords(
+    def get_news_list_by_news_keywords(
         self,
-        keywords: List[NewsKeyword],
+        news_keywords: List[NewsKeyword],
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
-        return self.storage.get_news_list_by_keywords(
-            keywords=keywords,
+        return self.storage.get_news_list_by_news_keywords(
+            news_keywords=news_keywords,
             start_time=start_time,
             end_time=end_time,
         )
@@ -1155,6 +1163,19 @@ class NewsDomainService:
         safe_limit = max(1, int(limit or 1000))
         return self.storage.list_followed_keywords(limit=safe_limit)
     
+    def search_or_insert_keyword_dict(self, query: str, limit: int = 100) -> List[Keyword]:
+        """从 Keyword 字典表模糊搜索关键词。如果没搜到，则尝试插入后返回。"""
+        if not query:
+            return []
+        
+        # 1. 先进行模糊匹配
+        results = self.storage.search_keywords_from_dict(query, limit)
+        if results:
+            return results
+            
+        # 2. 如果模糊匹配无结果且query不为空，则作为新关键词插入。插入后返回该词。
+        return self.storage.insert_keywords_to_dict([query])
+
     def update_existing_crawled_titles(self, news_list: List[NewsItem]) -> List[NewsItem]:
         if not news_list:
             return []
@@ -1255,13 +1276,13 @@ class NewsDomainService:
             isAnalyzed=isAnalyzed,
         )
 
-    def get_keywords_by_time_range(
+    def get_news_keywords_by_last_time_range(
         self,
         start_time: int,
         end_time: int,
     ) -> List[NewsKeyword]:
-        """根据 start_time 和 end_time 范围查询 Keywords。"""
-        return self.storage.get_keywords_by_last_time_range(
+        """根据 start_time 和 end_time 范围查询 NewsKeywords。"""
+        return self.storage.get_news_keywords_by_last_time_range(
             start_time=start_time,
             end_time=end_time,
         )
