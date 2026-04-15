@@ -263,7 +263,7 @@ class SentimentAnalyzeAppService:
 			else:
 				result = await self.llm_domain_analyzer.analyze_title_only(item.title)
 				
-			self.apply_llm_result(item, result)
+			self._apply_llm_result(item, result)
 			return item
 		except Exception:
 			logger.exception("Final LLM analysis failure for item: %s", item.title)
@@ -292,7 +292,7 @@ class SentimentAnalyzeAppService:
 		logger.error("Batch persistence failed after retries; dropping batch. batch_size=%s", len(batch))
 		return False
 
-	def apply_llm_result(self, item: NewsItem, result: Dict) -> None:
+	def _apply_llm_result(self, item: NewsItem, result: Dict) -> None:
 		item.event_type = str(result.get("event_type", ""))
 		item.summary = str(result.get("summary", ""))
 
@@ -329,7 +329,7 @@ class SentimentAnalyzeAppService:
 		item.analyzed_time = datetime.now()
 		item.deduplicate_entities_and_keywords()
 
-	def filter_news_items_not_analyzed(self, items: List[NewsItem]) -> List[NewsItem]:
+	def _filter_news_items_not_analyzed(self, items: List[NewsItem]) -> List[NewsItem]:
 		if not items:
 			return []
 		return [
@@ -349,7 +349,7 @@ class SentimentAnalyzeAppService:
 			logger.info("[Analyze_pending] 无可分析的数据")
 			return {"success": True, "item_count": 0}
 		
-		pending_items = self.filter_news_items_not_analyzed(latest_items)
+		pending_items = self._filter_news_items_not_analyzed(latest_items)
 		if not pending_items:
 			logger.info("[Analyze_pending] 无可分析的数据")
 			return {"success": True, "item_count": 0}

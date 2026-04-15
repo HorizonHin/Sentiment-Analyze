@@ -208,9 +208,8 @@ class TopicAppService:
         ] + [
             e.last_time for e in matched_entities
         ]
-        if not all_times:
-            return None    
-        resolved_end_time = max(all_times)
+
+        resolved_end_time = all_times and max(all_times) or 0
         resolved_start_time = resolved_end_time - self.topic_lookback
         filtered_keywords = [
             k for k in matched_news_keywords 

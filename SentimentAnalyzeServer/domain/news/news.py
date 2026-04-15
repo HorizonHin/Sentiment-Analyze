@@ -657,7 +657,6 @@ class NewsDomainService:
         self,
         start_time: int,
         end_time: int,
-        news_first_time: Optional[int] = None,
         top_n: int = 50,
     ) -> Tuple[Dict[str, List[NewsKeyword]], Dict[str, List[Entity]]]:
         """
@@ -687,8 +686,8 @@ class NewsDomainService:
                 keyword_groups[key] = []
                 keyword_weight_sum[key] = 0.0
 
-            keyword_groups[key].append(keyword)
-            keyword_weight_sum[key] += float(keyword.weigh)
+            keyword_groups[key].append(kw)
+            keyword_weight_sum[key] += float(kw.weigh)
 
         entity_groups: Dict[str, List[Entity]] = {}
         entity_weight_sum: Dict[str, float] = {}
