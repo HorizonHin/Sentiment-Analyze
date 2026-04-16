@@ -67,28 +67,30 @@ class TopicCacheManager_Memory(TopicCacheManager):
         capped_limit = max(1, limit)
         now_ts = int(time.time())
 
-        merged: Dict[str, Topic] = {}
-        for topic in self._topics + list(topics):
+        # 使用字典按名称或ID去重，保留最新/最重的 Topic
+        merged: Dict[str, Topic] = {self._topic_key(t): t for t in self._topics}
+        for topic in topics:
             key = self._topic_key(topic)
             existing = merged.get(key)
             if existing is None:
                 merged[key] = topic
                 continue
 
-            current_updated = existing.updated_at
-            incoming_updated = topic.updated_at
+            current_updated = int(existing.updated_at or 0)
+            incoming_updated = int(topic.updated_at or 0)
+            
             if incoming_updated > current_updated:
                 merged[key] = topic
-                continue
-            if incoming_updated == current_updated and topic.total_weight > existing.total_weight:
+            elif incoming_updated == current_updated and (topic.total_weight or 0) > (existing.total_weight or 0):
                 merged[key] = topic
 
+        # 排序：综合考虑热度权重、新鲜度和更新时间
         sorted_topics = sorted(
             merged.values(),
             key=lambda t: (
                 self._eviction_score(t, now_ts),
-                t.updated_at,
-                t.total_weight,
+                int(t.updated_at or 0),
+                float(t.total_weight or 0),
             ),
             reverse=True,
         )
@@ -187,54 +189,58 @@ class TopicAppService:
         keyword: str,
     ) -> Optional[Topic]:
         """根据关键词返回现有 Topic，或基于匹配到的 Keyword/Entity 构建 Topic。"""
-        if not keyword:
-            return None
-
-        existing_topic = self._find_existing_topic_by_keyword(keyword)
-        if existing_topic is not None:
-            return existing_topic
-
-        matched_news_keywords = self.news_domain_service.get_news_keywords_by_terms(
-            [keyword],
-        )
-        matched_entities = self.news_domain_service.get_entities_by_names(
-            [keyword],
-        )
-        # 2.取matched_news_keywords和matched_entities中最新的last_time作为end_time
-        # end_time前一个时间窗口为start_time，默认窗口长度为topic_lookback
-        # 以start_time和end_time过滤matched_news_keywords和matched_entities
-        all_times = [
-            k.last_time for k in matched_news_keywords
-        ] + [
-            e.last_time for e in matched_entities
-        ]
-
-        resolved_end_time = all_times and max(all_times) or 0
-        resolved_start_time = resolved_end_time - self.topic_lookback
-        filtered_keywords = [
-            k for k in matched_news_keywords 
-            if resolved_start_time <= k.last_time <= resolved_end_time
-        ]
-        filtered_entities = [
-            e for e in matched_entities 
-            if resolved_start_time <= e.last_time <= resolved_end_time
-        ]
-        if not filtered_keywords and not filtered_entities:
-            new_topic =  self.topic_domain_service.build_topic_from_news_items(
-                topic_name=keyword,
-                news_items=[],
-            )
-            self.topic_domain_service.add_topics([new_topic])
-            return new_topic
-        else:
-            topics = self.build_topics_by_news_keywords_and_entities(
-                keywords=filtered_keywords,
-                entities=filtered_entities,
-            )
-            if topics:
-                return topics[0]
-            else:
+        try:
+            if not keyword:
                 return None
+
+            existing_topic = self._find_existing_topic_by_keyword(keyword)
+            if existing_topic is not None:
+                return existing_topic
+
+            matched_news_keywords = self.news_domain_service.get_news_keywords_by_terms(
+                [keyword],
+            )
+            matched_entities = self.news_domain_service.get_entities_by_names(
+                [keyword],
+            )
+            # 2.取matched_news_keywords和matched_entities中最新的last_time作为end_time
+            # end_time前一个时间窗口为start_time，默认窗口长度为topic_lookback
+            # 以start_time和end_time过滤matched_news_keywords和matched_entities
+            all_times = [
+                k.last_time for k in matched_news_keywords
+            ] + [
+                e.last_time for e in matched_entities
+            ]
+
+            resolved_end_time = all_times and max(all_times) or 0
+            resolved_start_time = resolved_end_time - self.topic_lookback
+            filtered_keywords = [
+                k for k in matched_news_keywords 
+                if resolved_start_time <= k.last_time <= resolved_end_time
+            ]
+            filtered_entities = [
+                e for e in matched_entities 
+                if resolved_start_time <= e.last_time <= resolved_end_time
+            ]
+            if not filtered_keywords and not filtered_entities:
+                new_topic =  self.topic_domain_service.build_topic_from_news_items(
+                    topic_name=keyword,
+                    news_items=[],
+                )
+                self.topic_domain_service.add_topics([new_topic])
+                return new_topic
+            else:
+                topics = self.build_topics_by_news_keywords_and_entities(
+                    keywords=filtered_keywords,
+                    entities=filtered_entities,
+                )
+                if topics:
+                    return topics[0]
+                else:
+                    return None
+        except Exception:
+            logger.exception("Error in get_topic_by_keyword_or_build for keyword: %s", keyword)
+            return None
 
     def __init__(
         self,
@@ -290,206 +296,177 @@ class TopicAppService:
         - 从 news domain 按 keyword/entity id 找到相关 news items
         - 调用 build_topic_from_news_items 返回 topic list
         """
-        if not keywords and not entities:
+        try:
+            if not keywords and not entities:
+                return []
+
+            topic_news_map: Dict[str, List[NewsItem]] = defaultdict(list)
+            topic_item_ids_map: Dict[str, set[tuple[int, int]]] = defaultdict(set)
+
+            if keywords:
+                keyword_news_items = self.news_domain_service.get_news_list_by_news_keywords(
+                    news_keywords=keywords,
+                )
+                keyword_item_map: Dict[tuple[int, int], NewsItem] = {
+                    (int(item.id), int(item.first_time))
+                    : item
+                    for item in keyword_news_items
+                    if int(item.id or -1) > 0 and item.first_time is not None
+                }
+
+                # 以输入 keyword.term 为准分组，支持 term 在输入列表中重复出现。
+                for keyword in keywords:
+                    if not isinstance(keyword, NewsKeyword):
+                        continue
+                    topic_name = str(keyword.term or "").strip()
+                    if not topic_name:
+                        continue
+                    if keyword.news_item_id is None or keyword.news_first_time is None:
+                        continue
+
+                    item_key = (int(keyword.news_item_id), int(keyword.news_first_time))
+                    item = keyword_item_map.get(item_key)
+                    if item is None:
+                        continue
+                    if item_key in topic_item_ids_map[topic_name]:
+                        continue
+
+                    topic_item_ids_map[topic_name].add(item_key)
+                    topic_news_map[topic_name].append(item)
+
+            if entities:
+                entity_news_items = self.news_domain_service.get_news_list_by_entities(
+                    entities=entities,
+                )
+                entity_item_map: Dict[tuple[int, int], NewsItem] = {
+                    (int(item.id), int(item.first_time))
+                    : item
+                    for item in entity_news_items
+                    if int(item.id or -1) > 0 and item.first_time is not None
+                }
+
+                # 以输入 entity.name 为准分组，支持同名实体在输入列表中重复出现。
+                for entity in entities:
+                    if not isinstance(entity, Entity):
+                        continue
+                    topic_name = str(entity.name or "").strip()
+                    if not topic_name:
+                        continue
+                    if entity.news_item_id is None or entity.news_first_time is None:
+                        continue
+
+                    item_key = (int(entity.news_item_id), int(entity.news_first_time))
+                    item = entity_item_map.get(item_key)
+                    if item is None:
+                        continue
+                    if item_key in topic_item_ids_map[topic_name]:
+                        continue
+
+                    topic_item_ids_map[topic_name].add(item_key)
+                    topic_news_map[topic_name].append(item)
+
+            if not topic_news_map:
+                return []
+
+            topics: List[Topic] = []
+            for topic_name, items in topic_news_map.items():
+                topic = self.topic_domain_service.build_topic_from_news_items(topic_name=topic_name, news_items=items)
+                topics.append(topic)
+
+            topics.sort(key=lambda t: t.total_weight, reverse=True)
+            return topics
+        except Exception as e:
+            logger.exception("Error in build_topics_by_news_keywords_and_entities: %s", str(e.with_traceback(e.__traceback__)))
             return []
-
-        topic_news_map: Dict[str, List[NewsItem]] = defaultdict(list)
-        topic_item_ids_map: Dict[str, set[tuple[int, int]]] = defaultdict(set)
-
-        if keywords:
-            keyword_news_items = self.news_domain_service.get_news_list_by_news_keywords(
-                news_keywords=keywords,
-            )
-            keyword_item_map: Dict[tuple[int, int], NewsItem] = {
-                (int(item.id), int(item.first_time))
-                : item
-                for item in keyword_news_items
-                if int(item.id or -1) > 0 and item.first_time is not None
-            }
-
-            # 以输入 keyword.term 为准分组，支持 term 在输入列表中重复出现。
-            for keyword in keywords:
-                if not isinstance(keyword, NewsKeyword):
-                    continue
-                topic_name = str(keyword.term or "").strip()
-                if not topic_name:
-                    continue
-                if keyword.news_item_id is None or keyword.news_first_time is None:
-                    continue
-
-                item_key = (int(keyword.news_item_id), int(keyword.news_first_time))
-                item = keyword_item_map.get(item_key)
-                if item is None:
-                    continue
-                if item_key in topic_item_ids_map[topic_name]:
-                    continue
-
-                topic_item_ids_map[topic_name].add(item_key)
-                topic_news_map[topic_name].append(item)
-
-        if entities:
-            entity_news_items = self.news_domain_service.get_news_list_by_entities(
-                entities=entities,
-            )
-            entity_item_map: Dict[tuple[int, int], NewsItem] = {
-                (int(item.id), int(item.first_time))
-                : item
-                for item in entity_news_items
-                if int(item.id or -1) > 0 and item.first_time is not None
-            }
-
-            # 以输入 entity.name 为准分组，支持同名实体在输入列表中重复出现。
-            for entity in entities:
-                if not isinstance(entity, Entity):
-                    continue
-                topic_name = str(entity.name or "").strip()
-                if not topic_name:
-                    continue
-                if entity.news_item_id is None or entity.news_first_time is None:
-                    continue
-
-                item_key = (int(entity.news_item_id), int(entity.news_first_time))
-                item = entity_item_map.get(item_key)
-                if item is None:
-                    continue
-                if item_key in topic_item_ids_map[topic_name]:
-                    continue
-
-                topic_item_ids_map[topic_name].add(item_key)
-                topic_news_map[topic_name].append(item)
-
-        if not topic_news_map:
-            return []
-
-        topics: List[Topic] = []
-        for topic_name, items in topic_news_map.items():
-            topic = self.topic_domain_service.build_topic_from_news_items(topic_name=topic_name, news_items=items)
-            topics.append(topic)
-
-        topics.sort(key=lambda t: t.total_weight, reverse=True)
-        return topics
 
     @singleton_task()
     def recommend_and_cache_topics(
         self,
-        start_time: Optional[int],
-        end_time: Optional[int],
-        news_first_time: Optional[int] = None,
-        top_n: int = None,
-        cache_limit: int = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        top_n: Optional[int] = None,
+        cache_limit: Optional[int] = None,
     ) -> List[Topic]:
-        # --- MyRedis 计时器逻辑，5分钟内重复调用直接 return ---
         try:
-            from SentimentAnalyzeServer.system.infra import MyRedis
-        except ImportError:
-            from system.infra import MyRedis
-        """
-        - start_time/end_time: keyword/entity 的 last_time 查询区间
-        - news_first_time: NewsItem 分区下界（默认: 当前时间 - topic 默认窗口）
-        - 调用方法二构建 topic 列表
-        - 通过 TopicCacheManager 保存
-        """
-        redis = MyRedis()
-        redis_key = "recommend_and_cache_topics:last_run"
-        cooldown = 300  # 5分钟
-        now_ts = int(time.time())
+            # 1. 冷却期检查 (Redis)
+            try:
+                from SentimentAnalyzeServer.system.infra import MyRedis
+            except ImportError:
+                from system.infra import MyRedis
+            
+            redis = MyRedis()
+            redis_key = "recommend_and_cache_topics:last_run"
+            cooldown = 300  # 5分钟
+            now_ts = int(time.time())
 
-        is_locked = redis.set(redis_key, now_ts, ttl_seconds=cooldown, nx=True)
-        if not is_locked:
-            logger.info(f"recommend_and_cache_topics: 距离上次执行不足5分钟，直接返回，无需重复执行。now={now_ts}")
-            return []
+            if not redis.set(redis_key, now_ts, ttl_seconds=cooldown, nx=True):
+                logger.info("recommend_and_cache_topics: 冷却中，跳过。")
+                return []
 
-        resolved_end_time = int(end_time) if end_time is not None else int(time.time())
-        resolved_start_time = int(start_time) if start_time is not None else (resolved_end_time - self.topic_lookback)
-        if resolved_start_time > resolved_end_time:
-            resolved_start_time = resolved_end_time - self.topic_lookback
+            # 2. 准备参数
+            resolved_end_time = int(end_time or now_ts)
+            resolved_start_time = int(start_time or (resolved_end_time - self.topic_lookback))
+            if resolved_start_time > resolved_end_time:
+                resolved_start_time = resolved_end_time - self.topic_lookback
 
-        resolved_news_first_time = (
-            int(news_first_time)
-            if news_first_time is not None
-            else (int(time.time()) - self.topic_lookback)
-        )
-        if resolved_news_first_time > resolved_end_time:
-            resolved_news_first_time = resolved_end_time - self.topic_lookback
+            top_n = int(top_n or self.default_top_n)
+            cache_limit = int(cache_limit or self.default_cache_limit)
 
-        # 使用默认配置
-        if top_n is None:
-            top_n = self.default_top_n
-        if cache_limit is None:
-            cache_limit = self.default_cache_limit
-        recommended_keywords, recommended_entities = self.news_domain_service.recommend_hot_term_items_by_time_range(
-            start_time=resolved_start_time,
-            end_time=resolved_end_time,
-            news_first_time=resolved_news_first_time,
-            top_n=top_n,
-        )
+            # 3. 提取热门关键词并构建话题
+            logger.info("Recommending hot terms from %s to %s", resolved_start_time, resolved_end_time)
+            recommended_keywords, recommended_entities = self.news_domain_service.recommend_hot_term_items_by_time_range(
+                start_time=resolved_start_time,
+                end_time=resolved_end_time,
+                top_n=top_n,
+            )
 
-        topics = self.build_topics_by_news_keywords_and_entities(
-            keywords=recommended_keywords,
-            entities=recommended_entities,
-        )
+            topics = self.build_topics_by_news_keywords_and_entities(
+                keywords=recommended_keywords,
+                entities=recommended_entities,
+            )
 
+            # 4. 状态更新与生命周期计算
+            updated_topics: List[Topic] = []
+            for topic in topics:
+                topic.updated_at = now_ts
+                topic_name = str(topic.topic or "").strip()
+                
+                # 查找现有 Topic
+                existing = self.topic_cache_manager.get_topic_by_name(topic_name) or \
+                           self.topic_domain_service.find_topic_by_name(topic_name)
 
-        updated_topics: List[Topic] = []
-        for new_status_topic in topics:
-            new_status_topic.updated_at = int(time.time())
-            # 1. 先根据topic name查找缓存或DB中的Topic（Topic DB）
-            topic_name = str(new_status_topic.topic or "").strip()
-            topic_db_match = self.topic_cache_manager.get_topic_by_name(topic_name)
-            if topic_db_match is None:
-                topic_db_match = self.topic_domain_service.find_topic_by_name(topic_name)
-            # 2. 用Topic DB主键查topic_metrics_history
-            if topic_db_match is not None: # update 操作
-                new_status_topic = self.topic_domain_service.applyNewStatus(new_status_topic, topic_db_match)
-                #计算heat_change_percent和stage
-                history = self.topic_domain_service.get_topic_history(new_status_topic)
-                if not history:
-                    logger.warning(
-                        "话题没有历史数据. topic_name=%s, topic_id=%s",
-                        topic_name,
-                        topic_db_match.id,
-                    )
-                    self.put_topic_to_persist_queue(new_status_topic)
-                    continue
-                if (new_status_topic.updated_at - history[-1].updated_at) < 600: #小于5分钟，更新太快
-                    #再防一手更新太快的异常状况，并log
+                if existing:
+                    topic = self.topic_domain_service.applyNewStatus(topic, existing)
+                    history = self.topic_domain_service.get_topic_history(topic)
+                    
+                    # 避免更新过于频繁
+                    if history and (now_ts - int(history[-1].updated_at or 0)) < 240: # 4分钟
+                        logger.debug("Topic '%s' updated too recently, skipping metrics recalculation.", topic_name)
+                    elif history:
+                        topic = self.topic_domain_service.calculate_heat_change_and_stage(topic, history)
 
-                    logger.warning(
-                        "话题更新太快，可能导致heat_change_percent和stage计算不准确. topic_name=%s, topic_id=%s, updated_at=%s, last_history_updated_at=%s",
-                        topic_name,
-                        topic_db_match.id,
-                        new_status_topic.updated_at,
-                        history[-1].updated_at if history else None,
-                    )
-                    continue
-                new_status_topic = self.topic_domain_service.calculate_heat_change_and_stage(new_status_topic, history)
-            # 生产者：入队，由消费者批量add/update
-            self.put_topic_to_persist_queue(new_status_topic)
-            updated_topics.append(new_status_topic)
+                # 异步持久化并加入内存缓存
+                self.put_topic_to_persist_queue(topic)
+                updated_topics.append(topic)
 
-        self.topic_cache_manager.save_or_update_topics_cache(updated_topics, limit=cache_limit)
+            self.topic_cache_manager.save_or_update_topics_cache(updated_topics, limit=cache_limit)
 
-        logger.info(
-            "Topic recommendation cached successfully. topic_count=%s, top_n=%s, cache_limit=%s",
-            len(updated_topics),
-            top_n,
-            cache_limit,
-        )
-
-        self.event_manager.publish(
-            EVENT_TOPIC_RANK_UPDATED,
-            {
+            # 5. 发布事件
+            self.event_manager.publish(EVENT_TOPIC_RANK_UPDATED, {
                 "topic_count": len(updated_topics),
-                "topics": list(updated_topics),
-                "top_n": int(top_n),
-                "cache_limit": int(cache_limit),
-                "start_time": int(resolved_start_time),
-                "end_time": int(resolved_end_time),
-                "news_first_time": int(resolved_news_first_time),
-            },
-        )
-        
-        return updated_topics
+                "topics": [t.to_dict() for t in updated_topics],
+                "top_n": top_n,
+                "cache_limit": cache_limit,
+                "start_time": resolved_start_time,
+                "end_time": resolved_end_time,
+            })
+            
+            logger.info("Topic recommendation completed. Cached %d topics.", len(updated_topics))
+            return updated_topics
+
+        except Exception as e:
+            logger.exception("recommend_and_cache_topics failed: %s", str(e.with_traceback(e.__traceback__)))
+            return []
 
     def get_topic_snapshot_detail(
         self,
@@ -497,38 +474,42 @@ class TopicAppService:
         topic_id: int,
         history_limit: int = None,
     ) -> Result:
-        cached_topic = self.topic_cache_manager.get_topic_by_composite_key(
-            topic_created_at=topic_created_at,
-            topic_id=topic_id,
-        )
+        try:
+            cached_topic = self.topic_cache_manager.get_topic_by_composite_key(
+                topic_created_at=topic_created_at,
+                topic_id=topic_id,
+            )
 
-        if history_limit is None:
-            history_limit = self.default_history_limit
-        timeline = self.topic_domain_service.get_topic_timeline_and_latest(
-            topic_created_at=topic_created_at,
-            topic_id=int(topic_id),
-            history_limit=max(1, int(history_limit)),
-        )
+            if history_limit is None:
+                history_limit = self.default_history_limit
+            timeline = self.topic_domain_service.get_topic_timeline_and_latest(
+                topic_created_at=topic_created_at,
+                topic_id=int(topic_id),
+                history_limit=max(1, int(history_limit)),
+            )
 
-        if cached_topic is not None:
-            cache_key = (int(cached_topic.created_at or 0), int(cached_topic.id or -1))
-            replaced = False
-            for idx, item in enumerate(timeline):
-                item_key = (int(item.created_at or 0), int(item.id or -1))
-                if item_key == cache_key:
-                    timeline[idx] = cached_topic
-                    replaced = True
-                    break
-            if not replaced:
-                timeline.insert(0, cached_topic)
+            if cached_topic is not None:
+                cache_key = (int(cached_topic.created_at or 0), int(cached_topic.id or -1))
+                replaced = False
+                for idx, item in enumerate(timeline):
+                    item_key = (int(item.created_at or 0), int(item.id or -1))
+                    if item_key == cache_key:
+                        timeline[idx] = cached_topic
+                        replaced = True
+                        break
+                if not replaced:
+                    timeline.insert(0, cached_topic)
 
-        if not timeline:
-            return Result.failure_result("未找到对应的Topic快照")
+                if not timeline:
+                    return Result.failure_result("未找到对应的Topic快照")
 
-        payload = {
-            "topic": timeline[0].to_dict(),
-            "timeline": [entry.to_dict() for entry in timeline],
-        }
+            payload = {
+                "topic": timeline[0].to_dict(),
+                "timeline": [entry.to_dict() for entry in timeline],
+            }
+        except Exception as e:
+            logger.exception("Error in get_topic_snapshot_detail: %s", str(e.with_traceback(e.__traceback__)))
+            return Result.failure_result("获取Topic快照详情失败")
         return Result.success_result(payload)
 
     def get_trending_topics(self) -> Result:
@@ -685,17 +666,6 @@ class TopicAppService:
                 cache_updated_count += 1
 
             updated_count += 1
-
-        if cache_topics and cache_updated_count > 0:
-            self.topic_cache_manager.save_or_update_topics_cache(cache_topics, limit=max(1, len(cache_topics)))
-
-        return {
-            "success": True,
-            "candidate_count": len(candidates),
-            "updated_count": updated_count,
-            "skipped_count": skipped_count,
-            "cache_updated_count": cache_updated_count,
-        }
 
         if cache_topics and cache_updated_count > 0:
             self.topic_cache_manager.save_or_update_topics_cache(cache_topics, limit=max(1, len(cache_topics)))
