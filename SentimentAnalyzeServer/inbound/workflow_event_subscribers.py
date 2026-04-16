@@ -43,14 +43,14 @@ class WorkflowEventSubscribers:
         if self._is_registered:
             logger.warning("WorkflowEventSubscribers already registered, skipping.")
             return
-        self.event_manager.subscribe(EVENT_CRAWL_SAVED, self._on_crawl_saved)
+        self.event_manager.subscribe(EVENT_CRAWL_SAVED, self._analyze_news)
         self.event_manager.subscribe(EVENT_SENTIMENT_ANALYZED, self._on_sentiment_analyzed)
-        self.event_manager.subscribe(EVENT_TOPIC_RANK_UPDATED, self._on_topic_rank_updated)
+        self.event_manager.subscribe(EVENT_TOPIC_RANK_UPDATED, self._analyze_topic_title)
         self.event_manager.subscribe(EVENT_TOPIC_RANK_UPDATED, self._on_topic_risk_warning_detected)
         self.event_manager.subscribe(EVENT_TOPIC_TITLE_SUMMARY_BLOCKED, self._on_topic_title_summary_blocked)
         self._is_registered = True
         
-    def _on_crawl_saved(self, payload: Dict[str, Any]) -> None:
+    def _analyze_news(self, payload: Dict[str, Any]) -> None:
         saved_items = payload.get("saved_items", [])
         if not isinstance(saved_items, list) or not saved_items:
             return
@@ -79,33 +79,27 @@ class WorkflowEventSubscribers:
         except Exception:
             logger.exception("recommend_and_cache_topics failed")
 
-    def _on_topic_rank_updated(self, payload: Dict[str, Any]) -> None:
+    def _analyze_topic_title(self, payload: Dict[str, Any]) -> None:
         raw_limit = payload.get("cache_limit", 50)
-        logger.info("处理Topic排名更新事件，触发LLM分析llm_title。raw_limit=%s", raw_limit)
-        try:
-            limit = max(1, min(200, int(raw_limit)))
-        except (TypeError, ValueError):
-            limit = 50
-
-        async def run_backfill():
-            await self.topic_app_service.backfill_missing_llm_titles(limit=limit)
-
+        logger.info("处理Topic排名更新事件，准备分析llm_title。raw_limit=%s", raw_limit)
+        
         import asyncio
         import nest_asyncio
+        
         try:
+            limit = max(1, min(200, int(raw_limit)))
+            # 使用现有循环或创建新循环，nest_asyncio.apply() 统一解决嵌套问题
             try:
                 loop = asyncio.get_event_loop()
             except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-
-            if loop.is_running():
-                nest_asyncio.apply()
-                loop.run_until_complete(run_backfill())
-            else:
-                loop.run_until_complete(run_backfill())
+            
+            nest_asyncio.apply()
+            loop.run_until_complete(self.topic_app_service.backfill_missing_llm_titles(limit=limit))
         except Exception:
             logger.exception("backfill_missing_llm_titles failed")
+
 
     def _on_topic_risk_warning_detected(self, payload: Dict[str, Any]) -> None:
         try:

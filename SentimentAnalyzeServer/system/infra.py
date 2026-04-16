@@ -124,9 +124,8 @@ class CommonThreadPool:
 
 def singleton_task(task_id_provider: Callable[..., str] | None = None):
     """
-    防止同名任務在線程池中併發執行的裝飾器。
-    :param task_id_provider: 可選，一個函數用於根據原函數參數生成唯一 ID。
-                             如果不傳，默認使用函數名。
+    防止同名任务在线程池中并发执行的装饰器。
+    注意：此装饰器现在在当前线程同步执行，但使用线程池的标记位来保证全局单例。
     """
     def decorator(fn: Callable):
         @wraps(fn)
@@ -137,23 +136,23 @@ def singleton_task(task_id_provider: Callable[..., str] | None = None):
             if task_id_provider:
                 tid = task_id_provider(*args, **kwargs)
             else:
-                # 默認 ID：函數名
+                # 默认 ID：函数名
                 tid = f"{fn.__name__}"
 
-            # 嘗試獲取執行權
+            # 尝试获取执行权
             if tp.try_acquire_task(tid):
-                def task_with_cleanup():
-                    try:
-                        return fn(*args, **kwargs)
-                    finally:
-                        # 無論成功失敗，執行完必須釋放
-                        tp.release_task(tid)
-                
-                # 提交到線程池異步執行
-                logger.info(f"[ThreadPool] 提交任務: {tid}")
-                return tp.submit(task_with_cleanup)
+                try:
+                    logger.info(f"[SingletonTask] 取得执行权，开始执行: {tid}")
+                    return fn(*args, **kwargs)
+                finally:
+                    # 无论成功失败，执行完必须释放
+                    tp.release_task(tid)
+                    logger.info(f"[SingletonTask] 执行完毕，释放权限: {tid}")
             else:
-                logger.info(f"[ThreadPool] 任務 {tid} 正在運行中，跳過本次提交")
+                logger.info(f"[SingletonTask] 任务 {tid} 正在运行中，跳过本次请求")
+                # 兼容返回类型，如果是 topics 相关则返回空列表
+                if "topics" in tid.lower():
+                    return []
                 return None
         return wrapper
     return decorator
@@ -286,10 +285,13 @@ class EventManager:
 
     def publish(self, event_name: str, payload: Dict[str, Any]) -> None:
         with self._lock:
-            handlers: List[Callable[[Dict[str, Any]], None]] = list(self._subscribers.get(event_name, []))
+            handlers = list(self._subscribers.get(event_name, []))
 
+        # 始终异步发布到线程池中，避免阻塞当前工作线程
         for handler in handlers:
-            self._common_thread_pool.submit(self._run_handler, event_name, handler, payload)
+            # 使用副本 payload 防止不同处理函数干扰
+            p_copy = deepcopy(payload)
+            self._common_thread_pool.submit(self._run_handler, event_name, handler, p_copy)
 
     def _run_handler(
         self,
@@ -300,4 +302,5 @@ class EventManager:
         try:
             handler(payload)
         except Exception:
-            logger.exception("Event handler failed. event_name=%s, handler=%s", event_name, getattr(handler, "__name__", repr(handler)))
+            handler_name = getattr(handler, "__name__", repr(handler))
+            logger.exception("Event handler failed. event_name=%s, handler=%s", event_name, handler_name)

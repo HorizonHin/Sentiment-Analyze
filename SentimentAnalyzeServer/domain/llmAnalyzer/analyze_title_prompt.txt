@@ -7,8 +7,8 @@
 3. 根据新闻内容和公众反馈，输出：entities, event_type, summary, sentiment_analysis。
 其中 sentiment_analysis 必须综合考虑公众态度：
 - polarity: 整体舆向
-- positive_ratio, negative_ratio, neutral_ratio: 舆论占比
-- dimensions: 包含 optimism, trust, attention, controversy。其中 controversy (争议度) 应重点参考公众评论的分歧。
+- positive_ratio(利好、利好、创新、突破), negative_ratio(事实陈述、中立报道), neutral_ratio(风险、问题、批评、质疑)
+- dimensions: 包含 optimism, trust(对涉及主体的信任程度), attention(社会关注热度), controversy。其中 controversy (争议度) 应重点参考公众评论的分歧。
 #约束#
 1) event_type 只能是 business_competition/policy_change/product_launch/crisis_event/technology_breakthrough/other；
 2) polarity 只能是 positive/negative/neutral/mixed；

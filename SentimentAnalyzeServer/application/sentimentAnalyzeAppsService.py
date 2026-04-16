@@ -67,11 +67,11 @@ class SentimentAnalyzeAppService:
 
 	def _cache_recent_analyzed_news(self, items: List[NewsItem]) -> None:
 		payload = self._serialize_news_items(items)
-		self.redis.set(REDIS_KEY_RECENT_30M_ANALYZED_NEWS, payload)
+		self.redis.set(REDIS_KEY_RECENT_30M_ANALYZED_NEWS, payload, ttl_seconds=1800)
 
 	def _cache_latest_not_need_analysis_items(self, items: List[NewsItem]) -> None:
 		payload = self._serialize_news_items(items)
-		self.redis.set(REDIS_KEY_LATEST_NOT_NEED_ANALYSIS_NEWS, payload)
+		self.redis.set(REDIS_KEY_LATEST_NOT_NEED_ANALYSIS_NEWS, payload, ttl_seconds=3600)
 
 	def _generate_latest_rank_board(self, items: List[NewsItem]) -> List[NewsItem]:
 		# 使用 (source_id, latest_rank) 作为唯一键，确保每个平台每个排名只有一个条目
@@ -148,108 +148,82 @@ class SentimentAnalyzeAppService:
 
 	def analyze_and_update_news_items(self, items: List[NewsItem], should_cache: bool = True) -> bool:
 		""""一旦执行这个方法，就一定会发出分析完成的事件（即使没有任何数据被分析）。"""
-		# 过滤规则：使用公共方法判断是否需要分析
-		pending_items: List[NewsItem] = []
-		not_need_analysis_items: List[NewsItem] = []
-		for item in items:
-			if is_item_analysis_pending(item):
-				pending_items.append(item)
+		try:
+			# 1. 过滤需要分析的项
+			pending_items = [item for item in items if is_item_analysis_pending(item)]
+			not_need_analysis_items = [item for item in items if not is_item_analysis_pending(item)]
+			
+			updated_items: List[NewsItem] = []
+			
+			if not pending_items:
+				logger.info("No pending news items to analyze. input_count=%s", len(items))
 			else:
-				not_need_analysis_items.append(item)
-		
-		updated_items: List[NewsItem] = []
-		if not pending_items:
-			logger.info("No pending news items to analyze. input_count=%s", len(items))
-		else:
-			async def run_analysis():
-				# 使用信号量控制协程并发数
-				sem = asyncio.Semaphore(self.max_analysis_workers)
-				
-				# 生产者-消费者：用于收集已成功保存的数据以供后续事件通知
-				updated_items_lock = threading.Lock()
-				
-				def consume_db_batch(batch: List[NewsItem]):
-					if self._save_batch_with_retry(batch):
-						with updated_items_lock:
-							updated_items.extend(batch)
+				# 2. 定义异步分析流程
+				async def run_analysis_flow():
+					sem = asyncio.Semaphore(self.max_analysis_workers)
+					updated_lock = threading.Lock()
+					
+					def consume_db_batch(batch: List[NewsItem]):
+						if self._save_batch_with_retry(batch):
+							with updated_lock:
+								updated_items.extend(batch)
 
-				# 初始化批处理器
-				self._db_batch_manager = self.common_thread_pool.create_queue_batch_manager(
-					batch_size=self.batch_save_size,
-					consume_batch=consume_db_batch
-				)
-				
-				async def analyze_task(item: NewsItem):
-					async with sem:
-						# _analyze_with_retry 会直接修改传入的 item 对象
-						result_item = await self._analyze_with_retry(item)
-						if result_item:
-							# 生产并入队
-							self._db_batch_manager.put(result_item)
-						return result_item
-
-				# 创建所有分析任务并并发执行
-				tasks = [analyze_task(item) for item in pending_items]
-				await asyncio.gather(*tasks)
-				
-				# 关闭队列并等待所有入库任务完成
-				self._db_batch_manager.close_and_wait()
-				self._db_batch_manager = None
-				
-				if not updated_items:
-					logger.warning(
-						"Analysis finished but no items were persisted. pending_count=%s",
-						len(pending_items),
+					batch_manager = self.common_thread_pool.create_queue_batch_manager(
+						batch_size=self.batch_save_size,
+						consume_batch=consume_db_batch
 					)
+					
+					async def analyze_task(item: NewsItem):
+						async with sem:
+							if await self._analyze_with_retry(item):
+								batch_manager.put(item)
 
-			# 运行异步分析流程
-			try:
-				loop = asyncio.get_event_loop()
-				if loop.is_running():
-					import nest_asyncio
-					nest_asyncio.apply()
-					loop.run_until_complete(run_analysis())
-				else:
-					loop.run_until_complete(run_analysis())
-			except RuntimeError:
-				asyncio.run(run_analysis())
+					try:
+						await asyncio.gather(*(analyze_task(item) for item in pending_items))
+					finally:
+						batch_manager.close_and_wait()
 
-		# 仅在 should_cache 为 True 时更新 Redis 热门缓存（通常来自实时爬取）
-		if should_cache:
-			now_ts = int(time.time())
-			recent_threshold = now_ts - self.recent_window_seconds
-			
-			# 将本次 crawl 和处理的所有项合并
-			final_items = updated_items + not_need_analysis_items
-			
-			recent_items = [
-				item for item in final_items
-				if item.last_time is not None and item.last_time >= recent_threshold
-			]
-			if recent_items:
-				logger.debug("Caching %d recent items (< %d sec)", len(recent_items), self.recent_window_seconds)
-				self.common_thread_pool.submit(self._cache_recent_analyzed_news, recent_items)
+				# 3. 执行异步桥接
+				try:
+					loop = asyncio.get_event_loop()
+					if loop.is_running():
+						import nest_asyncio
+						nest_asyncio.apply()
+						loop.run_until_complete(run_analysis_flow())
+					else:
+						loop.run_until_complete(run_analysis_flow())
+				except Exception:
+					logger.exception("Async analysis execution failed")
 
-			# 存储最新“当前已分析”项，无论是否支持重分析
-			# 只要 analyzed_time 不为空（有过 LLM 返回），就属于最新分析看板的后备
-			latest_analyzed = [
-				item for item in final_items
-				if item.analyzed_time or item.summary
-			]
-			if latest_analyzed:
-				logger.debug("Caching %d items as latest-analyzed results", len(latest_analyzed))
-				self.common_thread_pool.submit(self._cache_latest_not_need_analysis_items, latest_analyzed)
+			# 4. 更新缓存
+			if should_cache:
+				self._update_redis_caches(updated_items, not_need_analysis_items)
 
-		self.event_manager.publish(
-			EVENT_SENTIMENT_ANALYZED,
-			{
-				"analyzed_items": updated_items,
+			# 5. 发布事件 (确保 payload 序列化且使用 .to_dict())
+			self.event_manager.publish(EVENT_SENTIMENT_ANALYZED, {
+				"analyzed_items": [t.to_dict() for t in updated_items],
 				"pending_count": len(pending_items),
 				"persisted_count": len(updated_items),
-			},
-		)
-		logger.info("Sentiment analysis flow completed successfully. persisted_count=%s", len(updated_items))
-		return True
+			})
+			
+			logger.info("Sentiment analysis flow completed. persisted_count=%s", len(updated_items))
+			return True
+		except Exception:
+			logger.exception("Error in analyze_and_update_news_items")
+			return False
+
+	def _update_redis_caches(self, updated: List[NewsItem], others: List[NewsItem]) -> None:
+		now_ts = int(time.time())
+		recent_threshold = now_ts - self.recent_window_seconds
+		final_items = updated + others
+		
+		recent = [i for i in final_items if i.last_time and i.last_time >= recent_threshold]
+		if recent:
+			self.common_thread_pool.submit(self._cache_recent_analyzed_news, recent)
+
+		latest = [i for i in final_items if i.analyzed_time or i.summary]
+		if latest:
+			self.common_thread_pool.submit(self._cache_latest_not_need_analysis_items, latest)
 
 	async def _analyze_with_retry(self, item: NewsItem) -> Optional[NewsItem]:
 		# 检查是否支持评论抓取，且评论字段确实有内容
@@ -342,79 +316,81 @@ class SentimentAnalyzeAppService:
 		self,
 	) -> dict[str, Any]:
 		"""获取最新一批未分析的新闻并执行分析。"""
-		latest_items = self.news_domain_service.get_news_list_by_latest_batch(
-			isAnalyzed=False,
-		)
-		if not latest_items:
-			logger.info("[Analyze_pending] 无可分析的数据")
-			return {"success": True, "item_count": 0}
-		
-		pending_items = self._filter_news_items_not_analyzed(latest_items)
-		if not pending_items:
-			logger.info("[Analyze_pending] 无可分析的数据")
-			return {"success": True, "item_count": 0}
+		try:
+			latest_items = self.news_domain_service.get_news_list_by_latest_batch(
+				isAnalyzed=False,
+			)
+			if not latest_items:
+				logger.info("[Analyze_pending] 无可分析的数据")
+				return {"success": True, "item_count": 0}
+			
+			pending_items = self._filter_news_items_not_analyzed(latest_items)
+			if not pending_items:
+				logger.info("[Analyze_pending] 无可分析的数据")
+				return {"success": True, "item_count": 0}
 
-		# 对于补救措施分析任务，不应更新热门数据的 Redis 缓存
-		saved = self.analyze_and_update_news_items(pending_items, should_cache=False)
-		analyzed_count = len(pending_items) if saved else 0
-		return {"success": True, "item_count": analyzed_count}
+			# 对于补救措施分析任务，不应更新热门数据的 Redis 缓存
+			saved = self.analyze_and_update_news_items(pending_items, should_cache=False)
+			analyzed_count = len(pending_items) if saved else 0
+			return {"success": True, "item_count": analyzed_count}
+		except Exception:
+			logger.exception("Error in analyze_pending_items_by_latest_time")
+			return {"success": False, "item_count": 0, "error": "Internal error"}
 
 	def get_latest_analyzed_news_batch_grouped(self) -> Dict[str, List[NewsItem]]:
-		"""获取最新一批已分析的新闻，按 source_id 分组。
-		
-		返回流程：
-		1. 优先尝试 Redis 缓存（30分钟内的最新分析数据 + 已无需分析的数据）
-		2. 缓存为空或被过滤后，查询数据库获取 TOP 500 最新已分析新闻
-		3. Domain 层进一步过滤确保数据完整性
-		"""
-		# 尝试从 Redis 缓存读取最新数据
-		cached_payload_map = self.redis.get_many(
-			[
-				REDIS_KEY_LATEST_NOT_NEED_ANALYSIS_NEWS,
-				REDIS_KEY_RECENT_30M_ANALYZED_NEWS,
-			]
-		)
-		if cached_payload_map:
-			cached_items: List[NewsItem] = []
-			for payload in cached_payload_map.values():
-				cached_items.extend(self._deserialize_news_items(payload))
-
-			if cached_items:
-				initial_count = len(cached_items)
-				cached_items = self._generate_latest_rank_board(cached_items)
-				dedup_count = len(cached_items)
-				
-				# 过滤及排序：保留所有至少有初步分析结果的项（含 pending 重分析的）
-				# 如果某平台在缓存中完全没有已分析数据，则保留所有。
-				# is_item_analysis_pending 为 True 表示“建议重分析”，但通常已有 summary
-				cached_items = [
-					item
-					for item in cached_items
-					if item.analyzed_time or item.summary  # 只要有过分析结果就返回
+		"""获取最新一批已分析的新闻，按 source_id 分组。"""
+		try:
+			# 尝试从 Redis 缓存读取最新数据
+			cached_payload_map = self.redis.get_many(
+				[
+					REDIS_KEY_LATEST_NOT_NEED_ANALYSIS_NEWS,
+					REDIS_KEY_RECENT_30M_ANALYZED_NEWS,
 				]
-				after_filter = len(cached_items)
-				
-				logger.debug(
-					"Redis cache: initial=%d items, dedup=%d items, after analysis check=%d items",
-					initial_count, dedup_count, after_filter
-				)
-				
-				if cached_items:
-					logger.info("Returning %d latest analyzed items from Redis cache", len(cached_items))
-					return self.news_domain_service.group_news_items_by_platform(cached_items)
-				else:
-					logger.warning("Redis cache exists but filtered to empty; falling back to DB query")
+			)
+			if cached_payload_map:
+				cached_items: List[NewsItem] = []
+				for payload in cached_payload_map.values():
+					cached_items.extend(self._deserialize_news_items(payload))
 
-		# 后备：查询数据库获取最新已分析的新闻
-		logger.info("Querying database for latest analyzed news")
-		grouped = self.news_domain_service.get_latest_analyzed_news_batch_grouped_by_source()
-		if not grouped:
+				if cached_items:
+					initial_count = len(cached_items)
+					cached_items = self._generate_latest_rank_board(cached_items)
+					dedup_count = len(cached_items)
+					
+					# 过滤及排序：保留所有至少有初步分析结果的项（含 pending 重分析的）
+					# 如果某平台在缓存中完全没有已分析数据，则保留所有。
+					# is_item_analysis_pending 为 True 表示“建议重分析”，但通常已有 summary
+					cached_items = [
+						item
+						for item in cached_items
+						if item.analyzed_time or item.summary  # 只要有过分析结果就返回
+					]
+					after_filter = len(cached_items)
+					
+					logger.debug(
+						"Redis cache: initial=%d items, dedup=%d items, after analysis check=%d items",
+						initial_count, dedup_count, after_filter
+					)
+					
+					if cached_items:
+						logger.info("Returning %d latest analyzed items from Redis cache", len(cached_items))
+						return self.news_domain_service.group_news_items_by_platform(cached_items)
+					else:
+						logger.warning("Redis cache exists but filtered to empty; falling back to DB query")
+
+			# 后备：查询数据库获取最新已分析的新闻
+			logger.info("Querying database for latest analyzed news")
+			grouped = self.news_domain_service.get_latest_analyzed_news_batch_grouped_by_source()
+			if not grouped:
+				return {}
+
+			# 再次去重，确保每个平台 (source_id + title) 唯一且是最新 (last_time DESC)
+			for source_id, items in grouped.items():
+				grouped[source_id] = self._generate_latest_rank_board(items)
+
+			return grouped
+		except Exception:
+			logger.exception("Error in get_latest_analyzed_news_batch_grouped")
 			return {}
 
-		# 再次去重，确保每个平台 (source_id + title) 唯一且是最新 (last_time DESC)
-		for source_id, items in grouped.items():
-			grouped[source_id] = self._generate_latest_rank_board(items)
-
-		return grouped
-	
 	

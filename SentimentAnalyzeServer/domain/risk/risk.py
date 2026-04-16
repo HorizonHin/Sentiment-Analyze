@@ -92,7 +92,7 @@ class RiskWarningDomainService:
         config = risk_config or {}
 
         self.negative_ratio_threshold = self._to_float(config.get("negative_ratio_threshold"), 0.60)
-        self.negative_news_count_threshold = self._to_int(config.get("negative_news_count_threshold"), 20)
+        self.negative_news_count_threshold = self._to_int(config.get("negative_news_count_threshold"),4)
         self.burst_heat_change_threshold = self._to_float(config.get("burst_heat_change_threshold"), 60.0)
         self.cross_platform_gap_threshold = self._to_float(config.get("cross_platform_gap_threshold"), 0.35)
         

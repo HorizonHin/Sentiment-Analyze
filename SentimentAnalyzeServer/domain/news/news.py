@@ -740,7 +740,6 @@ class NewsDomainService:
         self,
         start_time: int,
         end_time: int,
-        news_first_time: Optional[int] = None,
         top_n: int = 50,
     ) -> Tuple[List[NewsKeyword], List[Entity]]:
         """
@@ -751,7 +750,6 @@ class NewsDomainService:
         keyword_groups, entity_groups = self.recommend_hot_terms_by_time_range(
             start_time=start_time,
             end_time=end_time,
-            news_first_time=news_first_time,
             top_n=top_n,
         )
 
@@ -810,7 +808,6 @@ class NewsDomainService:
     def get_news_list_by_entity_names(
         self,
         names: List[str],
-        news_first_time: Optional[int] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
     ) -> List[NewsItem]:
@@ -1009,7 +1006,7 @@ class NewsDomainService:
         return target
 
     def add_news_items(self, data: NewsData) -> List[NewsItem]:
-        news_items = self.expand_news_data_to_items(data)
+        news_items = self._expand_news_data_to_items(data)
         key_list = list({(item.source_id, item.title) for item in news_items if item.source_id and item.title})
         if not key_list:
             return []
@@ -1030,7 +1027,7 @@ class NewsDomainService:
 
         return self.storage.add_news_items(news_list)
 
-    def expand_news_data_to_items(self, data: NewsData) -> List[NewsItem]:
+    def _expand_news_data_to_items(self, data: NewsData) -> List[NewsItem]:
         news_items: List[NewsItem] = []
         for news_list in data.items.values():
             news_items.extend(news_list)
@@ -1044,45 +1041,6 @@ class NewsDomainService:
             items[item.source_id].append(item)
         return items
 
-    def get_news_keywords_by_last_time_range(
-        self,
-        start_time: int,
-        end_time: int,
-    ) -> List[NewsKeyword]:
-        """根据起止时间获取关键词列表（直接查询关键词表）。"""
-        return self.storage.get_news_keywords_by_last_time_range(
-            start_time=start_time,
-            end_time=end_time,
-        )
-
-    def get_news_keywords_by_fuzzy_term(
-        self,
-        term_query: str,
-        start_time: int,
-        end_time: int,
-        news_first_time: Optional[int] = None,
-    ) -> List[NewsKeyword]:
-        """按 term 模糊匹配，且在时间范围内检索 NewsKeywords。"""
-        if not term_query:
-            return []
-        
-        # 1. 先查时间范围内所有的候选词
-        all_news_keywords = self.get_news_keywords_by_last_time_range(
-            start_time=start_time,
-            end_time=end_time,
-        )
-        
-        # 2. 手动进行模糊过滤
-        q = term_query.strip().lower()
-        matched = []
-        for kw in all_news_keywords:
-            term = str(kw.term or "").strip().lower()
-            if not term:
-                continue
-            if q == term or q in term or term in q:
-                matched.append(kw)
-        return matched
-
     def get_entities_by_last_time_range(
         self,
         start_time: int,
@@ -1093,34 +1051,6 @@ class NewsDomainService:
             start_time=start_time,
             end_time=end_time,
         )
-
-    def get_entities_by_fuzzy_name(
-        self,
-        name_query: str,
-        start_time: int,
-        end_time: int,
-        news_first_time: Optional[int] = None,
-    ) -> List[Entity]:
-        """按 name 模糊匹配，且在时间范围内检索 Entities。"""
-        if not name_query:
-            return []
-            
-        # 1. 先查时间范围内所有的候选实体
-        all_entities = self.get_entities_by_last_time_range(
-            start_time=start_time,
-            end_time=end_time,
-        )
-        
-        # 2. 手动进行模糊过滤
-        q = name_query.strip().lower()
-        matched = []
-        for en in all_entities:
-            name = str(en.name or "").strip().lower()
-            if not name:
-                continue
-            if q == name or q in name or name in q:
-                matched.append(en)
-        return matched
 
     def get_news_list_by_news_keywords(
         self,
