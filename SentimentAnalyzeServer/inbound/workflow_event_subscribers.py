@@ -103,8 +103,19 @@ class WorkflowEventSubscribers:
 
     def _on_topic_risk_warning_detected(self, payload: Dict[str, Any]) -> None:
         try:
-            topics_from_event = payload.get("topics", [])
-            event_topics: List[Topic] = [item for item in topics_from_event if isinstance(item, Topic)]
+            raw_topics = payload.get("topics", [])
+            event_topics: List[Topic] = []
+            
+            if isinstance(raw_topics, list):
+                for item in raw_topics:
+                    if isinstance(item, Topic):
+                        event_topics.append(item)
+                    elif isinstance(item, dict):
+                        try:
+                            event_topics.append(Topic.from_dict(item))
+                        except Exception:
+                            logger.warning("Failed to deserialize topic from dict in event payload")
+
             occurred_at = int(payload.get("end_time") or int(time.time()))
             inserted_count = self.risk_warning_domain_service.evaluate_and_record_topic_risks(
                 topics=event_topics,

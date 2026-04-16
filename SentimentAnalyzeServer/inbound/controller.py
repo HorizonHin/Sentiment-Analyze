@@ -75,7 +75,6 @@ def create_external_controller(
 		try:
 			start_time = parse_int_timestamp(request.args.get("start_time"))
 			end_time = parse_int_timestamp(request.args.get("end_time"))
-			news_first_time = parse_int_timestamp(request.args.get("news_first_time"))
 			top_n_raw = request.args.get("top_n")
 			try:
 				top_n = max(1, int(top_n_raw)) if top_n_raw is not None else 100
@@ -90,7 +89,6 @@ def create_external_controller(
 			kw_groups, entity_groups = news_domain_service.recommend_hot_terms_by_time_range(
 				start_time=start_time,
 				end_time=end_time,
-				news_first_time=news_first_time,
 				top_n=top_n,
 			)
 			# 返回格式：{"keywords": {...}, "entities": {...}}

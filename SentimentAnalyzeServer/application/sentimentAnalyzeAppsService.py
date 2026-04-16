@@ -185,7 +185,12 @@ class SentimentAnalyzeAppService:
 
 				# 3. 执行异步桥接
 				try:
-					loop = asyncio.get_event_loop()
+					try:
+						loop = asyncio.get_event_loop()
+					except RuntimeError:
+						loop = asyncio.new_event_loop()
+						asyncio.set_event_loop(loop)
+
 					if loop.is_running():
 						import nest_asyncio
 						nest_asyncio.apply()

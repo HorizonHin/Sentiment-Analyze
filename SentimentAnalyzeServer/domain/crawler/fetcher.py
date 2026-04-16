@@ -695,10 +695,14 @@ class DataFetcher:
                     payload_text = await response.text()
                     if payload_text.strip():
                         data = json.loads(payload_text)
-                        for comment in data.get("comments", []):
-                            text = comment.get("text", "")
-                            if text:
-                                self._append_comment(comments, text)
+                        raw_comments = data.get("comments")
+                        if isinstance(raw_comments, list):
+                            for comment in raw_comments:
+                                if isinstance(comment, dict):
+                                    text = comment.get("text", "")
+                                    if text:
+                                        self._append_comment(comments, text)
+                        
                         if comments and not found_valid_data.done():
                             found_valid_data.set_result(True)  # 一旦找到评论，立即通知主流程继续
                 except Exception as e:
